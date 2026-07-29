@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plasgenomicsutils"
+version = "0.1.0"
+description = "A collection of utilities for post processing Plasmodium genomics data (VCF filtering/harmonization, IBD post-analysis, Fws)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Nicholas Hathaway" }]
+keywords = ["plasmodium", "malaria", "genomics", "IBD", "VCF", "Fws", "bioinformatics"]
+
+# Pure-python compute deps. bcftools / bedtools are external CLIs (not pip deps);
+# they must be on PATH for the vcf/ filtering commands.
+dependencies = [
+    "numpy>=1.23",
+    "pandas>=1.5",
+    "scipy>=1.9",
+    "pysam>=0.21",
+    "cyvcf2>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/nickjhathaway/plasgenomicsutils"
+Repository = "https://github.com/nickjhathaway/plasgenomicsutils"
+
+# Single runner entrypoint (pmotools-python style): one CLI, compartmentalized subcommands.
+[project.scripts]
+plasgenomicsutils = "plasgenomicsutils.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/plasgenomicsutils"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
