@@ -25,6 +25,9 @@ from .scripts.ibd.analyze_matrix import analyze_matrix
 from .scripts.ibd.selection_statistic import selection_statistic
 from .scripts.ibd.fraction_and_snp_density import fraction_and_snp_density
 
+# -- Fws leaves ---------------------------------------------------------------
+from .scripts.fws.calculate_fws import calculate_fws
+
 # -- VCF leaves ---------------------------------------------------------------
 from .scripts.vcf.filter_ad_regenotype import filter_ad_regenotype
 from .scripts.vcf.harmonize_bcf import harmonize_bcf
@@ -50,6 +53,10 @@ class Command:
 
 # group -> command_name -> Command.  Command names must be globally unique.
 REGISTRY: Dict[str, Dict[str, Command]] = {
+    "fws": {
+        "calculate_fws": Command(calculate_fws,
+            "Per-sample Fws within-host diversity (moimix::getFws) from a VCF or AD table"),
+    },
     "ibd": {
         "build_ibd_matrix": Command(build_matrix,
             "Build binary (pairs x SNPs) IBD matrix from hmmibd-rs blocks"),

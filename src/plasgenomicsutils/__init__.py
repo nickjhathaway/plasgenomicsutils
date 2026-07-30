@@ -6,7 +6,7 @@ Functional areas (CLI "compartments"):
   * ibd  — identity-by-descent post-analysis from hmmibd-rs blocks: binary IBD
            matrices, per-pair/per-SNP summaries, allele frequencies, and an
            EIGENSTRAT-style IBD selection statistic.
-  * fws  — (planned) within-host diversity / Fws.
+  * fws  — within-host diversity / Fws (moimix::getFws), from a VCF or AD table.
 
 The heavy compute lives here in Python; visualization lives in the companion R
 package ``plasgenomicsutilsR``.
