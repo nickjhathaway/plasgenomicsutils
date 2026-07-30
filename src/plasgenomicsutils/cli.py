@@ -38,6 +38,8 @@ from .scripts.vcf.sample_coverage_filter import sample_coverage_filter
 from .scripts.vcf.locus_missingness_filter import locus_missingness_filter
 from .scripts.vcf.maf_filter import maf_filter
 from .scripts.vcf.filter_pipeline import filter_pipeline
+from .scripts.vcf.strand_bias_scan import strand_bias_scan
+from .scripts.vcf.strand_read_check import strand_read_check
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,10 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Keep variants within a minor-allele-frequency window"),
         "filter_pipeline": Command(filter_pipeline,
             "Run an ordered, config-driven chain of filtering steps, tallying counts"),
+        "strand_bias_scan": Command(strand_bias_scan,
+            "Flag strand-bias (SSE) fake-het artifacts from FORMAT/ADF+ADR; emit a blacklist BED"),
+        "strand_read_check": Command(strand_read_check,
+            "Read-level strand-bias diagnostic at one site (+ optional ALT-read extraction)"),
     },
 }
 

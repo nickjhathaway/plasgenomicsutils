@@ -163,6 +163,43 @@ e.g. `PL` — are stripped from the output, since a stale `PL` would otherwise m
 `bcftools merge` fail with a FORMAT length mismatch. `AD`, `GT` and scalar fields
 are preserved.
 
+### Strand-bias artifact diagnostics
+
+Illumina sequence-specific errors (SSE) at GC islands, G-homopolymers, and GGC
+motifs produce **fake heterozygous calls** whose ALT reads sit almost entirely on
+one strand, at low base quality. In copy-number-from-VAF work they land near the
+0.25/0.33 fractions a real 3–4 copy locus shows, so they mimic the signal they
+corrupt. A real het is strand-balanced; an artifact is strand-restricted.
+
+Batch-scan a biallelic callset that carries per-strand depths for these artifacts,
+writing a per-`(site, sample)` verdict table and a blacklist BED of confirmed
+positions (feed that BED to `tandem_repeat_mask --bed` to drop them):
+
+```bash
+bcftools mpileup -a FORMAT/ADF,FORMAT/ADR -f ref.fa -b bams.txt -Ou \
+  | bcftools norm -m- -f ref.fa -Ob -o strand.bcf                      # ADF/ADR, biallelic
+plasgenomicsutils strand_bias_scan --input-vcf strand.bcf \
+  --out-tsv verdicts.tsv --out-bed sse_blacklist.bed
+```
+
+The verdict drops a call when the alt is strand-restricted (minor/major strand-VAF
+ratio `< --ratio-hard`, *and* the minor strand had the depth to detect it, so
+genuinely shallow strands are protected) or the Fisher strand-bias Phred exceeds
+`--sb-hard`. Because SSE is position-reproducible, a position is blacklisted once
+`--min-drop-samples` samples flag it.
+
+To characterize one suspicious site at read level (strand, base quality, true
+sequencing cycle, soft-clip/chimera geometry, priming-start spike) and optionally
+dump the ALT reads for a sequence viewer:
+
+```bash
+plasgenomicsutils strand_read_check --bam sample.bam --pos Pf3D7_12_v3:975431 \
+  --ref ref.fa --alt-base A --extract-reads
+```
+
+The theory, detection signature, and exclusion rules are in
+[docs/strand_bias_artifact_exclusion.md](docs/strand_bias_artifact_exclusion.md).
+
 ## Development
 
 ```bash
