@@ -1,0 +1,45 @@
+#!/usr/bin/env python
+"""Clean within-sample AD artifacts by depth/frequency, then re-genotype."""
+
+from __future__ import annotations
+
+import argparse
+
+from ...lib.regenotype import filter_ad_regenotype as _run
+
+
+def get_parser_filter_ad_regenotype() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="plasgenomicsutils filter_ad_regenotype",
+        description="Filter AD by read depth and within-sample frequency, then re-genotype.",
+    )
+    p.add_argument("--input-vcf", required=True, help="Input VCF/BCF (may be gzipped)")
+    p.add_argument("--output-vcf", required=True, help="Output VCF/BCF")
+    p.add_argument("--min-reads", type=int, default=2,
+                   help="Zero AD alleles with < this many reads (default: 2)")
+    p.add_argument("--min-freq", type=float, default=0.01,
+                   help="Zero AD alleles with within-sample freq (AD/ADS) < this (default: 0.01)")
+    p.add_argument("--het-min-af", type=float, default=0.2,
+                   help="Minimum minor-allele frequency to call a heterozygote (default: 0.2)")
+    p.add_argument("--restrict-to-called-alleles", action="store_true",
+                   help="Only narrow each sample's existing genotype instead of re-deriving "
+                        "it from AD. A call can lose support and go missing but never gain a "
+                        "new allele, preserving the upstream caller's genotypes where they "
+                        "disagree with raw read counts.")
+    return p
+
+
+def parse_args_filter_ad_regenotype():
+    return get_parser_filter_ad_regenotype().parse_args()
+
+
+def filter_ad_regenotype():
+    args = parse_args_filter_ad_regenotype()
+    _run(args.input_vcf, args.output_vcf,
+         min_reads=args.min_reads, min_freq=args.min_freq, het_min_af=args.het_min_af,
+         restrict_to_called=args.restrict_to_called_alleles)
+    print("Done.")
+
+
+if __name__ == "__main__":
+    filter_ad_regenotype()

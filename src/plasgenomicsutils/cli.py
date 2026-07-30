@@ -25,6 +25,20 @@ from .scripts.ibd.analyze_matrix import analyze_matrix
 from .scripts.ibd.selection_statistic import selection_statistic
 from .scripts.ibd.fraction_and_snp_density import fraction_and_snp_density
 
+# -- VCF leaves ---------------------------------------------------------------
+from .scripts.vcf.filter_ad_regenotype import filter_ad_regenotype
+from .scripts.vcf.harmonize_bcf import harmonize_bcf
+from .scripts.vcf.hard_qc_filter import hard_qc_filter
+from .scripts.vcf.singleton_filter_add_ads import singleton_filter_add_ads
+from .scripts.vcf.biallelic_snp_filter import biallelic_snp_filter
+from .scripts.vcf.tandem_repeat_mask import tandem_repeat_mask
+from .scripts.vcf.core_region_filter import core_region_filter
+from .scripts.vcf.paralog_mask import paralog_mask
+from .scripts.vcf.sample_coverage_filter import sample_coverage_filter
+from .scripts.vcf.locus_missingness_filter import locus_missingness_filter
+from .scripts.vcf.maf_filter import maf_filter
+from .scripts.vcf.filter_pipeline import filter_pipeline
+
 
 @dataclass(frozen=True)
 class Command:
@@ -46,7 +60,32 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
         "ibd_fraction_and_snp_density": Command(fraction_and_snp_density,
             "Per-pair IBD fraction (callable denominator) and SNP density"),
     },
-    # "vcf": { ... }
+    "vcf": {
+        "filter_ad_regenotype": Command(filter_ad_regenotype,
+            "Clean within-sample AD artifacts by depth/frequency, then re-genotype"),
+        "harmonize_bcf": Command(harmonize_bcf,
+            "Harmonize ALT sets of separately-called cohorts for bcftools merge"),
+        "hard_qc_filter": Command(hard_qc_filter,
+            "GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS"),
+        "singleton_filter_add_ads": Command(singleton_filter_add_ads,
+            "Drop near-private variants and add the FORMAT/ADS summed-depth tag"),
+        "biallelic_snp_filter": Command(biallelic_snp_filter,
+            "Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping"),
+        "tandem_repeat_mask": Command(tandem_repeat_mask,
+            "Remove variants overlapping a tandem-repeat BED"),
+        "core_region_filter": Command(core_region_filter,
+            "Keep only variants inside the core-genome BED"),
+        "paralog_mask": Command(paralog_mask,
+            "Remove variants overlapping paralogous/multigene-family genes"),
+        "sample_coverage_filter": Command(sample_coverage_filter,
+            "Drop low-coverage samples; refresh AC/AN/AF"),
+        "locus_missingness_filter": Command(locus_missingness_filter,
+            "Keep loci with low missingness and high per-sample coverage"),
+        "maf_filter": Command(maf_filter,
+            "Keep variants within a minor-allele-frequency window"),
+        "filter_pipeline": Command(filter_pipeline,
+            "Run an ordered, config-driven chain of filtering steps, tallying counts"),
+    },
 }
 
 
