@@ -1,0 +1,23 @@
+# Dedicated conda/mamba environment for plasgenomicsutils: run, test, and benchmark.
+#   mamba env create -f environment.yml     (or: conda env create -f environment.yml)
+#   mamba activate plasgenomicsutils
+#   pip install -e .        # editable install of this package
+name: plasgenomicsutils
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python >=3.10
+  # --- compute / IO (pip deps, pinned here so conda resolves htslib for pysam/cyvcf2) ---
+  - numpy >=1.23
+  - pandas >=1.5
+  - scipy >=1.9
+  - pysam >=0.21          # record mutation (harmonize) + general VCF/BCF IO
+  - cyvcf2 >=0.30         # bulk FORMAT-array read/write (fast filter_ad_regenotype)
+  # --- external CLIs the vcf/ filtering commands shell out to ---
+  - bcftools >=1.18
+  - bedtools >=2.30
+  - htslib >=1.18
+  # --- test / dev ---
+  - pytest >=7.0
+  - pip

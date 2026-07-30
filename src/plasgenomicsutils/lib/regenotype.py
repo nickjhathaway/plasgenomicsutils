@@ -1,17 +1,24 @@
-"""Within-sample AD cleaning + re-genotyping over a whole VCF/BCF (streaming).
+"""Within-sample AD cleaning + re-genotyping over a whole VCF/BCF.
 
 A site's ``DP`` can look deep while the depth actually used to genotype (``AD`` /
 its sum ``ADS``) is tiny — such sites are almost always repetitive/artifact
 regions. This judges depth by AD, zeros sub-threshold allele depths per sample,
 recomputes ADS, and re-genotypes conservatively from the cleaned counts so a
 little genotyping error does not force discarding otherwise-good biallelic SNPs.
+
+Uses cyvcf2 for bulk per-record FORMAT-array access (read AD/ADS and write
+AD/ADS/GT as whole (n_samples x n_alleles) arrays), which is far faster than
+per-sample access on large cohorts. The re-genotyping matches
+:func:`plasgenomicsutils.lib.ad_genotype.regenotype_from_ad` exactly.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from .ad_genotype import clean_ad_matrix, regenotype_from_ad
+from .ad_genotype import clean_ad_matrix, regenotype_from_ad, regenotype_matrix
+
+_MISS = np.iinfo(np.int32).min  # cyvcf2 sentinel for a missing integer FORMAT value
 
 
 def filter_ad_regenotype(input_vcf: str, output_vcf: str, *, min_reads: int = 2,
@@ -20,63 +27,51 @@ def filter_ad_regenotype(input_vcf: str, output_vcf: str, *, min_reads: int = 2,
     """Clean AD and re-genotype every record; records lacking AD/ADS pass through.
 
     The frequency denominator is the ``ADS`` FORMAT field (summed genotyping
-    depth). ADS is recomputed from the cleaned AD before writing.
+    depth). ADS is recomputed from the cleaned AD before writing. A record is
+    passed through unchanged if it lacks AD or ADS, or any sample's AD/ADS is
+    missing.
 
     ``restrict_to_called`` limits each sample's genotype to the alleles the
     upstream caller already used, so calls are only narrowed, never promoted to a
     new allele. Use it when the caller's likelihood-based genotypes should be
     trusted over raw read counts.
     """
-    import pysam
+    from cyvcf2 import VCF, Writer
 
-    vcf = pysam.VariantFile(input_vcf)
-    out = pysam.VariantFile(output_vcf, _write_mode(output_vcf), header=vcf.header)
-
-    snames = list(vcf.header.samples)
-    for rec in vcf:
-        n_alleles = len(rec.alleles)
-        ad_rows, ads_vals, ok = _gather(rec, snames, n_alleles)
-        if not ok:
-            out.write(rec)
+    vcf = VCF(input_vcf)
+    out = Writer(output_vcf, vcf)
+    for v in vcf:
+        ad = v.format("AD")
+        ads = v.format("ADS")
+        if ad is None or ads is None:
+            out.write_record(v)
+            continue
+        ad = ad.astype(np.int64)
+        depth = ads[:, 0].astype(np.int64)
+        if (ad < 0).any() or (depth < 0).any():  # any missing AD/ADS -> pass through
+            out.write_record(v)
             continue
 
-        cleaned = clean_ad_matrix(ad_rows, ads_vals, min_reads, min_freq, protect_ref=False)
-        new_ads = cleaned.sum(axis=1).astype(int)
+        cleaned = clean_ad_matrix(ad.astype(float), depth.astype(float),
+                                  min_reads, min_freq, protect_ref=False)
+        new_ads = cleaned.sum(axis=1).astype(np.int32)
+        gts = v.genotypes  # list of [a1, a2, ..., phased]
 
-        for i, sname in enumerate(snames):
-            sample = rec.samples[sname]
-            row = [int(x) for x in cleaned[i]]
-            called = tuple(sample["GT"]) if restrict_to_called else None
-            sample["AD"] = tuple(row)
-            sample["ADS"] = int(new_ads[i])
-            phased = bool(sample.phased)
-            gt = regenotype_from_ad(row, het_min_af, called_alleles=called)
-            sample["GT"] = (None, None) if gt is None else gt
-            sample.phased = phased
-        out.write(rec)
+        if restrict_to_called:
+            for i in range(len(gts)):
+                called = tuple(gts[i][:-1])
+                g = regenotype_from_ad([int(x) for x in cleaned[i]], het_min_af,
+                                       called_alleles=called)
+                gts[i] = [-1, -1, gts[i][-1]] if g is None else [g[0], g[1], gts[i][-1]]
+        else:
+            gt_a, gt_b = regenotype_matrix(cleaned, het_min_af)
+            for i in range(len(gts)):
+                gts[i] = [int(gt_a[i]), int(gt_b[i]), gts[i][-1]]
+
+        v.set_format("AD", cleaned.astype(np.int32))
+        v.set_format("ADS", new_ads)
+        v.genotypes = gts
+        out.write_record(v)
 
     out.close()
     vcf.close()
-
-
-def _gather(rec, snames, n_alleles):
-    """Collect per-sample AD (n_samples x n_alleles) and ADS depth denominators."""
-    ad_rows = np.zeros((len(snames), n_alleles), dtype=float)
-    ads_vals = np.zeros(len(snames), dtype=float)
-    for i, sname in enumerate(snames):
-        sample = rec.samples[sname]
-        ad = sample.get("AD", None)
-        ads = sample.get("ADS", None)
-        if ad is None or ads is None or any(v is None for v in ad) or len(ad) != n_alleles:
-            return None, None, False
-        ad_rows[i, :] = ad
-        ads_vals[i] = ads[0] if isinstance(ads, (tuple, list)) else ads
-    return ad_rows, ads_vals, True
-
-
-def _write_mode(path: str) -> str:
-    if path.endswith(".bcf"):
-        return "wb"
-    if path.endswith(".vcf.gz"):
-        return "wz"
-    return "w"

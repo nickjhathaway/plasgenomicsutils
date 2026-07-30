@@ -17,6 +17,8 @@ must be coordinate-sorted.
 
 from __future__ import annotations
 
+import numpy as np
+
 from .ad_genotype import regenotype_from_ad
 
 
@@ -123,6 +125,39 @@ def n_real_alts(rec) -> int:
     return sum(1 for a in rec.alleles[1:] if a != ".")
 
 
+def surviving_alleles(rec, min_ad: int, min_af: float):
+    """(ref, set-of-surviving-ALTs) after AD cleaning, without mutating ``rec``.
+
+    Pass 1 (union building) only needs which ALTs still have support once
+    sub-threshold per-sample depths are zeroed — not the re-genotyped record. This
+    computes that with one vectorized numpy pass and no genotype work, returning
+    exactly the ALT set :func:`clean_record` would leave on the record.
+    """
+    alleles = list(rec.alleles)
+    n = len(alleles)
+    if n < 2 or (n == 2 and alleles[1] == "."):
+        return alleles[0], set()
+
+    rows = []
+    for sname in rec.samples:
+        ad = rec.samples[sname].get("AD", None)
+        if ad is None or len(ad) != n or any(v is None for v in ad):
+            continue
+        rows.append(ad)
+    if not rows:
+        return alleles[0], set()
+
+    A = np.asarray(rows, dtype=float)              # (m_valid, n_alleles)
+    depth = A.sum(axis=1, keepdims=True)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        af = A / depth
+    fail = (A < min_ad) | (af < min_af)            # per-sample sub-threshold ALTs
+    fail[:, 0] = False                             # REF is never zeroed
+    col_tot = np.where(fail, 0.0, A).sum(axis=0)
+    surviving = {alleles[i] for i in range(1, n) if col_tot[i] > 0}
+    return alleles[0], surviving
+
+
 def stale_format_fields(fpath: str) -> list[str]:
     """FORMAT fields invalidated when a record's alleles are reshaped.
 
@@ -189,36 +224,32 @@ def accumulate_union(files: list[str], min_ad: int, min_af: float, het_min_af: f
     alts_of: dict = {}
     dup_positions: set = set()
     ambiguous: set = set()
+    import pysam
+
     for fpath in files:
         per_file: dict = {}  # key -> (ref, {alts}, n_real)
-        for rec in _clean_stream(fpath, min_ad, min_af, het_min_af, drop_indels):
-            key = (rec.chrom, rec.pos)
-            real = {a for a in rec.alleles[1:] if a != "."}
-            cand = (rec.alleles[0], real, len(real))
-            if key in per_file:
-                dup_positions.add((fpath, rec.chrom, rec.pos))
-                if per_file[key][2] >= 1 and cand[2] >= 1:
-                    ambiguous.add((fpath, rec.chrom, rec.pos))
-                if _prefer(cand[2], per_file[key][2]):
+        with pysam.VariantFile(fpath) as vcf:
+            for rec in vcf:
+                if drop_indels and is_indel_context(rec):
+                    continue
+                # Pass 1 only needs the surviving-ALT set, so skip re-genotyping.
+                ref, real = surviving_alleles(rec, min_ad, min_af)
+                key = (rec.chrom, rec.pos)
+                cand = (ref, real, len(real))
+                if key in per_file:
+                    dup_positions.add((fpath, rec.chrom, rec.pos))
+                    if per_file[key][2] >= 1 and cand[2] >= 1:
+                        ambiguous.add((fpath, rec.chrom, rec.pos))
+                    if _prefer(cand[2], per_file[key][2]):
+                        per_file[key] = cand
+                else:
                     per_file[key] = cand
-            else:
-                per_file[key] = cand
         for key, (ref, alts, _n) in per_file.items():
             ref_of.setdefault(key, ref)
             alts_of.setdefault(key, set()).update(alts)
 
     union = {k: [ref_of[k]] + sorted(alts) for k, alts in alts_of.items() if alts}
     return union, dup_positions, ambiguous
-
-
-def _clean_stream(fpath, min_ad, min_af, het_min_af, drop_indels=True):
-    import pysam
-    with pysam.VariantFile(fpath) as vcf:
-        for rec in vcf:
-            if drop_indels and is_indel_context(rec):
-                continue
-            clean_record(rec, min_ad, min_af, het_min_af)
-            yield rec
 
 
 def harmonize_record_to_union(rec, union_alleles, het_min_af, out) -> None:

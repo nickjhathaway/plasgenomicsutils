@@ -92,6 +92,22 @@ plasgenomicsutils filter_pipeline --emit-default-config pipeline.json   # write 
 plasgenomicsutils filter_pipeline --input in.bcf --config pipeline.json --outdir filtered/
 ```
 
+**Step order depends on your input.** The chain is config-driven, so you pick the
+order; two regimes are common:
+
+- *Already-biallelic input* (e.g. a core-SNP callset): the default order works as
+  shipped — `singleton_filter_add_ads` can run early because every site is
+  biallelic.
+- *Raw, multiallelic input* (e.g. a fresh joint callset): put `biallelic_snp_filter`
+  **before** `singleton_filter_add_ads`. The latter's `FORMAT/ADS` is a per-sample
+  sum over all AD entries, but the singleton test and downstream MAF assume
+  biallelic sites, so reduce to biallelic SNPs first.
+
+MAF filtering is per-population — run the pipeline once per cohort/country, not on
+a pooled multi-population VCF. Region masks default to bundled Pf3D7 BEDs
+(`builtin:pf3d7_core_regions` / `_paralog_genes` / `_tandem_repeats`); pass a path
+to `--bed` (or the config `params.bed`) to use your own.
+
 `filter_ad_regenotype` and `harmonize_bcf` re-genotype haploid calls
 conservatively: alleles are ranked by depth and a heterozygote is called only
 when the minor allele's within-sample frequency is ≥ `--het-min-af` (default

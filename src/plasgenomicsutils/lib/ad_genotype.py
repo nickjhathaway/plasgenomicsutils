@@ -65,6 +65,39 @@ def regenotype_from_ad(ad_counts, het_min_af: float = 0.2, called_alleles=None):
     return (a, b)
 
 
+def regenotype_matrix(ad, het_min_af: float = 0.2):
+    """Vectorized :func:`regenotype_from_ad` over a cleaned (n_samples, n_alleles) AD matrix.
+
+    Returns ``(gt_a, gt_b)`` int arrays of allele indices, with ``-1, -1`` for
+    samples with no supporting reads. Reproduces the scalar rule exactly, including
+    its tie-breaking (rank by depth; ties by ascending allele index via a stable
+    sort). Only the default path — pass ``called_alleles`` sample-by-sample to
+    :func:`regenotype_from_ad` for the restrict-to-called-alleles behavior.
+    """
+    ad = np.asarray(ad, dtype=float)
+    m, k = ad.shape
+    total = ad.sum(axis=1)
+    order = np.argsort(-ad, axis=1, kind="stable")  # ties -> ascending index
+    rows = np.arange(m)
+    top = order[:, 0]
+    if k >= 2:
+        second = order[:, 1]
+        second_count = ad[rows, second]
+    else:
+        second = top.copy()
+        second_count = np.zeros(m)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        minor_af = np.where(total > 0, second_count / total, 0.0)
+    only_one = (k < 2) | (second_count == 0)
+    het = (~only_one) & (minor_af >= het_min_af)
+    gt_a = np.where(het, np.minimum(top, second), top)
+    gt_b = np.where(het, np.maximum(top, second), top)
+    missing = total == 0
+    gt_a = np.where(missing, -1, gt_a)
+    gt_b = np.where(missing, -1, gt_b)
+    return gt_a.astype(int), gt_b.astype(int)
+
+
 def clean_ad_matrix(ad, depth, min_reads: int, min_freq: float,
                     protect_ref: bool = False):
     """Zero out per-sample allele depths that fall below the thresholds.

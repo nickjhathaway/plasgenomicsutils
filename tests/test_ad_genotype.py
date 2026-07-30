@@ -2,7 +2,22 @@
 
 import numpy as np
 
-from plasgenomicsutils.lib.ad_genotype import clean_ad_matrix, regenotype_from_ad
+from plasgenomicsutils.lib.ad_genotype import (
+    clean_ad_matrix, regenotype_from_ad, regenotype_matrix,
+)
+
+
+def test_regenotype_matrix_matches_scalar():
+    # the vectorized re-genotyper must reproduce the scalar one exactly, incl. tie-breaking
+    rng = np.random.default_rng(0)
+    for k in (2, 3, 4):
+        ad = rng.integers(0, 40, size=(5000, k)).astype(float)
+        ad[rng.random((5000, k)) < 0.3] = 0
+        ga, gb = regenotype_matrix(ad, 0.2)
+        for i in range(ad.shape[0]):
+            want = regenotype_from_ad(list(ad[i]), 0.2)
+            got = None if ga[i] == -1 else (int(ga[i]), int(gb[i]))
+            assert want == got, f"k={k} ad={list(ad[i])} want={want} got={got}"
 
 
 def test_regenotype_missing_and_hom():
