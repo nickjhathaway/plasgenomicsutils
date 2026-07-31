@@ -25,7 +25,7 @@ def get_parser_calculate_fws() -> argparse.ArgumentParser:
     p.add_argument("--samples", help="For --ad-table: comma-separated sample ids in column "
                                      "order, or a file with one per line")
     p.add_argument("--estimator", choices=["regression", "ratio"], default="regression",
-                   help="regression = moimix::getFws (default); ratio = wgs_cnv_workflow legacy")
+                   help="regression = moimix::getFws (default); ratio = summed binned-mean ratio")
     p.add_argument("--min-depth", type=int, default=0,
                    help="Drop per-sample sites below this read depth (default: 0; CNV gate uses 10)")
     p.add_argument("--n-bins", type=int, default=10, help="Number of MAF bins (default: 10)")

@@ -191,8 +191,8 @@ at a time.
 
 ## 7. Worked example — the archetype to calibrate against
 
-**Position `Pf3D7_12_v3:975431` (ref `G`), sWGA/NextSeq Ugandan cohort.** Apparent `G>A` het at
-pooled VAF ~0.25–0.30. It is an artifact. Representative sample:
+**Position `Pf3D7_12_v3:975431` (ref `G`), a sWGA/NextSeq monoclonal *P. falciparum* library.**
+Apparent `G>A` het at pooled VAF ~0.25–0.30. It is an artifact. Representative profile:
 
 ```
 reads over site: 3716  (fwd 1465, rev 2251)
@@ -206,7 +206,7 @@ soft-clip 0%, SA-tag 0% (not a chimera)
 
 - `strand_minor/strand_major = 0.001/0.454 ≈ 0.002` → far below 0.15, minor-strand depth ~1463
   (ample) → **drop**.
-- Consistent across samples (also seen at ~32% and ~42% rev VAF in two others), and G>C / G>T
+- Reproducible across libraries covering the locus in the same orientation, and G>C / G>T
   appear reverse-only at lower rates too — confirming garbage basecalling, not a real allele.
 
 **Reference context (why this position):** a GC island in an AT-rich background —

@@ -24,8 +24,7 @@ splits (trim each to its own ALTs → divergent ALT sets) drive the harmonize te
 **Rebuild recipe:** `<homebase>/testdata_work/build_pf7_fixture.sh`
 (`N_PER_COUNTRY`/`VAR_STRIDE` overridable; reads the full Ghana/Cambodia BCF; not committed).
 
-## sWGA / IMMRSE Uganda data
+## Unpublished data
 
-The IMMRSE Uganda sWGA callsets are **unpublished and must not be committed**. Use them
-for local-only testing (they carry the sWGA-specific artifacts worth checking); paths are
-recorded in the homebase `PROGRESS.md`.
+Any unpublished callsets used for local-only testing **must never be committed** — only
+the public fixtures above belong in this directory.

@@ -9,9 +9,9 @@ from plasgenomicsutils.lib.strandbias import (
 )
 
 
-def test_verdict_flags_the_worked_example():
-    # Pf3D7_12_v3:975431 archetype: ~45% alt on reverse, ~0% on forward -> drop.
-    v = strand_bias_verdict(ref_fwd=1463, alt_fwd=2, ref_rev=1230, alt_rev=1021)
+def test_verdict_flags_a_strand_restricted_artifact():
+    # archetype: ~45% alt on reverse, ~0% on forward, deep on both strands -> drop
+    v = strand_bias_verdict(ref_fwd=1500, alt_fwd=2, ref_rev=1200, alt_rev=1000)
     assert v["drop"] is True
     assert v["ratio"] < 0.15
     assert v["sb_phred"] > 60

@@ -14,21 +14,18 @@ depths (AD) at biallelic SNP sites:
 
 Two estimators combine those binned means into Fws — see :func:`compute_fws`:
 
-  * ``"regression"`` (default, **moimix-faithful**): Fws = 1 - β, where β is the
-    slope of a regression of the binned sample-het means on the binned
-    population-het means, forced through the origin. This reproduces
-    ``moimix::getFws`` and is the mode that replaces the R/moimix VCF pipeline.
-  * ``"ratio"``: Fws = 1 - Σ_bins mean(Hw) / Σ_bins mean(Hs). This is the estimator
-    the wgs_cnv_workflow monoclonality gate was tuned against; kept for continuity.
+  * ``"regression"`` (default): Fws = 1 - β, where β is the slope of a regression of
+    the binned sample-het means on the binned population-het means, forced through
+    the origin. This matches ``moimix::getFws``.
+  * ``"ratio"``: Fws = 1 - Σ_bins mean(Hw) / Σ_bins mean(Hs) — a simpler ratio of the
+    summed binned means.
 
 The two agree in spirit but not to the digit (the regression weights bins by the
 squared population het), so pick deliberately and don't mix a threshold tuned on one
 with values from the other.
 
-This module reads AD from either a bcftools-query **AD table**
-(:func:`read_ad_table`) or a **VCF/BCF** (:func:`read_ad_vcf`) and feeds the same
-:func:`compute_fws`, so one implementation serves both the workflow and the
-former R path — no moimix dependency.
+AD is read from either a bcftools-query **AD table** (:func:`read_ad_table`) or a
+**VCF/BCF** (:func:`read_ad_vcf`), both feeding the same :func:`compute_fws`.
 """
 
 from __future__ import annotations
@@ -171,12 +168,11 @@ def compute_fws(ref, alt, *, estimator="regression", min_depth=0, n_bins=10,
     Returns ``(fws, n_sites)`` arrays of length ``n_samples`` (``fws`` is NaN for a
     sample with no usable sites; ``n_sites`` is how many sites it contributed).
 
-    ``estimator`` selects ``"regression"`` (moimix-faithful; the default) or ``"ratio"``
-    (the wgs_cnv_workflow legacy). ``min_depth`` drops per-sample sites below that read
-    depth; ``min_alt_samples`` keeps only sites where the alt is seen in at least that
-    many samples. moimix parity uses ``estimator="regression", min_depth=0,
-    min_alt_samples=0``; the CNV gate uses ``estimator="ratio", min_depth=10,
-    min_alt_samples=2``.
+    ``estimator`` selects ``"regression"`` (matches ``moimix::getFws``; the default) or
+    ``"ratio"``. ``min_depth`` drops per-sample sites below that read depth;
+    ``min_alt_samples`` keeps only sites where the alt is seen in at least that many
+    samples. moimix parity uses ``estimator="regression", min_depth=0,
+    min_alt_samples=0``.
     """
     ref = np.asarray(ref, dtype=float)
     alt = np.asarray(alt, dtype=float)
@@ -236,8 +232,8 @@ def compute_fws(ref, alt, *, estimator="regression", min_depth=0, n_bins=10,
         return fws, n_info
 
     if estimator == "ratio":
-        # wgs_cnv_workflow legacy: Fws = 1 - Σ_bins mean(Hw) / Σ_bins mean(Hs), over
-        # polymorphic sites, with per-sample bin means.
+        # Fws = 1 - Σ_bins mean(Hw) / Σ_bins mean(Hs), over polymorphic sites, with
+        # per-sample bin means.
         site_ok = (Hs > 0) & (alt_present >= min_alt_samples) & np.isfinite(maf)
         bin_idx = np.clip(np.digitize(maf, edges[1:-1]), 0, n_bins - 1)
         for s in range(n_samples):

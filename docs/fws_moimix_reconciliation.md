@@ -1,9 +1,8 @@
 # Fws reconciliation against `moimix::getFws`
 
-`plasgenomicsutils calculate_fws --estimator regression` reimplements the Fws
-within-host diversity statistic (Manske 2012) so the R/`moimix` VCF→GDS pipeline is
-no longer needed. This note records the numerical check that the reimplementation is
-faithful, on public data, so it can be re-run.
+`plasgenomicsutils calculate_fws --estimator regression` computes the Fws within-host
+diversity statistic (Manske 2012), matching `moimix::getFws`. This note records the
+numerical check that it is faithful, on public data, so it can be re-run.
 
 ## Result
 
@@ -38,11 +37,10 @@ through the origin** of the per-sample binned heterozygosity means on the popula
 binned means (`lm(sample_het ~ pop_het - 1)`), over 10 equal MAF bins. This is
 `--estimator regression` (the default).
 
-The `wgs_cnv_workflow` monoclonality gate (`src/pf_cnv/fws.py`) instead uses a
-**ratio of sums** (`1 − Σ mean(Hw) / Σ mean(Hs)`). That is a genuinely different
-estimator (the regression weights bins by population-het²), so it gives different
-values — do not compare a threshold tuned on one against values from the other. It is
-preserved as `--estimator ratio`.
+The `--estimator ratio` mode instead uses a **ratio of sums**
+(`1 − Σ mean(Hw) / Σ mean(Hs)`). That is a genuinely different estimator (the
+regression weights bins by population-het²), so it gives different values — do not
+compare a threshold tuned on one against values from the other.
 
 ## Reproduce
 

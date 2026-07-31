@@ -204,8 +204,8 @@ The theory, detection signature, and exclusion rules are in
 
 `calculate_fws` computes the per-sample Fws statistic (Manske 2012) — a monoclonal
 infection scores Fws ~ 1, a polyclonal one lower — from per-sample allele depths,
-read from **either a VCF/BCF or a bcftools-query AD table**. This is a from-scratch
-reimplementation of `moimix::getFws` (no R/moimix dependency):
+read from **either a VCF/BCF or a bcftools-query AD table**. It reimplements
+`moimix::getFws`:
 
 ```bash
 plasgenomicsutils calculate_fws --input-vcf cohort.snps.bcf --out fws.tsv
@@ -217,11 +217,10 @@ The default `--estimator regression` reproduces `moimix::getFws` to full float
 precision (validated against moimix on public pf7 data — see
 [docs/fws_moimix_reconciliation.md](docs/fws_moimix_reconciliation.md)): Fws = 1 − β,
 β the slope of a through-origin regression of per-sample on population heterozygosity
-across 10 MAF bins. `--estimator ratio` is the different `wgs_cnv_workflow`
-monoclonality-gate estimator (`1 − Σ mean(Hw)/Σ mean(Hs)`), kept for continuity — the
-two are not interchangeable, so don't mix a threshold tuned on one with the other's
-values. moimix parity uses the defaults (`--min-depth 0 --min-alt-samples 0`); the CNV
-gate uses `--estimator ratio --min-depth 10 --min-alt-samples 2`.
+across 10 MAF bins. `--estimator ratio` is a simpler summed-binned-mean estimator
+(`1 − Σ mean(Hw)/Σ mean(Hs)`) — the two are not interchangeable, so don't mix a
+threshold tuned on one with the other's values. moimix parity uses the defaults
+(`--min-depth 0 --min-alt-samples 0`).
 
 `moimix::getFws` uses every biallelic record's `AD` regardless of allele string, so
 the VCF reader does too — pass a SNP-filtered callset (or `--snps-only`) if you want
