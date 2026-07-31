@@ -1,8 +1,11 @@
 # plasgenomicsutils
 
+> **Version 0.1.0** — early development; APIs, defaults, and outputs may change
+> between versions.
+
 A collection of utilities for **post processing Plasmodium genomics data** —
 VCF/BCF filtering and harmonization, IBD (identity-by-descent) post-analysis, and
-(planned) Fws within-host diversity.
+Fws within-host diversity.
 
 The heavy compute lives here in Python; **visualization lives in the companion R
 package [`plasgenomicsutilsR`](https://github.com/nickjhathaway/plasgenomicsutilsR)**.
