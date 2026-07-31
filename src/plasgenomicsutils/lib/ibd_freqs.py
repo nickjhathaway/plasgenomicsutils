@@ -4,10 +4,14 @@ Alt AF = alt-allele-count / non-missing-allele-count, per ``chr:pos``. The globa
 table and every region table are computed in a single pass over the file,
 accumulating per-region counts as it goes. Region table is region-major with SNP
 order following record order.
+
+Genotypes are read as whole per-record numpy arrays (cyvcf2), so allele counting is
+a vectorized reduction over all samples rather than a per-sample Python loop.
 """
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -33,50 +37,45 @@ def compute_allele_freqs(
     (global_df, region_df) where global_df has columns [snp_id, af] and region_df
     has columns [region, snp_id, af]. region_df is empty if no mapping is given.
     """
-    import pysam  # lazy: only the allele-freq command needs it
+    from cyvcf2 import VCF
 
-    vcf = pysam.VariantFile(bcf_path)
-    bcf_samples = list(vcf.header.samples)
+    vcf = VCF(bcf_path)
+    samples = list(vcf.samples)
 
     regions: list[str] = []
     region_of_sample: dict[str, str] = {}
     if sample_to_region:
-        region_of_sample = {s: sample_to_region[s] for s in bcf_samples if s in sample_to_region}
+        region_of_sample = {s: sample_to_region[s] for s in samples if s in sample_to_region}
         regions = sorted(set(region_of_sample.values()))
+    # boolean sample masks (aligned to the file's sample order), one per region
+    region_masks = {
+        r: np.fromiter((region_of_sample.get(s) == r for s in samples), dtype=bool, count=len(samples))
+        for r in regions
+    }
 
     global_rows: list[dict] = []
     # region -> list of {region, snp_id, af} rows, kept in record order
     region_rows: dict[str, list[dict]] = {r: [] for r in regions}
 
-    for rec in vcf.fetch():
-        pos = rec.pos - 1 if zero_based else rec.pos  # pysam pos is 1-based
-        snp_id = f"{rec.chrom}:{pos}"
+    for v in vcf:
+        pos = v.POS - 1 if zero_based else v.POS
+        snp_id = f"{v.CHROM}:{pos}"
 
-        g_ac = g_an = 0
-        r_ac = {r: 0 for r in regions}
-        r_an = {r: 0 for r in regions}
-
-        for sname, sample in rec.samples.items():
-            gt = sample["GT"]
-            reg = region_of_sample.get(sname)
-            for allele in gt:
-                if allele is None:
-                    continue
-                g_an += 1
-                is_alt = allele > 0
-                if is_alt:
-                    g_ac += 1
-                if reg is not None:
-                    r_an[reg] += 1
-                    if is_alt:
-                        r_ac[reg] += 1
+        # (n_samples, ploidy+1) int; last column is phase, missing allele = -1
+        alleles = v.genotype.array()[:, :-1]
+        called = alleles >= 0
+        is_alt = alleles > 0
+        g_an = int(called.sum())
+        g_ac = int(is_alt.sum())
 
         global_rows.append({"snp_id": snp_id, "af": g_ac / g_an if g_an else float("nan")})
         for r in regions:
-            an = r_an[r]
+            m = region_masks[r]
+            an = int(called[m].sum())
+            ac = int(is_alt[m].sum())
             region_rows[r].append({
                 "region": r, "snp_id": snp_id,
-                "af": r_ac[r] / an if an else float("nan"),
+                "af": ac / an if an else float("nan"),
             })
 
     vcf.close()

@@ -1,5 +1,10 @@
 # plasgenomicsutils
 
+<!-- badges: start -->
+[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+[![tests](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml/badge.svg)](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml)
+<!-- badges: end -->
+
 > **Version 0.1.0** — early development; APIs, defaults, and outputs may change
 > between versions.
 
