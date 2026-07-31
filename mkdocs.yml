@@ -1,0 +1,52 @@
+site_name: plasgenomicsutils
+site_description: Post-processing utilities for Plasmodium genomics data
+site_url: https://nickjhathaway.github.io/plasgenomicsutils/
+repo_url: https://github.com/nickjhathaway/plasgenomicsutils
+repo_name: nickjhathaway/plasgenomicsutils
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - attr_list
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Installation: install.md
+  - VCF filtering & harmonization: filtering.md
+  - Fws (within-host diversity): fws.md
+  - IBD post-analysis: ibd.md
+  - Command reference: commands.md
+  - Methods:
+      - Strand-bias artifacts: strand_bias_artifact_exclusion.md
+      - Fws reconciliation: fws_moimix_reconciliation.md

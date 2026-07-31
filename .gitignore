@@ -16,6 +16,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# ...but keep the package's own source lib/ (the generic rule above ignores build 'lib/' dirs)
+!src/plasgenomicsutils/lib/
 parts/
 sdist/
 var/
@@ -216,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# mkdocs local build output (site deploys via Actions)
+site/
