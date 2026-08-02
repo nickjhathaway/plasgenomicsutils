@@ -32,6 +32,7 @@ plasgenomicsutils <command> -h     # options for one command
 | `hard_qc_filter` | GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS |
 | `singleton_filter_add_ads` | Drop near-private variants and add the `FORMAT/ADS` summed-depth tag |
 | `biallelic_snp_filter` | Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping |
+| `strip_stale_format` | Strip stale genotype-linked FORMAT fields (e.g. `PL`) that no longer match the genotypes |
 | `tandem_repeat_mask` | Remove variants overlapping a tandem-repeat BED |
 | `core_region_filter` | Keep only variants inside the core-genome BED |
 | `paralog_mask` | Remove variants overlapping paralogous/multigene-family genes |

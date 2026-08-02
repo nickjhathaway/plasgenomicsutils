@@ -35,6 +35,31 @@ within-sample frequency is ≥ `--het-min-af` (default 0.2). This preserves the
 mixed-infection signal Fws/COI analyses depend on. `--restrict-to-called-alleles`
 narrows the caller's existing genotypes instead of re-deriving from AD.
 
+**Ploidy.** The default keeps the conventional diploid coding used for *Plasmodium*
+(`0/1` = mixed infection). `--ploidy {1,2}` sets it explicitly and is validated against
+the input ploidy per record: a value **greater** than the input errors (genotypes and
+likelihoods cannot be promoted), **equal** is fine, and **less** warns and trims. Use
+`--ploidy 1` for true haploid calls (the single best-supported allele).
+
+**Stale genotype-linked fields.** Re-genotyping writes a fresh `GT`, so a caller's
+`Number=G` fields (`PL`/`GL`) from a different ploidy — e.g. a diploid `GT` forced over
+hexaploid calls — become inconsistent and would break
+`bcftools view --trim-alt-alleles`. `filter_ad_regenotype` blanks them to a consistent
+length automatically as it writes. For files that did **not** go through re-genotyping,
+`strip_stale_format` does the same on its own:
+
+```bash
+plasgenomicsutils strip_stale_format --input calls.bcf --output clean.bcf            # null only the inconsistent PL records (surgical, keeps valid ones)
+plasgenomicsutils strip_stale_format --input calls.bcf --output clean.bcf --mode always --fields PL GL   # drop the fields entirely
+```
+
+`biallelic_snp_filter` applies the same surgical fix before trimming, so the default
+chain never chokes on these fields.
+
+`maf_filter` takes `--maf-min`/`--maf-max`; since the bounds are usually symmetric,
+`--maf-max` defaults to `1 - maf_min` when unset (so `maf_min = 0.02` gives a `[0.02, 0.98]`
+window). Set both for an asymmetric window.
+
 ## Pipeline
 
 Run an ordered, config-driven chain and tally counts per step:
@@ -43,6 +68,19 @@ Run an ordered, config-driven chain and tally counts per step:
 plasgenomicsutils filter_pipeline --emit-default-config pipeline.json
 plasgenomicsutils filter_pipeline --input in.bcf --config pipeline.json --outdir filtered/
 ```
+
+Each step writes `filtered/NN_<name>.bcf` (indexed) plus a `variant_counts.tsv` tally. The
+final callset's **SNP panel BED** is written automatically next to the last step
+(`filtered/NN_<last>.snps.bed`) — this is the panel the IBD tools read, so it feeds straight
+into `build_ibd_matrix`:
+
+```bash
+plasgenomicsutils build_ibd_matrix --blocks hmmibd.tsv.gz \
+  --snps filtered/10_maf_filter.snps.bed --snp-format bed --output ibd_matrix.npz
+```
+
+The BED's `chrom:pos` name column matches the SNP ids you'd get from the VCF, so a panel
+taken as BED or VCF is interchangeable. Pass `--no-snp-bed` to skip it.
 
 ## Harmonization
 

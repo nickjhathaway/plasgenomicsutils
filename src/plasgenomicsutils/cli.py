@@ -34,6 +34,7 @@ from .scripts.vcf.harmonize_bcf import harmonize_bcf
 from .scripts.vcf.hard_qc_filter import hard_qc_filter
 from .scripts.vcf.singleton_filter_add_ads import singleton_filter_add_ads
 from .scripts.vcf.biallelic_snp_filter import biallelic_snp_filter
+from .scripts.vcf.strip_stale_format import strip_stale_format
 from .scripts.vcf.tandem_repeat_mask import tandem_repeat_mask
 from .scripts.vcf.core_region_filter import core_region_filter
 from .scripts.vcf.paralog_mask import paralog_mask
@@ -80,6 +81,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Drop near-private variants and add the FORMAT/ADS summed-depth tag"),
         "biallelic_snp_filter": Command(biallelic_snp_filter,
             "Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping"),
+        "strip_stale_format": Command(strip_stale_format,
+            "Strip stale genotype-linked FORMAT fields (e.g. PL) that no longer match the genotypes"),
         "tandem_repeat_mask": Command(tandem_repeat_mask,
             "Remove variants overlapping a tandem-repeat BED"),
         "core_region_filter": Command(core_region_filter,
@@ -125,12 +128,79 @@ def _print_catalog() -> None:
         print()
 
 
+def _print_catalog_plain() -> None:
+    """Machine-friendly '<command>\t<group>\t<help>' (one per line), for bash completion."""
+    for group, commands in REGISTRY.items():
+        for name, cmd in commands.items():
+            print(f"{name}\t{group}\t{cmd.help}")
+
+
+# Canonical bash-completion script. `plasgenomicsutils --bash-completion` prints this, and
+# etc/bash_completion in the repo is a copy for people who'd rather source a file directly.
+_BASH_COMPLETION = r"""# bash completion for plasgenomicsutils
+# enable with:
+#   plasgenomicsutils --bash-completion >> ~/.bash_completion && source ~/.bash_completion
+
+_plasgenomicsutils_complete()
+{
+    # keep '_' and '=' out of the word breaks so --region-col / --bcf=path stay one token
+    local _OLD_WB="${COMP_WORDBREAKS-}"
+    COMP_WORDBREAKS="${COMP_WORDBREAKS//_/}"
+    COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"
+
+    local cur
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    # 1) first token: the command name (queried live from the CLI)
+    if [[ ${COMP_CWORD} -eq 1 ]]; then
+        local cmds
+        cmds="$("${COMP_WORDS[0]}" --list-plain 2>/dev/null | awk -F'\t' '{print $1}')"
+        COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
+        COMP_WORDBREAKS="$_OLD_WB"
+        return 0
+    fi
+
+    # 2) an option for a leaf command: scrape its -h output for -x / --long flags.
+    # Keep only the flag portion of each option line (strip the indent, then cut at the
+    # 2+ spaces before the help text) so words like "hmmibd-rs" in a description can't
+    # masquerade as flags.
+    if [[ "${cur}" == -* ]]; then
+        local opts
+        opts="$("${COMP_WORDS[0]}" "${COMP_WORDS[1]}" -h 2>/dev/null \
+            | awk '/^[[:space:]]+-/ { sub(/^[[:space:]]+/, ""); sub(/  .*/, ""); print }' \
+            | grep -oE -- '-{1,2}[A-Za-z0-9][-A-Za-z0-9_]*' | sort -u)"
+        COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+        COMP_WORDBREAKS="$_OLD_WB"
+        return 0
+    fi
+
+    # 3) otherwise, filename completion for positional args
+    COMPREPLY=( $(compgen -f -- "${cur}") )
+    COMP_WORDBREAKS="$_OLD_WB"
+    return 0
+}
+
+complete -F _plasgenomicsutils_complete plasgenomicsutils
+"""
+
+
+def _print_bash_completion() -> None:
+    sys.stdout.write(_BASH_COMPLETION)
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     index = _flatten()
 
     if not argv or argv[0] in ("-h", "--help", "--list"):
         _print_catalog()
+        return
+    if argv[0] == "--list-plain":
+        _print_catalog_plain()
+        return
+    if argv[0] == "--bash-completion":
+        _print_bash_completion()
         return
     if argv[0] in ("-V", "--version"):
         print(f"plasgenomicsutils {__version__}")

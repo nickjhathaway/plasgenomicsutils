@@ -17,7 +17,8 @@ def get_parser_maf_filter() -> argparse.ArgumentParser:
     p.add_argument("--input", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--maf-min", type=float, default=0.01, help="Lower AF bound (bcftools -q, default: 0.01)")
-    p.add_argument("--maf-max", type=float, default=0.99, help="Upper AF bound (bcftools -Q, default: 0.99)")
+    p.add_argument("--maf-max", type=float, default=None,
+                   help="Upper AF bound (bcftools -Q). Defaults to 1 - maf_min (a symmetric window).")
     return p
 
 

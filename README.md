@@ -93,12 +93,36 @@ accepts a plain path or a bundled Pf3D7 asset via `builtin:<name>` (`pf3d7_core_
 so a site that merely *looked* multiallelic is trimmed back to a genuine biallelic SNP and kept,
 rather than being discarded by a naive `-m2 -M2`.
 
+**Stale genotype-linked fields.** If an upstream caller wrote a genotype ploidy that disagrees with a
+`Number=G` FORMAT field — e.g. a diploid `GT` forced over hexaploid calls leaves a `PL` of the wrong
+length — `bcftools view --trim-alt-alleles` aborts ("Unexpected number of values in FORMAT/PL …").
+`strip_stale_format` fixes it: by default (`--mode mismatch`) it nulls such a field **only on the
+records where its length is inconsistent** with the genotypes, keeping valid likelihoods elsewhere
+(`--mode always` drops the field entirely; default field is `PL`, override with `--fields`).
+`filter_ad_regenotype` also does this automatically — it re-genotypes to a fresh `GT`, so it blanks
+the now-stale `PL`/`GL` to a consistent length as it writes — and `biallelic_snp_filter` applies the
+same surgical fix before trimming, so the default chain never chokes on these fields.
+
+`filter_ad_regenotype` keeps the conventional diploid coding (`0/1` = mixed infection) by default;
+`--ploidy {1,2}` sets it explicitly and is validated against the input ploidy per record (greater than
+the input errors — genotypes can't be promoted; less warns and trims). Use `--ploidy 1` for haploid
+calls.
+
+```bash
+plasgenomicsutils strip_stale_format --input calls.bcf --output clean.bcf          # null inconsistent PL
+plasgenomicsutils strip_stale_format --input calls.bcf --output clean.bcf --mode always --fields PL GL
+```
+
 Or run the whole chain from a JSON config, with a per-step count tally:
 
 ```bash
 plasgenomicsutils filter_pipeline --emit-default-config pipeline.json   # write a template
 plasgenomicsutils filter_pipeline --input in.bcf --config pipeline.json --outdir filtered/
 ```
+
+Steps write indexed BCFs plus a `variant_counts.tsv`, and the final callset's **SNP-panel
+BED** (`filtered/NN_<last>.snps.bed`) is written automatically — it drops straight into
+`build_ibd_matrix --snps … --snp-format bed` for the IBD analysis (`--no-snp-bed` to skip).
 
 **Step order depends on your input.** The chain is config-driven, so you pick the
 order; two regimes are common:
@@ -207,6 +231,20 @@ plasgenomicsutils strand_read_check --bam sample.bam --pos Pf3D7_12_v3:975431 \
 
 The theory, detection signature, and exclusion rules are in
 [docs/strand_bias_artifact_exclusion.md](docs/strand_bias_artifact_exclusion.md).
+
+## Auto completion
+
+To enable bash tab-completion for `plasgenomicsutils` (command names and each command's
+options), append the generated script to your `~/.bash_completion` and source it:
+
+```bash
+plasgenomicsutils --bash-completion >> ~/.bash_completion
+source ~/.bash_completion
+```
+
+The same script is also committed at [`etc/bash_completion`](etc/bash_completion) if you
+prefer to source a file directly. Completions are queried live from the installed CLI, so
+they stay in sync as commands and options change.
 
 ## Fws (within-host diversity)
 

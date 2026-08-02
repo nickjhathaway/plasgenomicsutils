@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import subprocess
 
-from .bcftools import out_flag, q, require, sh
+import os
+import tempfile
+
+from .bcftools import format_tags, out_flag, q, require, sh
+from .strip_format import GENOTYPE_LINKED_FORMAT, strip_stale_format
 
 
 def hard_qc_filter(inp: str, out: str, *, qd: float = 20, mq: float = 55,
@@ -61,9 +65,28 @@ def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True) -> None:
     after trimming are dropped by ``-v snps``.
     """
     fmt = out_flag(out)
-    trim_view = "bcftools view --trim-alt-alleles {} -Ou | ".format(q(inp)) if trim else ""
-    src = "-" if trim else q(inp)
-    sh(f"{trim_view}bcftools view -m2 -M2 -v snps {src} -O{fmt} -o {q(out)}", tools=("bcftools",))
+    if not trim:
+        sh(f"bcftools view -m2 -M2 -v snps {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        return
+    # A genotype-linked Number=G field (e.g. PL) whose length disagrees with the genotypes
+    # makes `--trim-alt-alleles` abort. If any are present, surgically null just the
+    # inconsistent records first (see strip_stale_format; valid likelihoods are kept), then
+    # trim and keep biallelic SNPs.
+    if any(t in format_tags(inp) for t in GENOTYPE_LINKED_FORMAT):
+        tmp = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+        try:
+            strip_stale_format(inp, tmp, fields=GENOTYPE_LINKED_FORMAT, mode="mismatch")
+            sh(f"bcftools view --trim-alt-alleles {q(tmp)} -Ou "
+               f"| bcftools view -m2 -M2 -v snps - -O{fmt} -o {q(out)}", tools=("bcftools",))
+        finally:
+            for suffix in ("", ".csi"):
+                try:
+                    os.remove(tmp + suffix)
+                except OSError:
+                    pass
+    else:
+        sh(f"bcftools view --trim-alt-alleles {q(inp)} -Ou "
+           f"| bcftools view -m2 -M2 -v snps - -O{fmt} -o {q(out)}", tools=("bcftools",))
 
 
 def region_filter(inp: str, out: str, *, bed: str, exclude: bool) -> None:
@@ -135,11 +158,33 @@ def locus_missingness_filter(inp: str, out: str, *, f_missing_max: float = 0.05,
        f"| bcftools view -i {q(expr)} -O{fmt} -o {q(out)}", tools=("bcftools",))
 
 
-def maf_filter(inp: str, out: str, *, maf_min: float = 0.01, maf_max: float = 0.99) -> None:
-    """Drop rare and near-fixed alleles by a minor-allele-frequency window."""
+def maf_filter(inp: str, out: str, *, maf_min: float = 0.01,
+               maf_max: float | None = None) -> None:
+    """Drop rare and near-fixed alleles by an allele-frequency window ``[maf_min, maf_max]``.
+
+    The two bounds are usually symmetric (a 0.02 floor pairs with a 0.98 ceiling), so
+    ``maf_max`` defaults to ``1 - maf_min`` when left unset; pass it explicitly for an
+    asymmetric window.
+    """
+    if maf_max is None:
+        maf_max = 1 - maf_min
     fmt = out_flag(out)
     sh(f"bcftools +fill-tags {q(inp)} -Ou -- -t AC,AN,AF "
        f"| bcftools view -q {maf_min} -Q {maf_max} -O{fmt} -o {q(out)}", tools=("bcftools",))
+
+
+def snp_bed(inp: str, bed: str) -> None:
+    """Write a BED of the SNP positions in ``inp`` — the SNP panel the IBD tools read
+    (``build_ibd_matrix --snp-format bed``).
+
+    Columns: ``chrom``, 0-based start, end, and a ``chrom:pos`` (1-based) name that matches
+    the VCF-derived SNP id, so a panel taken as BED or as VCF yields identical SNP ids.
+    Only SNP records are emitted.
+    """
+    require("bcftools")
+    sh(f"bcftools view -v snps {q(inp)} -Ou "
+       f"| bcftools query -f '%CHROM\\t%POS0\\t%END\\t%CHROM:%POS\\n' - > {q(bed)}",
+       tools=("bcftools",))
 
 
 # --- small bcftools query helpers -------------------------------------------

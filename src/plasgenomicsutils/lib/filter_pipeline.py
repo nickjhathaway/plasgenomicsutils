@@ -23,8 +23,9 @@ from pathlib import Path
 
 from . import vcf_filters as F
 from .assets import resolve_bed
-from .bcftools import count_variants
+from .bcftools import count_variants, index_vcf
 from .regenotype import filter_ad_regenotype
+from .strip_format import strip_stale_format
 
 
 def _region(func):
@@ -42,6 +43,7 @@ STEPS = {
     "core_region_filter": _region(F.core_region_filter),
     "paralog_mask": _region(F.paralog_mask),
     "filter_ad_regenotype": lambda inp, out, **kw: filter_ad_regenotype(inp, out, **kw),
+    "strip_stale_format": lambda inp, out, **kw: strip_stale_format(inp, out, **kw),
     "biallelic_snp_filter": F.biallelic_snp_filter,
     "sample_coverage_filter": F.sample_coverage_filter,
     "locus_missingness_filter": F.locus_missingness_filter,
@@ -59,7 +61,7 @@ DEFAULT_CONFIG = {
         {"name": "biallelic_snp_filter"},
         {"name": "sample_coverage_filter"},
         {"name": "locus_missingness_filter"},
-        {"name": "maf_filter", "params": {"maf_min": 0.02, "maf_max": 0.98}},
+        {"name": "maf_filter", "params": {"maf_min": 0.02}},  # maf_max defaults to 1 - maf_min
     ]
 }
 
@@ -69,8 +71,14 @@ def load_config(path: str) -> dict:
         return json.load(fh)
 
 
-def run_pipeline(input_path: str, outdir: str, config: dict) -> list[dict]:
-    """Run every step in order; return a per-step tally list."""
+def run_pipeline(input_path: str, outdir: str, config: dict,
+                 *, emit_snp_bed: bool = True) -> list[dict]:
+    """Run every step in order; return a per-step tally list.
+
+    When ``emit_snp_bed`` (default), a BED of the final callset's SNPs is written next to
+    the last step's output — the SNP panel the IBD tools read
+    (``build_ibd_matrix --snp-format bed``).
+    """
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -86,9 +94,17 @@ def run_pipeline(input_path: str, outdir: str, config: dict) -> list[dict]:
         out_path = str(out / f"{i:02d}_{name}.{ext}")
         print(f"[{i:02d}] {name} -> {out_path}")
         STEPS[name](prev, out_path, **params)
+        index_vcf(out_path)   # keep intermediates indexed (quiets pysam, enables region queries)
         n = count_variants(out_path)
         tally.append({"step": name, "path": out_path, "variants": n})
         print(f"     variants: {n:,}")
         prev = out_path
+
+    if emit_snp_bed and len(tally) > 1:
+        bed_path = str(out / (Path(prev).stem + ".snps.bed"))
+        F.snp_bed(prev, bed_path)
+        n_snps = sum(1 for _ in open(bed_path))
+        print(f"\nSNP panel BED ({n_snps:,} SNPs) -> {bed_path}")
+        tally.append({"step": "snp_bed", "path": bed_path, "variants": n_snps})
 
     return tally
