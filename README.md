@@ -124,6 +124,14 @@ Steps write indexed BCFs plus a `variant_counts.tsv`, and the final callset's **
 BED** (`filtered/NN_<last>.snps.bed`) is written automatically — it drops straight into
 `build_ibd_matrix --snps … --snp-format bed` for the IBD analysis (`--no-snp-bed` to skip).
 
+`maf_filter` can also filter **per group**: pass `--meta samples.tsv --group-col country`
+(or set them in the step's `params`) to keep a site if its minor-allele frequency is ≥
+`--maf-min` in *any* group. It picks the sites on the combined VCF and applies the union
+back to the original, so a variant polymorphic in one country but rare/absent in another is
+kept with **all genotypes preserved** — a carrier below the threshold within its own country
+keeps its real `0/1`/`1/1` call, with no split-and-merge that would blank it. (A variant
+rare in *every* group is dropped.)
+
 **Step order depends on your input.** The chain is config-driven, so you pick the
 order; two regimes are common:
 

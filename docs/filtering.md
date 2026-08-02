@@ -60,6 +60,20 @@ chain never chokes on these fields.
 `--maf-max` defaults to `1 - maf_min` when unset (so `maf_min = 0.02` gives a `[0.02, 0.98]`
 window). Set both for an asymmetric window.
 
+**Per-group MAF.** With `--meta <table.tsv> --group-col country` (a per-sample metadata
+table with a `sample` column and the group column), a site is kept if its minor-allele
+frequency is ≥ `--maf-min` in **any** group. It is computed on the combined VCF — the
+per-group frequencies pick the *sites* to keep, then that union is applied back to the
+original, so **every sample's genotypes are preserved**. A carrier whose variant is below
+the threshold *within its own group* keeps its real `0/1`/`1/1` call whenever the site is
+kept via another group (and a `0/0` sample stays `0/0`) — there is no split-and-merge, so
+nothing is blanked. A variant that is rare in *every* group is dropped.
+
+```bash
+plasgenomicsutils maf_filter --input in.bcf --output maf.bcf \
+  --maf-min 0.02 --meta samples.tsv --group-col country
+```
+
 ## Pipeline
 
 Run an ordered, config-driven chain and tally counts per step:

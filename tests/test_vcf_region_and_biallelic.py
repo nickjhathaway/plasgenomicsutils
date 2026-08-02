@@ -94,6 +94,75 @@ def test_biallelic_trim_survives_inconsistent_genotype_likelihoods(tmp_path):
     assert set(rows["100"]) == {".,.,."}               # inconsistent record nulled (trimmed to G=3)
 
 
+_GRP_HEADER = (
+    "##fileformat=VCFv4.2\n##contig=<ID=chr1,length=100000>\n"
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2\ts3\ts4\n"
+)
+
+
+@needs_bcftools
+def test_maf_filter_grouped_keeps_union_and_preserves_genotypes(tmp_path):
+    # groups A = {s1,s2}, B = {s3,s4}
+    # 100: monomorphic in A (0/0) but polymorphic in B -> kept, A's genotypes preserved
+    # 200: monomorphic everywhere -> dropped
+    # 300: polymorphic only in A -> kept
+    p = tmp_path / "in.vcf"
+    p.write_text(_GRP_HEADER +
+        "chr1\t100\t.\tA\tT\t.\t.\t.\tGT\t0/0\t0/0\t0/1\t0/1\n"
+        "chr1\t200\t.\tA\tT\t.\t.\t.\tGT\t0/0\t0/0\t0/0\t0/0\n"
+        "chr1\t300\t.\tA\tT\t.\t.\t.\tGT\t0/1\t0/0\t0/0\t0/0\n")
+    subprocess.run(["bgzip", "-f", str(p)], check=True)
+    inp = str(p) + ".gz"
+    meta = tmp_path / "meta.tsv"
+    meta.write_text("sample\tgroup\ns1\tA\ns2\tA\ns3\tB\ns4\tB\n")
+
+    out = str(tmp_path / "out.bcf")
+    F.maf_filter(inp, out, maf_min=0.02, meta=str(meta), group_col="group")
+    assert _positions(out) == [100, 300]                       # union of per-group passers
+    samples = subprocess.run(["bcftools", "query", "-l", out],
+                             stdout=subprocess.PIPE, text=True).stdout.split()
+    assert samples == ["s1", "s2", "s3", "s4"]                 # every sample retained
+    # site 100 kept even though it is monomorphic in group A, and A's 0/0 calls are intact
+    gt = subprocess.run(["bcftools", "query", "-f", "%POS[ %GT]\n", out],
+                        stdout=subprocess.PIPE, text=True).stdout.splitlines()
+    row100 = next(r for r in gt if r.startswith("100"))
+    assert row100.split()[1:] == ["0/0", "0/0", "0/1", "0/1"]  # not emptied to "."
+
+
+@needs_bcftools
+def test_maf_filter_grouped_preserves_subthreshold_carrier_genotypes(tmp_path):
+    # 60 samples in group A + 4 in group B. a01 carries the alt but its frequency is < 2%
+    # WITHIN group A; the site is rescued by group B, and a01's real 0/1 / 1/1 calls survive.
+    A = [f"a{i:02d}" for i in range(1, 61)]
+    B = [f"b{i}" for i in range(1, 5)]
+    samples = A + B
+    hdr = ("##fileformat=VCFv4.2\n##contig=<ID=chr1,length=100000>\n"
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples) + "\n")
+
+    def row(pos, gts):
+        return f"chr1\t{pos}\t.\tA\tT\t.\t.\t.\tGT\t" + "\t".join(gts.get(s, "0/0") for s in samples) + "\n"
+
+    body = (row(100, {"a01": "0/1", "b1": "0/1", "b2": "0/1"})    # a01 het,  MAF within A ~0.008
+            + row(200, {"a01": "1/1", "b1": "0/1", "b2": "0/1"})  # a01 hom,  MAF within A ~0.017
+            + row(300, {"a01": "0/1"}))                            # rare in EVERY group -> dropped
+    p = tmp_path / "in.vcf"
+    p.write_text(hdr + body)
+    subprocess.run(["bgzip", "-f", str(p)], check=True)
+    meta = tmp_path / "meta.tsv"
+    meta.write_text("sample\tcountry\n"
+                    + "".join(f"{s}\tA\n" for s in A) + "".join(f"{s}\tB\n" for s in B))
+    out = str(tmp_path / "out.bcf")
+    F.maf_filter(str(p) + ".gz", out, maf_min=0.02, meta=str(meta), group_col="country")
+    assert _positions(out) == [100, 200]                          # 300 (rare everywhere) dropped
+    gt = dict(r.split() for r in subprocess.run(
+        ["bcftools", "query", "-s", "a01", "-f", "%POS [%GT]\n", out],
+        stdout=subprocess.PIPE, text=True).stdout.splitlines())
+    assert gt["100"] == "0/1"   # het carrier kept, though < 2% within its own country
+    assert gt["200"] == "1/1"   # hom-alt carrier kept too
+
+
 @needs_bcftools
 def test_snp_bed_matches_vcf_snp_ids(tmp_path):
     from plasgenomicsutils.lib.vcf_io import SnpPanel
