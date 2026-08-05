@@ -18,6 +18,7 @@ from itertools import combinations_with_replacement
 import numpy as np
 import pandas as pd
 
+from .ibd_matrix import IBD_MIN_BLOCK_KB, IBD_MIN_BLOCK_SNP, filter_ibd_blocks
 from .reference import normalise_chr
 
 
@@ -38,6 +39,8 @@ def gene_block_overlap(
     sample_to_group: dict,
     within: int = 0,
     only_ibd: bool = True,
+    min_block_snp: int = IBD_MIN_BLOCK_SNP,
+    min_block_kb: float = IBD_MIN_BLOCK_KB,
 ) -> pd.DataFrame:
     """Per-gene, per-group-pair IBD-block overlap fraction.
 
@@ -64,6 +67,9 @@ def gene_block_overlap(
     ibd = blocks_df
     if only_ibd and "different" in blocks_df.columns:
         ibd = blocks_df[blocks_df["different"] == 0]
+    # the denominator above already came from every row, so filtering the evidence here
+    # drops spurious short segments without dropping a compared pair
+    ibd = filter_ibd_blocks(ibd, min_snp=min_block_snp, min_kb=min_block_kb)
     ibd = ibd.loc[:, ["sample1", "sample2", "chr", "start", "end"]].copy()
     ibd["chr"] = ibd["chr"].map(normalise_chr)
     by_chr = {c: d.reset_index(drop=True) for c, d in ibd.groupby("chr", sort=False)}

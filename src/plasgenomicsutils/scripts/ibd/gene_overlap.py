@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 
 from ...lib.ibd_gene_overlap import gene_block_overlap
-from ...lib.ibd_matrix import read_blocks
+from ...lib.ibd_matrix import IBD_MIN_BLOCK_KB, IBD_MIN_BLOCK_SNP, read_blocks
 from ...utils.small_utils import Utils
 
 
@@ -24,6 +24,12 @@ def get_parser_gene_overlap() -> argparse.ArgumentParser:
                    help="Column in --meta to group samples by (default: group)")
     p.add_argument("--within", type=int, default=0,
                    help="Pad each gene interval by this many bp on both sides (default: 0)")
+    p.add_argument("--min-block-snp", type=int, default=IBD_MIN_BLOCK_SNP,
+                   help="Drop IBD segments with fewer than this many SNPs; short, SNP-poor "
+                        "segments are commonly spurious (default: %(default)s, 0 disables)")
+    p.add_argument("--min-block-kb", type=float, default=IBD_MIN_BLOCK_KB,
+                   help="Drop IBD segments shorter than this many kb "
+                        "(default: %(default)s, 0 disables)")
     p.add_argument("--output", required=True, help="Output TSV(.gz)")
     return p
 
@@ -56,7 +62,9 @@ def gene_overlap():
     blocks = read_blocks(args.blocks)
     print(f"  {len(blocks):,} segments; computing overlap for {len(genes):,} genes "
           f"(group_col='{args.group_col}', within={args.within}) ...")
-    out = gene_block_overlap(blocks, genes, sample_to_group, within=args.within)
+    out = gene_block_overlap(blocks, genes, sample_to_group, within=args.within,
+                             min_block_snp=args.min_block_snp,
+                             min_block_kb=args.min_block_kb)
 
     Utils.write_tsv_gz(out, args.output)
     n_genes = out["gene"].nunique() if len(out) else 0

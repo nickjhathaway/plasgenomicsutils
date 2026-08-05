@@ -25,6 +25,7 @@ from .scripts.ibd.analyze_matrix import analyze_matrix
 from .scripts.ibd.selection_statistic import selection_statistic
 from .scripts.ibd.fraction_and_snp_density import fraction_and_snp_density
 from .scripts.ibd.gene_overlap import gene_overlap
+from .scripts.ibd.gene_pairs import gene_pairs
 
 # -- Fws leaves ---------------------------------------------------------------
 from .scripts.fws.calculate_fws import calculate_fws
@@ -72,6 +73,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Per-pair IBD fraction (callable denominator) and SNP density"),
         "ibd_gene_overlap": Command(gene_overlap,
             "Fraction of pairs whose IBD block overlaps each gene, per group pair"),
+        "ibd_gene_pairs": Command(gene_pairs,
+            "Sample pairs IBD over each gene, with how much of the gene is covered"),
     },
     "vcf": {
         "filter_ad_regenotype": Command(filter_ad_regenotype,

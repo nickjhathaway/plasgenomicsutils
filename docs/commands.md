@@ -22,6 +22,8 @@ plasgenomicsutils <command> -h     # options for one command
 | `analyze_ibd_matrix` | Per-pair / per-SNP / per-region / per-chromosome IBD summaries |
 | `ibd_selection_statistic` | IBD-based selection statistic (XiR,s), genome-wide and per-region |
 | `ibd_fraction_and_snp_density` | Per-pair IBD fraction (callable denominator) and SNP density |
+| `ibd_gene_overlap` | Fraction of pairs whose IBD block overlaps each gene, per group pair |
+| `ibd_gene_pairs` | Sample pairs IBD over each gene, with how much of the gene is covered |
 
 ## `vcf`
 

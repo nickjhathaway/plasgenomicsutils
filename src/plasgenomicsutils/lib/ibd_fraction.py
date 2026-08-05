@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .ibd_matrix import read_blocks
+from .ibd_matrix import IBD_MIN_BLOCK_KB, IBD_MIN_BLOCK_SNP, filter_ibd_blocks, read_blocks
 from .reference import Reference
 
 
@@ -30,7 +30,9 @@ def callable_spans(pos_df: pd.DataFrame, ref: Reference) -> pd.DataFrame:
     return out.sort_values("chr")
 
 
-def per_pair_fraction(blocks_path, sep, bp_per_cm, callable_cm) -> pd.DataFrame:
+def per_pair_fraction(blocks_path, sep, bp_per_cm, callable_cm,
+                      min_block_snp=IBD_MIN_BLOCK_SNP,
+                      min_block_kb=IBD_MIN_BLOCK_KB) -> pd.DataFrame:
     """Per-pair total/max IBD and callable-denominator f. Every pair emitted."""
     df = read_blocks(blocks_path, sep=sep)          # blocks come back half-open
     s1, s2 = df["sample1"].astype(str), df["sample2"].astype(str)
@@ -39,7 +41,9 @@ def per_pair_fraction(blocks_path, sep, bp_per_cm, callable_cm) -> pd.DataFrame:
     all_pairs = df[["pair"]].drop_duplicates()
 
     ibd = df[df["different"] == 0] if "different" in df.columns else df
-    ibd = ibd.copy()
+    # every compared pair is already in `all_pairs`, so filtering here removes spurious
+    # short segments from the numerator without losing a pair
+    ibd = filter_ibd_blocks(ibd, min_snp=min_block_snp, min_kb=min_block_kb).copy()
     ibd["seg_bp"] = (ibd["end"].astype(int) - ibd["start"].astype(int)).clip(lower=0)
     agg = (ibd.groupby("pair")["seg_bp"]
               .agg(total_ibd_bp="sum", max_ibd_bp="max")

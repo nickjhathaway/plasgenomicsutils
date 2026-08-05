@@ -53,7 +53,7 @@ plasgenomicsutils analyze_ibd_matrix --matrix ibd_matrix --meta meta.csv \
 
 # 3. global + per-group allele frequencies (single pass over the BCF)
 plasgenomicsutils compute_allele_freqs --bcf clean.bcf --meta meta.tsv \
-    --group-col region --zero-based --output afs/
+    --group-col region --output afs/
 
 # 4. IBD-based selection statistic (XiR,s), genome-wide and per-group
 plasgenomicsutils ibd_selection_statistic --matrix ibd_matrix \
@@ -68,11 +68,31 @@ plasgenomicsutils ibd_fraction_and_snp_density --blocks blocks.hmm.txt \
 #    overlaps each gene) -> feeds the R gene triangles
 plasgenomicsutils ibd_gene_overlap --blocks blocks.hmm.txt --genes genes.tsv \
     --meta meta.csv --group-col region --output gene_overlap.tsv.gz
+
+# 6. which sample PAIRS are IBD over each gene, and how much of the gene they share
+plasgenomicsutils ibd_gene_pairs --blocks blocks.hmm.txt --genes genes.tsv \
+    --output gene_pairs.tsv.gz
 ```
 
-SNP-panel label coordinates must be consistent between the matrix and the allele
-frequencies: build the matrix from a BED (0-based) and run `compute_allele_freqs`
-with `--zero-based`, or build from a VCF (1-based labels) and omit `--zero-based`.
+**Short IBD segments are dropped by default.** Every tool that reads hmm blocks discards
+segments with fewer than 15 SNPs or shorter than 15 kb (`--min-block-snp` /
+`--min-block-kb`, `0` to disable), matching R's
+`ibd_results(min_block_snp = 15, min_block_kb = 15)`. Small blocks are commonly spurious,
+and the filter applies to the IBD *evidence* only — the set of pairs that were compared,
+the denominator in every fraction, still comes from every row of the blocks file.
+
+**Coordinates are 0-based throughout.** Intervals are half-open `[start, end)` (BED), and
+SNP ids are `chr:pos0`, built in exactly one place from `(chrom, pos0)`. An id already
+present in an input — a BED name column, or a VCF `ID` set by `bcftools annotate --set-id`
+— is never adopted as a key, since whether it used `%POS` or `%POS0` is unknowable from the
+file; it is carried alongside as `source_id`. VCF `POS` and `hmmibd-rs` block ends are
+converted at the boundary and their numbering never propagates inward. Pass
+`--with-pos-vcf` to `compute_allele_freqs` if you also want the 1-based position for
+looking variants up by eye.
+
+Outputs carrying SNP labels record the convention (`#snp_coord_system=0-based`) and the
+readers verify it, so a table written by an older version is rejected rather than silently
+mixed — regenerate the matrix and allele frequencies together.
 
 ### VCF/BCF filtering & harmonization
 

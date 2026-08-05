@@ -50,7 +50,9 @@ def test_build_matrix_known_answer(tmp_path):
     # pairs come from ALL blocks (incl. different==1): A__B and B__C
     assert pair_labels == ["A__B", "B__C"]
 
-    mat = ibd_matrix.build_matrix(blocks_df, panel, pair_to_row).toarray()
+    # tiny hand-checkable blocks, so the short-segment filter is switched off here
+    mat = ibd_matrix.build_matrix(blocks_df, panel, pair_to_row,
+                                  min_block_snp=0, min_block_kb=0).toarray()
     # A__B row: cols 1,2 set (from the different==0 blocks), binary despite overlap
     assert mat[pair_to_row[("A", "B")]].tolist() == [0, 1, 1, 0]
     # B__C only had a different==1 block -> excluded -> all zeros, but row exists

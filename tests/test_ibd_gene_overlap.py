@@ -3,7 +3,18 @@
 import numpy as np
 import pandas as pd
 
-from plasgenomicsutils.lib.ibd_gene_overlap import gene_block_overlap
+from plasgenomicsutils.lib.ibd_gene_overlap import (
+    gene_block_overlap as _gene_block_overlap,
+)
+# These fixtures use deliberately tiny blocks to make the overlap arithmetic checkable by
+# hand, so they opt out of the default short-segment filter; the filter has its own tests.
+
+
+def gene_block_overlap(*args, **kw):
+    kw.setdefault("min_block_snp", 0)
+    kw.setdefault("min_block_kb", 0)
+    return _gene_block_overlap(*args, **kw)
+
 
 
 def _blocks():
