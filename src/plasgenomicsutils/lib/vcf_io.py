@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .intervals import snp_label
 from .reference import normalise_chr
 from ..utils.small_utils import Utils
 
@@ -29,20 +30,31 @@ class SnpPanel:
     # -- loaders ------------------------------------------------------------
     @classmethod
     def from_vcf(cls, path: str) -> "SnpPanel":
-        """Load SNPs from a VCF/BCF text stream (1-based POS -> 0-based pos0)."""
+        """Load SNPs from a VCF/BCF text stream (1-based POS -> 0-based pos0).
+
+        The record's own ``ID`` field is kept as ``source_id`` but never used as the key:
+        an id written by ``bcftools annotate --set-id`` may encode ``%POS`` or ``%POS0``
+        and the file does not say which.
+        """
         rows = []
         with Utils.smart_open_read(path) as fh:
             for line in fh:
                 if line.startswith("#"):
                     continue
-                parts = line.split("\t", 5)
-                chrom, pos1 = parts[0], int(parts[1])
-                rows.append({"snp_id": f"{chrom}:{pos1}", "chr": chrom, "pos0": pos1 - 1})
+                parts = line.rstrip("\n").split("\t")
+                chrom, pos0 = parts[0], int(parts[1]) - 1
+                src = parts[2] if len(parts) >= 3 and parts[2] not in ("", ".") else None
+                rows.append({"snp_id": snp_label(chrom, pos0), "chr": chrom,
+                             "pos0": pos0, "source_id": src})
         return cls(pd.DataFrame(rows))
 
     @classmethod
     def from_bed(cls, path: str) -> "SnpPanel":
-        """Load SNPs from a BED (0-based start used as the SNP coordinate)."""
+        """Load SNPs from a BED (0-based start is the SNP coordinate).
+
+        A 4th-column name is kept as ``source_id`` for traceability but never used as the
+        key -- see :func:`~plasgenomicsutils.lib.intervals.snp_label`.
+        """
         rows = []
         with Utils.smart_open_read(path) as fh:
             for line in fh:
@@ -50,8 +62,9 @@ class SnpPanel:
                     continue
                 parts = line.rstrip("\n").split("\t")
                 chrom, start = parts[0], int(parts[1])
-                snp_id = parts[3] if len(parts) >= 4 and parts[3] else f"{chrom}:{start}"
-                rows.append({"snp_id": snp_id, "chr": chrom, "pos0": start})
+                src = parts[3] if len(parts) >= 4 and parts[3] else None
+                rows.append({"snp_id": snp_label(chrom, start), "chr": chrom,
+                             "pos0": start, "source_id": src})
         return cls(pd.DataFrame(rows))
 
     @classmethod
@@ -75,17 +88,18 @@ class SnpPanel:
             }
         return index
 
-    def snps_in_block(self, chrom: str, start0: int, end0_inclusive: int) -> np.ndarray:
-        """Global SNP column indices with 0-based pos in ``[start0, end0]`` on ``chrom``.
+    def snps_in_block(self, chrom: str, start0: int, end0: int) -> np.ndarray:
+        """Global SNP column indices with 0-based pos in ``[start0, end0)`` on ``chrom``.
 
-        Binary search -> O(log n + k). ``chrom`` must match the source spelling.
+        The interval is half-open, matching every other interval in the package. Binary
+        search -> O(log n + k). ``chrom`` must match the source spelling.
         """
         if chrom not in self._index:
             return np.array([], dtype=np.int64)
         pos = self._index[chrom]["pos0"]
         gidx = self._index[chrom]["global_idx"]
         lo = np.searchsorted(pos, start0, side="left")
-        hi = np.searchsorted(pos, end0_inclusive, side="right")
+        hi = np.searchsorted(pos, end0, side="left")
         return gidx[lo:hi]
 
     def __len__(self) -> int:
@@ -93,16 +107,20 @@ class SnpPanel:
 
 
 def positions_frame(path: str, fmt: str) -> pd.DataFrame:
-    """Load just (normalised-chr, pos) rows for callable-span / density work.
+    """Load just (normalised-chr, pos0) rows for callable-span / density work.
 
-    The chromosome is normalised (``Pf3D7_07_v3`` -> ``7``) so it keys against
-    the reference registry's chromosome lengths.
+    ``pos0`` is 0-based whichever format it came from: a VCF's 1-based ``POS`` is shifted,
+    a BED's start is already 0-based. The chromosome is normalised (``Pf3D7_07_v3`` -> ``7``)
+    so it keys against the reference registry's chromosome lengths.
     """
+    if fmt not in ("vcf", "bed"):
+        raise SystemExit(f"ERROR: unknown --snp-format '{fmt}' (expected vcf|bed)")
+    shift = 1 if fmt == "vcf" else 0
     rows = []
     with Utils.smart_open_read(path) as fh:
         for line in fh:
             if line.startswith(("#", "track", "browser")):
                 continue
             p = line.rstrip("\n").split("\t")
-            rows.append((normalise_chr(p[0]), int(p[1])))  # vcf POS or bed start
-    return pd.DataFrame(rows, columns=["chr", "pos"])
+            rows.append((normalise_chr(p[0]), int(p[1]) - shift))
+    return pd.DataFrame(rows, columns=["chr", "pos0"])

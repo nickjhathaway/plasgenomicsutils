@@ -173,10 +173,10 @@ def test_snp_bed_matches_vcf_snp_ids(tmp_path):
     bed = str(tmp_path / "out.snps.bed")
     F.snp_bed(inp, bed)
     rows = [ln.split("\t") for ln in open(bed).read().splitlines()]
-    assert [r[1:] for r in rows] == [["99", "100", "chr1:100"], ["249", "250", "chr1:250"]]
+    assert [r[1:] for r in rows] == [["99", "100", "chr1:99"], ["249", "250", "chr1:249"]]
     # loads as a SNP panel identical to the VCF-derived ids/coords (build_ibd_matrix input)
     p = SnpPanel.from_bed(bed).df
-    assert list(p.snp_id) == ["chr1:100", "chr1:250"]
+    assert list(p.snp_id) == ["chr1:99", "chr1:249"]
     assert list(p.pos0) == [99, 249]
 
 

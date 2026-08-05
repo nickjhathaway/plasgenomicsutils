@@ -21,9 +21,8 @@ def get_parser_selection_statistic() -> argparse.ArgumentParser:
     p.add_argument("--matrix", required=True,
                    help="Matrix from build_ibd_matrix: the prefix or the .npz path")
     p.add_argument("--af", required=True,
-                   help="TSV (snp_id, af): global allele frequencies (required; "
-                        "generate with compute_allele_freqs --zero-based). AFs are not "
-                        "estimated from the matrix.")
+                   help="TSV (snp_id, af): global allele frequencies (required; generate "
+                        "with compute_allele_freqs). AFs are not estimated from the matrix.")
     p.add_argument("--af-group", default=None,
                    help="TSV (group, snp_id, af): per-group AFs; falls back to --af.")
     p.add_argument("--meta", default=None,

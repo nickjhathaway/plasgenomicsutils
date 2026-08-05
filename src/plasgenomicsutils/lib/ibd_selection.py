@@ -20,12 +20,21 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2
 
+from .intervals import SNP_COORD_SYSTEM, check_snp_coord_system
+from ..utils.small_utils import Utils
+
 
 # ---------------------------------------------------------------------------
 # label / AF loading
 # ---------------------------------------------------------------------------
 
-def parse_snp_labels(snp_labels: list) -> pd.DataFrame:
+def parse_snp_labels(snp_labels: list, with_pos_vcf: bool = False) -> pd.DataFrame:
+    """Split ``chr:pos0`` labels into columns. ``pos`` is 0-based, like the label.
+
+    ``with_pos_vcf`` adds the 1-based VCF position as ``pos_vcf`` for cross-referencing a
+    variant against the VCF or a browser; it is redundant with ``pos``, so it is off by
+    default rather than inflating every per-SNP table.
+    """
     rows = []
     for label in snp_labels:
         if ":" in label:
@@ -33,12 +42,24 @@ def parse_snp_labels(snp_labels: list) -> pd.DataFrame:
             rows.append({"snp_id": label, "chr": chrom, "pos": int(pos)})
         else:
             rows.append({"snp_id": label, "chr": "unknown", "pos": -1})
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if with_pos_vcf and len(df):
+        df["pos_vcf"] = np.where(df["pos"] >= 0, df["pos"] + 1, -1)
+    return df
+
+
+def _read_af_table(af_path: str, usecols: list) -> pd.DataFrame:
+    """Read an AF table, verifying its stamped SNP coordinate system first."""
+    with Utils.smart_open_read(af_path) as fh:
+        first = fh.readline().strip()
+    stamped = first.split("=", 1)[1] if first.startswith("#snp_coord_system=") else None
+    check_snp_coord_system(stamped, af_path)
+    return pd.read_csv(af_path, sep="\t", usecols=usecols, comment="#")
 
 
 def load_global_af(af_path: str, snp_labels: list) -> np.ndarray:
     """Global AFs aligned to ``snp_labels``; any missing SNP is a hard error."""
-    af_df = pd.read_csv(af_path, sep="\t", usecols=["snp_id", "af"])
+    af_df = _read_af_table(af_path, ["snp_id", "af"])
     af_map = af_df.set_index("snp_id")["af"].to_dict()
     af = np.array([af_map.get(s, np.nan) for s in snp_labels])
     missing = int(np.isnan(af).sum())
@@ -50,13 +71,12 @@ def load_global_af(af_path: str, snp_labels: list) -> np.ndarray:
         print("  First 10 SNP IDs found in AF file:")
         for s in list(af_map.keys())[:10]:
             print(f"    '{s}'")
-        print("  Hint: rerun allele_freqs with --zero-based to match 0-based matrix labels.")
         raise SystemExit(1)
     return af
 
 
 def load_group_af_table(af_group_path: str) -> pd.DataFrame:
-    df = pd.read_csv(af_group_path, sep="\t", usecols=["group", "snp_id", "af"])
+    df = _read_af_table(af_group_path, ["group", "snp_id", "af"])
     print(f"  Loaded group AF table: {len(df):,} rows, "
           f"{df['group'].nunique()} groups, {df['snp_id'].nunique():,} SNPs")
     return df
@@ -72,7 +92,6 @@ def get_af_for_group(group, snp_labels, group_af_table, global_af) -> np.ndarray
         if missing > 0:
             print(f"  ERROR: {missing:,} SNPs (out of {len(snp_labels):,}) missing from "
                   f"group AF file for group '{group}'.")
-            print("  Hint: rerun allele_freqs with --zero-based to match 0-based matrix labels.")
             raise SystemExit(1)
         return af
     return global_af.copy()

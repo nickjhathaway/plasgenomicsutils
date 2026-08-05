@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import coo_matrix, csr_matrix, load_npz, save_npz
 
+from .intervals import SNP_COORD_SYSTEM, blocks_to_half_open, check_snp_coord_system
 from .vcf_io import SnpPanel
 
 
@@ -21,8 +22,14 @@ BLOCKS_DTYPE = {
 
 
 def read_blocks(path: str, sep: str = "\t") -> pd.DataFrame:
-    """Read an hmmibd-rs blocks TSV (sample1, sample2, chr, start, end, different, Nsnp)."""
-    return pd.read_csv(path, sep=sep, comment="#", dtype=BLOCKS_DTYPE)
+    """Read an hmmibd-rs blocks TSV (sample1, sample2, chr, start, end, different, Nsnp).
+
+    hmmibd-rs reports ``start`` and ``end`` as the 0-based positions of the segment's first
+    and last SNP, both inclusive; ``end`` is shifted by one so the returned intervals are
+    half-open ``[start, end)`` like every other interval here (see :mod:`.intervals`).
+    """
+    df = pd.read_csv(path, sep=sep, comment="#", dtype=BLOCKS_DTYPE)
+    return blocks_to_half_open(df)
 
 
 def build_pair_index(blocks_df: pd.DataFrame) -> tuple[dict, list]:
@@ -82,7 +89,11 @@ def build_matrix(
 def save_matrix(mat: csr_matrix, pair_labels: list, snp_labels: list, out_prefix: str) -> None:
     save_npz(f"{out_prefix}.npz", mat)
     Path(f"{out_prefix}.pair_labels.txt").write_text("\n".join(pair_labels) + "\n")
-    Path(f"{out_prefix}.snp_labels.txt").write_text("\n".join(snp_labels) + "\n")
+    # The coordinate system is recorded rather than left to be inferred from the numbers:
+    # a panel whose labels are off by one still *matches* neighbouring SNPs in a dense
+    # panel, so a mismatch cannot be detected reliably by comparing label sets.
+    Path(f"{out_prefix}.snp_labels.txt").write_text(
+        f"#snp_coord_system={SNP_COORD_SYSTEM}\n" + "\n".join(snp_labels) + "\n")
 
 
 def load_matrix(out_prefix: str) -> tuple[csr_matrix, list, list]:
@@ -91,8 +102,17 @@ def load_matrix(out_prefix: str) -> tuple[csr_matrix, list, list]:
         out_prefix = out_prefix[: -len(".npz")]
     mat = load_npz(f"{out_prefix}.npz")
     pairs = Path(f"{out_prefix}.pair_labels.txt").read_text().splitlines()
-    snps = Path(f"{out_prefix}.snp_labels.txt").read_text().splitlines()
+    lines = Path(f"{out_prefix}.snp_labels.txt").read_text().splitlines()
+    check_snp_coord_system(_read_coord_header(lines), f"{out_prefix}.snp_labels.txt")
+    snps = [ln for ln in lines if not ln.startswith("#")]
     return mat, pairs, snps
+
+
+def _read_coord_header(lines: list) -> str | None:
+    for ln in lines[:1]:
+        if ln.startswith("#snp_coord_system="):
+            return ln.split("=", 1)[1].strip()
+    return None
 
 
 def pair_summary(mat: csr_matrix, pair_labels: list) -> pd.DataFrame:

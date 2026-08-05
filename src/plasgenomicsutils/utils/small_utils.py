@@ -75,7 +75,13 @@ class Utils:
         return p
 
     @staticmethod
-    def write_tsv_gz(df, path: str) -> None:
-        """Write a pandas DataFrame as a tab-delimited, gzip-compressed file."""
+    def write_tsv_gz(df, path: str, header_comment: str | None = None) -> None:
+        """Write a pandas DataFrame as a tab-delimited, gzip-compressed file.
+
+        ``header_comment`` is written as a leading ``#`` line, for stamping metadata a
+        reader should verify rather than infer (read it back with ``comment='#'``).
+        """
         with gzip.open(path, "wt") as fh:
+            if header_comment:
+                fh.write(f"#{header_comment}\n")
             df.to_csv(fh, sep="\t", index=False)

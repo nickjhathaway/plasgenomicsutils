@@ -43,18 +43,18 @@ def test_single_pass_allele_freqs(tmp_path):
         "chr1\t200\t.\tA\tT\t.\tPASS\t.\tGT\t0/0\t0/0\t0/1\t./.\n")  # global 1/6, A 0/4, B 1/2
 
     s2g = {"S1": "A", "S2": "A", "S3": "B", "S4": "B"}
-    gdf, rdf = compute_allele_freqs(str(vcf), sample_to_group=s2g, zero_based=False)
+    gdf, rdf = compute_allele_freqs(str(vcf), sample_to_group=s2g)
 
     g = dict(zip(gdf["snp_id"], gdf["af"]))
-    assert np.isclose(g["chr1:100"], 6 / 8)
-    assert np.isclose(g["chr1:200"], 1 / 6)
+    assert np.isclose(g["chr1:99"], 6 / 8)
+    assert np.isclose(g["chr1:199"], 1 / 6)
 
     rA = rdf[(rdf["group"] == "A")].set_index("snp_id")["af"].to_dict()
     rB = rdf[(rdf["group"] == "B")].set_index("snp_id")["af"].to_dict()
-    assert np.isclose(rA["chr1:100"], 2 / 4)
-    assert np.isclose(rB["chr1:100"], 4 / 4)
-    assert np.isclose(rA["chr1:200"], 0 / 4)
-    assert np.isclose(rB["chr1:200"], 1 / 2)  # S4 is ./. so only S3 counts (1 alt / 2)
+    assert np.isclose(rA["chr1:99"], 2 / 4)
+    assert np.isclose(rB["chr1:99"], 4 / 4)
+    assert np.isclose(rA["chr1:199"], 0 / 4)
+    assert np.isclose(rB["chr1:199"], 1 / 2)  # S4 is ./. so only S3 counts (1 alt / 2)
 
     # group table is group-major, sorted groups
     assert list(rdf["group"].unique()) == ["A", "B"]

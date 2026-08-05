@@ -43,7 +43,7 @@ def test_build_matrix_known_answer(tmp_path):
         "B\tC\tchr1\t0\t1000\t1\t9\n")       # different==1 -> excluded, but pair exists
 
     panel = SnpPanel.load(vcf, "vcf")
-    assert panel.labels == ["chr1:100", "chr1:200", "chr1:300", "chr1:400"]
+    assert panel.labels == ["chr1:99", "chr1:199", "chr1:299", "chr1:399"]
 
     blocks_df = ibd_matrix.read_blocks(blocks)
     pair_to_row, pair_labels = ibd_matrix.build_pair_index(blocks_df)
@@ -62,10 +62,12 @@ def test_snps_in_block_binary_search(tmp_path):
     bed = _write(tmp_path / "s.bed",
         "chr1\t10\t11\nchr1\t20\t21\nchr1\t30\t31\nchr2\t10\t11\n")
     panel = SnpPanel.load(bed, "bed")
-    # inclusive [20,30] on chr1 -> the two SNPs at 20 and 30
+    # half-open [20, 30) on chr1 -> only the SNP at 20; 30 is the excluded end
     hits = sorted(panel.snps_in_block("chr1", 20, 30).tolist())
-    got = sorted(panel.df.loc[hits, "pos0"].tolist())
-    assert got == [20, 30]
+    assert sorted(panel.df.loc[hits, "pos0"].tolist()) == [20]
+    # extending the end past 30 takes it in
+    hits = sorted(panel.snps_in_block("chr1", 20, 31).tolist())
+    assert sorted(panel.df.loc[hits, "pos0"].tolist()) == [20, 30]
     # chromosome not present -> empty
     assert panel.snps_in_block("chrX", 0, 100).size == 0
 

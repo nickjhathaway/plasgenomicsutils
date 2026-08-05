@@ -1,6 +1,6 @@
 """Global + per-group alternate-allele frequencies from a BCF/VCF.
 
-Alt AF = alt-allele-count / non-missing-allele-count, per ``chr:pos``. The global
+Alt AF = alt-allele-count / non-missing-allele-count, per ``chr:pos0``. The global
 table and every group table are computed in a single pass over the file,
 accumulating per-group counts as it goes. Group table is group-major with SNP
 order following record order.
@@ -14,11 +14,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .intervals import snp_label
+
 
 def compute_allele_freqs(
     bcf_path: str,
     sample_to_group: dict[str, str] | None = None,
-    zero_based: bool = False,
+    with_pos_vcf: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Single pass over ``bcf_path``.
 
@@ -28,9 +30,14 @@ def compute_allele_freqs(
         Mapping of sample name -> group for samples present in the metadata.
         Samples absent from the mapping contribute to the global AF only (they
         are excluded from every group). ``None`` computes global AF only.
-    zero_based:
-        If True, emit ``chr:pos-1`` snp_ids (0-based) to match matrix labels
-        from :mod:`plasgenomicsutils.lib.ibd_matrix`.
+    with_pos_vcf:
+        Add a ``pos_vcf`` column holding the 1-based VCF position, for looking a
+        variant up by eye. Off by default -- it is derivable from ``snp_id`` and
+        only inflates the file.
+
+    ``snp_id`` is always the canonical 0-based ``chr:pos0`` label
+    (:func:`~plasgenomicsutils.lib.intervals.snp_label`), matching the IBD matrix
+    columns; the record's own ``ID`` field is ignored.
 
     Returns
     -------
@@ -58,8 +65,8 @@ def compute_allele_freqs(
     group_rows: dict[str, list[dict]] = {r: [] for r in groups}
 
     for v in vcf:
-        pos = v.POS - 1 if zero_based else v.POS
-        snp_id = f"{v.CHROM}:{pos}"
+        pos0 = v.POS - 1                        # VCF is 1-based; everything inward is not
+        snp_id = snp_label(v.CHROM, pos0)
 
         # (n_samples, ploidy+1) int; last column is phase, missing allele = -1
         alleles = v.genotype.array()[:, :-1]
@@ -68,7 +75,10 @@ def compute_allele_freqs(
         g_an = int(called.sum())
         g_ac = int(is_alt.sum())
 
-        global_rows.append({"snp_id": snp_id, "af": g_ac / g_an if g_an else float("nan")})
+        grow = {"snp_id": snp_id, "af": g_ac / g_an if g_an else float("nan")}
+        if with_pos_vcf:
+            grow["pos_vcf"] = v.POS
+        global_rows.append(grow)
         for r in groups:
             m = group_masks[r]
             an = int(called[m].sum())

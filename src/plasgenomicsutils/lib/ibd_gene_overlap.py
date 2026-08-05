@@ -45,6 +45,10 @@ def gene_block_overlap(
     genes_df  : gene intervals (``name, chr, start, end``).
     sample_to_group : sample -> group label.
     within    : pad each gene interval by this many bp on both sides (default 0).
+
+    Coordinates are 0-based half-open ``[start, end)`` (BED). ``hmmibd-rs`` reports both
+    block endpoints as the 0-based position of the segment's first and last SNP, so pass
+    blocks through :func:`blocks_to_half_open` first to make ``end`` exclusive.
     Returns a data frame:
     ``gene, chr, start, end, group_a, group_b, n_pairs_ibd, n_pairs_total, frac_pairs_ibd``
     (one row per gene x group-pair; every group-pair is emitted, even with 0 sharing).
@@ -74,7 +78,7 @@ def gene_block_overlap(
         gp_counts = {gp: 0 for gp in gp_index}
         d = by_chr.get(chrom)
         if d is not None and len(d):
-            m = (d["start"].to_numpy() <= hi) & (d["end"].to_numpy() >= lo)
+            m = (d["start"].to_numpy() < hi) & (d["end"].to_numpy() > lo)
             if m.any():
                 s1 = d["sample1"].to_numpy()[m]
                 s2 = d["sample2"].to_numpy()[m]

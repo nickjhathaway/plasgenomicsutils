@@ -15,12 +15,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .ibd_matrix import read_blocks
 from .reference import Reference
 
 
 def callable_spans(pos_df: pd.DataFrame, ref: Reference) -> pd.DataFrame:
     """Per-chromosome first/last SNP, SNP count, callable span, and full length."""
-    g = pos_df.groupby("chr")["pos"]
+    g = pos_df.groupby("chr")["pos0"]
     out = pd.DataFrame({
         "first_snp": g.min(), "last_snp": g.max(), "n_snps": g.size(),
     }).reset_index()
@@ -31,7 +32,7 @@ def callable_spans(pos_df: pd.DataFrame, ref: Reference) -> pd.DataFrame:
 
 def per_pair_fraction(blocks_path, sep, bp_per_cm, callable_cm) -> pd.DataFrame:
     """Per-pair total/max IBD and callable-denominator f. Every pair emitted."""
-    df = pd.read_csv(blocks_path, sep=sep, comment="#")
+    df = read_blocks(blocks_path, sep=sep)          # blocks come back half-open
     s1, s2 = df["sample1"].astype(str), df["sample2"].astype(str)
     df["pair"] = np.where(s1 < s2, s1 + "__" + s2, s2 + "__" + s1)
 
@@ -39,7 +40,7 @@ def per_pair_fraction(blocks_path, sep, bp_per_cm, callable_cm) -> pd.DataFrame:
 
     ibd = df[df["different"] == 0] if "different" in df.columns else df
     ibd = ibd.copy()
-    ibd["seg_bp"] = (ibd["end"].astype(int) - ibd["start"].astype(int) + 1).clip(lower=0)
+    ibd["seg_bp"] = (ibd["end"].astype(int) - ibd["start"].astype(int)).clip(lower=0)
     agg = (ibd.groupby("pair")["seg_bp"]
               .agg(total_ibd_bp="sum", max_ibd_bp="max")
               .reset_index())
@@ -64,7 +65,7 @@ def snp_density(pos_df, ref: Reference, bp_per_cm, callable_cm, full_cm, min_snp
         if full_bp is None:
             continue
         n_win = int(np.ceil(full_bp / win_bp))
-        win_idx = (grp["pos"].values // win_bp).astype(int)
+        win_idx = (grp["pos0"].values // win_bp).astype(int)
         counts = np.bincount(win_idx, minlength=n_win)[:n_win]
         for w, c in enumerate(counts):
             recs.append({"chr": chrom, "window_cm": w, "n_snps": int(c)})

@@ -249,13 +249,14 @@ def snp_bed(inp: str, bed: str) -> None:
     """Write a BED of the SNP positions in ``inp`` — the SNP panel the IBD tools read
     (``build_ibd_matrix --snp-format bed``).
 
-    Columns: ``chrom``, 0-based start, end, and a ``chrom:pos`` (1-based) name that matches
-    the VCF-derived SNP id, so a panel taken as BED or as VCF yields identical SNP ids.
-    Only SNP records are emitted.
+    Columns: ``chrom``, 0-based start, end, and a ``chrom:pos0`` name. Every column is
+    0-based, so the file does not contradict itself, and the name matches the canonical
+    label (:func:`~plasgenomicsutils.lib.intervals.snp_label`) that a panel loaded from
+    either BED or VCF derives. Only SNP records are emitted.
     """
     require("bcftools")
     sh(f"bcftools view -v snps {q(inp)} -Ou "
-       f"| bcftools query -f '%CHROM\\t%POS0\\t%END\\t%CHROM:%POS\\n' - > {q(bed)}",
+       f"| bcftools query -f '%CHROM\\t%POS0\\t%END\\t%CHROM:%POS0\\n' - > {q(bed)}",
        tools=("bcftools",))
 
 
