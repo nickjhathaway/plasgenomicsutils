@@ -1,6 +1,6 @@
 """Downstream analysis of the binary IBD matrix.
 
-Per-pair / per-SNP / per-region / per-chromosome IBD summaries.
+Per-pair / per-SNP / per-group / per-chromosome IBD summaries.
 """
 
 from __future__ import annotations
@@ -37,28 +37,28 @@ def per_snp_summary(mat, snp_labels: list) -> pd.DataFrame:
     return snp_df
 
 
-def per_snp_summary_for_region(mat, annotated_pairs, snp_labels, region) -> pd.DataFrame:
-    mask = (annotated_pairs["region1"] == region) & (annotated_pairs["region2"] == region)
+def per_snp_summary_for_group(mat, annotated_pairs, snp_labels, group) -> pd.DataFrame:
+    mask = (annotated_pairs["group1"] == group) & (annotated_pairs["group2"] == group)
     row_idx = annotated_pairs.index[mask].values
     n_within = len(row_idx)
     if n_within == 0:
         return pd.DataFrame()
     counts = np.asarray(mat[row_idx, :].sum(axis=0)).ravel()
     snp_df = parse_snp_labels(snp_labels)
-    snp_df["region"] = region
+    snp_df["group"] = group
     snp_df["n_pairs_ibd"] = counts
     snp_df["n_pairs_total"] = n_within
     snp_df["frac_pairs_ibd"] = counts / n_within
     return snp_df
 
 
-def per_snp_summary_between_regions(mat, annotated_pairs, snp_labels, region_a, region_b) -> pd.DataFrame:
-    if region_a == region_b:
-        mask = (annotated_pairs["region1"] == region_a) & (annotated_pairs["region2"] == region_a)
+def per_snp_summary_between_groups(mat, annotated_pairs, snp_labels, group_a, group_b) -> pd.DataFrame:
+    if group_a == group_b:
+        mask = (annotated_pairs["group1"] == group_a) & (annotated_pairs["group2"] == group_a)
     else:
         mask = (
-            ((annotated_pairs["region1"] == region_a) & (annotated_pairs["region2"] == region_b)) |
-            ((annotated_pairs["region1"] == region_b) & (annotated_pairs["region2"] == region_a))
+            ((annotated_pairs["group1"] == group_a) & (annotated_pairs["group2"] == group_b)) |
+            ((annotated_pairs["group1"] == group_b) & (annotated_pairs["group2"] == group_a))
         )
     row_idx = annotated_pairs.index[mask].values
     n_pairs = len(row_idx)
@@ -66,37 +66,37 @@ def per_snp_summary_between_regions(mat, annotated_pairs, snp_labels, region_a, 
         return pd.DataFrame()
     counts = np.asarray(mat[row_idx, :].sum(axis=0)).ravel()
     snp_df = parse_snp_labels(snp_labels)
-    snp_df["region_a"] = region_a
-    snp_df["region_b"] = region_b
+    snp_df["group_a"] = group_a
+    snp_df["group_b"] = group_b
     snp_df["n_pairs_ibd"] = counts
     snp_df["n_pairs_total"] = n_pairs
     snp_df["frac_pairs_ibd"] = counts / n_pairs
     return snp_df
 
 
-def annotate_pairs_with_regions(pair_summary, meta, region_col="region") -> pd.DataFrame:
-    meta_idx = meta.set_index("sample")[region_col].to_dict()
+def annotate_pairs_with_groups(pair_summary, meta, group_col="group") -> pd.DataFrame:
+    meta_idx = meta.set_index("sample")[group_col].to_dict()
     pair_summary = pair_summary.copy()
-    pair_summary["region1"] = pair_summary["sample1"].map(meta_idx).fillna("unknown")
-    pair_summary["region2"] = pair_summary["sample2"].map(meta_idx).fillna("unknown")
-    pair_summary["same_region"] = pair_summary["region1"] == pair_summary["region2"]
+    pair_summary["group1"] = pair_summary["sample1"].map(meta_idx).fillna("unknown")
+    pair_summary["group2"] = pair_summary["sample2"].map(meta_idx).fillna("unknown")
+    pair_summary["same_group"] = pair_summary["group1"] == pair_summary["group2"]
     return pair_summary
 
 
-def within_between_region_ibd(annotated_pairs) -> pd.DataFrame:
+def within_between_group_ibd(annotated_pairs) -> pd.DataFrame:
     return (
-        annotated_pairs.groupby("same_region")["frac_ibd"]
+        annotated_pairs.groupby("same_group")["frac_ibd"]
         .agg(["mean", "median", "std", "count"])
-        .rename(index={True: "within_region", False: "between_region"})
+        .rename(index={True: "within_group", False: "between_group"})
         .reset_index()
-        .rename(columns={"same_region": "comparison_type"})
+        .rename(columns={"same_group": "comparison_type"})
     )
 
 
-def pairwise_region_ibd(annotated_pairs) -> pd.DataFrame:
+def pairwise_group_ibd(annotated_pairs) -> pd.DataFrame:
     df = annotated_pairs.copy()
-    df["reg_a"] = np.where(df["region1"] <= df["region2"], df["region1"], df["region2"])
-    df["reg_b"] = np.where(df["region1"] <= df["region2"], df["region2"], df["region1"])
+    df["reg_a"] = np.where(df["group1"] <= df["group2"], df["group1"], df["group2"])
+    df["reg_b"] = np.where(df["group1"] <= df["group2"], df["group2"], df["group1"])
     return (
         df.groupby(["reg_a", "reg_b"])["frac_ibd"]
         .agg(["mean", "median", "std", "count"])

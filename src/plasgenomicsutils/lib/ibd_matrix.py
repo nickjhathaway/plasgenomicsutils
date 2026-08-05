@@ -86,6 +86,9 @@ def save_matrix(mat: csr_matrix, pair_labels: list, snp_labels: list, out_prefix
 
 
 def load_matrix(out_prefix: str) -> tuple[csr_matrix, list, list]:
+    # accept the prefix (as build_ibd_matrix writes) or the full "<prefix>.npz" path
+    if out_prefix.endswith(".npz"):
+        out_prefix = out_prefix[: -len(".npz")]
     mat = load_npz(f"{out_prefix}.npz")
     pairs = Path(f"{out_prefix}.pair_labels.txt").read_text().splitlines()
     snps = Path(f"{out_prefix}.snp_labels.txt").read_text().splitlines()

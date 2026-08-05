@@ -46,22 +46,28 @@ Downstream of an IBD caller (we use [`hmmibd-rs`](https://github.com/bguo068/hmm
 plasgenomicsutils build_ibd_matrix --blocks blocks.hmm.txt --snps snps.bed \
     --snp-format bed --output ibd_matrix
 
-# 2. per-pair / per-SNP / per-region / per-chromosome summaries
+# 2. per-pair / per-SNP / per-group / per-chromosome summaries
+#    (--group-col names the metadata column to group samples by; it need not be geographic)
 plasgenomicsutils analyze_ibd_matrix --matrix ibd_matrix --meta meta.csv \
-    --region-col region --pairwise-region-snp --output ibd_analysis
+    --group-col region --pairwise-group-snp --output ibd_analysis
 
-# 3. global + per-region allele frequencies (single pass over the BCF)
+# 3. global + per-group allele frequencies (single pass over the BCF)
 plasgenomicsutils compute_allele_freqs --bcf clean.bcf --meta meta.tsv \
-    --region-col region --zero-based --output afs/
+    --group-col region --zero-based --output afs/
 
-# 4. IBD-based selection statistic (XiR,s), genome-wide and per-region
+# 4. IBD-based selection statistic (XiR,s), genome-wide and per-group
 plasgenomicsutils ibd_selection_statistic --matrix ibd_matrix \
-    --af afs/allele_freqs.tsv.gz --af-region afs/region_allele_freqs.tsv.gz \
-    --meta meta.csv --region-col region --output ibd_selection
+    --af afs/allele_freqs.tsv.gz --af-group afs/group_allele_freqs.tsv.gz \
+    --meta meta.csv --group-col region --output ibd_selection
 
 # per-pair IBD fraction (callable-genome denominator) + SNP density
 plasgenomicsutils ibd_fraction_and_snp_density --blocks blocks.hmm.txt \
     --snps snps.bed --snp-format bed --reference pf3d7 --output ibd_frac
+
+# 5. per-gene IBD-block overlap between groups (fraction of pairs whose IBD block
+#    overlaps each gene) -> feeds the R gene triangles
+plasgenomicsutils ibd_gene_overlap --blocks blocks.hmm.txt --genes genes.tsv \
+    --meta meta.csv --group-col region --output gene_overlap.tsv.gz
 ```
 
 SNP-panel label coordinates must be consistent between the matrix and the allele

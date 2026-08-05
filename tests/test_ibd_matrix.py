@@ -16,6 +16,16 @@ def _write(path, text):
     return str(path)
 
 
+def test_load_matrix_accepts_prefix_or_npz(tmp_path):
+    from scipy.sparse import csr_matrix
+    prefix = str(tmp_path / "ibd_matrix")
+    ibd_matrix.save_matrix(csr_matrix(np.array([[1, 0], [1, 1]])),
+                           ["p1__p2", "p3__p4"], ["c:1", "c:2"], prefix)
+    a = ibd_matrix.load_matrix(prefix)              # the prefix, as documented
+    b = ibd_matrix.load_matrix(prefix + ".npz")     # the full .npz path
+    assert (a[0] != b[0]).nnz == 0 and a[1] == b[1] == ["p1__p2", "p3__p4"]
+
+
 def test_build_matrix_known_answer(tmp_path):
     # 4 SNPs on chr1 at 1-based POS 100,200,300,400 -> pos0 99,199,299,399
     vcf = _write(tmp_path / "s.vcf",

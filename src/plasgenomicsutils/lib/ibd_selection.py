@@ -55,23 +55,23 @@ def load_global_af(af_path: str, snp_labels: list) -> np.ndarray:
     return af
 
 
-def load_region_af_table(af_region_path: str) -> pd.DataFrame:
-    df = pd.read_csv(af_region_path, sep="\t", usecols=["region", "snp_id", "af"])
-    print(f"  Loaded region AF table: {len(df):,} rows, "
-          f"{df['region'].nunique()} regions, {df['snp_id'].nunique():,} SNPs")
+def load_group_af_table(af_group_path: str) -> pd.DataFrame:
+    df = pd.read_csv(af_group_path, sep="\t", usecols=["group", "snp_id", "af"])
+    print(f"  Loaded group AF table: {len(df):,} rows, "
+          f"{df['group'].nunique()} groups, {df['snp_id'].nunique():,} SNPs")
     return df
 
 
-def get_af_for_region(region, snp_labels, region_af_table, global_af) -> np.ndarray:
-    """Region AF with fallback: per-region table -> global AF. Never from the matrix."""
-    if region_af_table is not None and region in region_af_table["region"].values:
-        sub = region_af_table[region_af_table["region"] == region]
+def get_af_for_group(group, snp_labels, group_af_table, global_af) -> np.ndarray:
+    """Group AF with fallback: per-group table -> global AF. Never from the matrix."""
+    if group_af_table is not None and group in group_af_table["group"].values:
+        sub = group_af_table[group_af_table["group"] == group]
         af_map = sub.set_index("snp_id")["af"].to_dict()
         af = np.array([af_map.get(s, np.nan) for s in snp_labels])
         missing = int(np.isnan(af).sum())
         if missing > 0:
             print(f"  ERROR: {missing:,} SNPs (out of {len(snp_labels):,}) missing from "
-                  f"region AF file for region '{region}'.")
+                  f"group AF file for group '{group}'.")
             print("  Hint: rerun allele_freqs with --zero-based to match 0-based matrix labels.")
             raise SystemExit(1)
         return af
@@ -82,12 +82,12 @@ def get_af_for_region(region, snp_labels, region_af_table, global_af) -> np.ndar
 # pair subsetting
 # ---------------------------------------------------------------------------
 
-def within_region_row_indices(pair_labels, meta, region_col, region) -> np.ndarray:
-    """Row indices for pairs where BOTH samples are from ``region``."""
-    sample_to_region = meta.set_index("sample")[region_col].to_dict()
+def within_group_row_indices(pair_labels, meta, group_col, group) -> np.ndarray:
+    """Row indices for pairs where BOTH samples are from ``group``."""
+    sample_to_group = meta.set_index("sample")[group_col].to_dict()
     idx = [
         i for i, label in enumerate(pair_labels)
-        if all(sample_to_region.get(s) == region for s in label.split("__", 1))
+        if all(sample_to_group.get(s) == group for s in label.split("__", 1))
     ]
     return np.array(idx, dtype=np.int64)
 
@@ -187,12 +187,12 @@ def _normalise_and_finalise(raw_stat, af, valid, n_bins):
     }, bin_df
 
 
-def assemble_output(snp_df, stats, alpha, region=None) -> tuple[pd.DataFrame, float]:
+def assemble_output(snp_df, stats, alpha, group=None) -> tuple[pd.DataFrame, float]:
     n_valid = int(np.sum(~np.isnan(stats["chi2_stat"])))
     threshold = -np.log10(alpha / n_valid) if n_valid > 0 else np.nan
     out = snp_df.copy()
-    if region is not None:
-        out.insert(0, "region", region)
+    if group is not None:
+        out.insert(0, "group", group)
     out["maf"] = stats["maf"]
     out["bin_id"] = stats["bin_id"]
     out["raw_stat"] = stats["raw_stat"]

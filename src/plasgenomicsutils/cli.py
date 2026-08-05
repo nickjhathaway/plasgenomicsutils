@@ -24,6 +24,7 @@ from .scripts.ibd.compute_allele_freqs import compute_allele_freqs
 from .scripts.ibd.analyze_matrix import analyze_matrix
 from .scripts.ibd.selection_statistic import selection_statistic
 from .scripts.ibd.fraction_and_snp_density import fraction_and_snp_density
+from .scripts.ibd.gene_overlap import gene_overlap
 
 # -- Fws leaves ---------------------------------------------------------------
 from .scripts.fws.calculate_fws import calculate_fws
@@ -69,6 +70,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "IBD-based selection statistic (XiR,s), genome-wide and per-region"),
         "ibd_fraction_and_snp_density": Command(fraction_and_snp_density,
             "Per-pair IBD fraction (callable denominator) and SNP density"),
+        "ibd_gene_overlap": Command(gene_overlap,
+            "Fraction of pairs whose IBD block overlaps each gene, per group pair"),
     },
     "vcf": {
         "filter_ad_regenotype": Command(filter_ad_regenotype,
@@ -143,7 +146,7 @@ _BASH_COMPLETION = r"""# bash completion for plasgenomicsutils
 
 _plasgenomicsutils_complete()
 {
-    # keep '_' and '=' out of the word breaks so --region-col / --bcf=path stay one token
+    # keep '_' and '=' out of the word breaks so --group-col / --bcf=path stay one token
     local _OLD_WB="${COMP_WORDBREAKS-}"
     COMP_WORDBREAKS="${COMP_WORDBREAKS//_/}"
     COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"

@@ -42,19 +42,19 @@ def test_single_pass_allele_freqs(tmp_path):
         "chr1\t100\t.\tA\tT\t.\tPASS\t.\tGT\t1/1\t0/0\t1/1\t1/1\n"   # global 6/8, A 2/4, B 4/4
         "chr1\t200\t.\tA\tT\t.\tPASS\t.\tGT\t0/0\t0/0\t0/1\t./.\n")  # global 1/6, A 0/4, B 1/2
 
-    s2r = {"S1": "A", "S2": "A", "S3": "B", "S4": "B"}
-    gdf, rdf = compute_allele_freqs(str(vcf), sample_to_region=s2r, zero_based=False)
+    s2g = {"S1": "A", "S2": "A", "S3": "B", "S4": "B"}
+    gdf, rdf = compute_allele_freqs(str(vcf), sample_to_group=s2g, zero_based=False)
 
     g = dict(zip(gdf["snp_id"], gdf["af"]))
     assert np.isclose(g["chr1:100"], 6 / 8)
     assert np.isclose(g["chr1:200"], 1 / 6)
 
-    rA = rdf[(rdf["region"] == "A")].set_index("snp_id")["af"].to_dict()
-    rB = rdf[(rdf["region"] == "B")].set_index("snp_id")["af"].to_dict()
+    rA = rdf[(rdf["group"] == "A")].set_index("snp_id")["af"].to_dict()
+    rB = rdf[(rdf["group"] == "B")].set_index("snp_id")["af"].to_dict()
     assert np.isclose(rA["chr1:100"], 2 / 4)
     assert np.isclose(rB["chr1:100"], 4 / 4)
     assert np.isclose(rA["chr1:200"], 0 / 4)
     assert np.isclose(rB["chr1:200"], 1 / 2)  # S4 is ./. so only S3 counts (1 alt / 2)
 
-    # region table is region-major, sorted regions
-    assert list(rdf["region"].unique()) == ["A", "B"]
+    # group table is group-major, sorted groups
+    assert list(rdf["group"].unique()) == ["A", "B"]

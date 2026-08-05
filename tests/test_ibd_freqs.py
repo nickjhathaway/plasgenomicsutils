@@ -31,8 +31,8 @@ def test_global_and_region_allele_freqs(tmp_path):
     assert _af(g, "chr1:10") == pytest.approx(0.5)
     assert _af(g, "chr1:20") == pytest.approx(0.75)
 
-    ga = r[r.region == "A"]
-    gb = r[r.region == "B"]
+    ga = r[r.group == "A"]
+    gb = r[r.group == "B"]
     assert _af(ga, "chr1:10") == pytest.approx(0.25)   # s1,s2 -> (0+1)/4
     assert _af(ga, "chr1:20") == pytest.approx(0.75)   # (1+2)/4
     assert _af(gb, "chr1:10") == pytest.approx(1.0)    # s3 hom-alt

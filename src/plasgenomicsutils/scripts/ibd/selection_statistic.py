@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""IBD-based selection test statistic (XiR,s), genome-wide and per-region."""
+"""IBD-based selection test statistic (XiR,s), genome-wide and per-group."""
 
 from __future__ import annotations
 
@@ -18,17 +18,18 @@ def get_parser_selection_statistic() -> argparse.ArgumentParser:
         prog="plasgenomicsutils ibd_selection_statistic",
         description="Compute IBD-based selection test statistic (XiR,s)",
     )
-    p.add_argument("--matrix", required=True, help="Prefix from build_ibd_matrix")
+    p.add_argument("--matrix", required=True,
+                   help="Matrix from build_ibd_matrix: the prefix or the .npz path")
     p.add_argument("--af", required=True,
                    help="TSV (snp_id, af): global allele frequencies (required; "
                         "generate with compute_allele_freqs --zero-based). AFs are not "
                         "estimated from the matrix.")
-    p.add_argument("--af-region", default=None,
-                   help="TSV (region, snp_id, af): per-region AFs; falls back to --af.")
+    p.add_argument("--af-group", default=None,
+                   help="TSV (group, snp_id, af): per-group AFs; falls back to --af.")
     p.add_argument("--meta", default=None,
-                   help="Sample metadata CSV with columns: sample, <region-col>")
-    p.add_argument("--region-col", default="region",
-                   help="Column in --meta to use as region (default: region)")
+                   help="Sample metadata CSV with columns: sample, <group-col>")
+    p.add_argument("--group-col", default="group",
+                   help="Column in --meta to use as group (default: group)")
     p.add_argument("--n-bins", type=int, default=100,
                    help="Number of AF bins for normalisation (default: 100)")
     p.add_argument("--alpha", type=float, default=0.05,
@@ -55,7 +56,7 @@ def selection_statistic():
 
     print("\n--- Allele frequencies ---")
     global_af = S.load_global_af(args.af, snp_labels)
-    region_af_table = S.load_region_af_table(args.af_region) if args.af_region else None
+    group_af_table = S.load_group_af_table(args.af_group) if args.af_group else None
 
     print("\n--- Global selection statistic ---")
     stats, bin_df = S.compute_selection_statistic(mat, global_af, n_bins=args.n_bins, label="global")
@@ -67,51 +68,51 @@ def selection_statistic():
     _save(out_df, f"{args.output}.global.selection_stats.tsv.gz")
     _save(bin_df, f"{args.output}.global.bin_stats.tsv.gz")
     Path(f"{args.output}.global.threshold.txt").write_text(
-        "region\talpha\tn_tests\tneg_log10_p_threshold\n"
+        "group\talpha\tn_tests\tneg_log10_p_threshold\n"
         f"global\t{args.alpha}\t{n_valid}\t{threshold:.6f}\n"
     )
     print(f"  -> {args.output}.global.threshold.txt")
 
     if not args.meta:
-        print("\n(No --meta provided; skipping per-region analysis)")
+        print("\n(No --meta provided; skipping per-group analysis)")
         return
 
-    print(f"\n--- Per-region selection statistic (region_col='{args.region_col}') ---")
-    meta = pd.read_csv(args.meta)
-    regions = sorted(meta[args.region_col].dropna().unique())
-    print(f"Found {len(regions)} regions: {', '.join(regions)}")
+    print(f"\n--- Per-group selection statistic (group_col='{args.group_col}') ---")
+    meta = Utils.read_table(args.meta)   # auto-detect tab / comma
+    groups = sorted(meta[args.group_col].dropna().unique())
+    print(f"Found {len(groups)} groups: {', '.join(groups)}")
 
-    region_stats_dfs, region_bin_dfs, threshold_rows = [], [], []
-    for region in regions:
-        print(f"\n  Region: {region}")
-        row_idx = S.within_region_row_indices(pair_labels, meta, args.region_col, region)
+    group_stats_dfs, group_bin_dfs, threshold_rows = [], [], []
+    for group in groups:
+        print(f"\n  Group: {group}")
+        row_idx = S.within_group_row_indices(pair_labels, meta, args.group_col, group)
         if len(row_idx) < 2:
-            print(f"    Skipping — only {len(row_idx)} within-region pair(s)")
+            print(f"    Skipping — only {len(row_idx)} within-group pair(s)")
             continue
         mat_sub = mat[row_idx, :]
-        af_reg = S.get_af_for_region(region, snp_labels, region_af_table, global_af)
-        stats_r, bin_df_r = S.compute_selection_statistic(mat_sub, af_reg, n_bins=args.n_bins, label=region)
-        out_r, thresh_r = S.assemble_output(snp_df, stats_r, args.alpha, region=region)
+        af_reg = S.get_af_for_group(group, snp_labels, group_af_table, global_af)
+        stats_r, bin_df_r = S.compute_selection_statistic(mat_sub, af_reg, n_bins=args.n_bins, label=group)
+        out_r, thresh_r = S.assemble_output(snp_df, stats_r, args.alpha, group=group)
         n_valid_r = int((~out_r["neg_log10_p"].isna()).sum())
         n_sig_r = int(out_r["significant"].sum())
         print(f"    Valid SNPs: {n_valid_r:,}  |  Bonferroni threshold: {thresh_r:.3f}  |  Significant: {n_sig_r:,}")
-        bin_df_r.insert(0, "region", region)
-        region_stats_dfs.append(out_r)
-        region_bin_dfs.append(bin_df_r)
+        bin_df_r.insert(0, "group", group)
+        group_stats_dfs.append(out_r)
+        group_bin_dfs.append(bin_df_r)
         threshold_rows.append({
-            "region": region, "alpha": args.alpha,
+            "group": group, "alpha": args.alpha,
             "n_tests": n_valid_r, "neg_log10_p_threshold": thresh_r,
         })
 
-    if region_stats_dfs:
-        print("\n--- Saving per-region outputs ---")
-        _save(pd.concat(region_stats_dfs, ignore_index=True), f"{args.output}.per_region.selection_stats.tsv.gz")
-        _save(pd.concat(region_bin_dfs, ignore_index=True), f"{args.output}.per_region.bin_stats.tsv.gz")
-        thresh_path = f"{args.output}.per_region.threshold.txt"
+    if group_stats_dfs:
+        print("\n--- Saving per-group outputs ---")
+        _save(pd.concat(group_stats_dfs, ignore_index=True), f"{args.output}.per_group.selection_stats.tsv.gz")
+        _save(pd.concat(group_bin_dfs, ignore_index=True), f"{args.output}.per_group.bin_stats.tsv.gz")
+        thresh_path = f"{args.output}.per_group.threshold.txt"
         pd.DataFrame(threshold_rows).to_csv(thresh_path, sep="\t", index=False)
         print(f"  -> {thresh_path}")
     else:
-        print("  No regions had sufficient pairs; no per-region output written.")
+        print("  No groups had sufficient pairs; no per-group output written.")
 
 
 if __name__ == "__main__":
