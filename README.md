@@ -56,7 +56,10 @@ plasgenomicsutils compute_allele_freqs --bcf clean.bcf --meta meta.tsv \
     --group-col region --output afs/
 
 # 4. IBD-based selection statistic (XiR,s), genome-wide and per-group
-#    reports Bonferroni AND Benjamini-Hochberg FDR, plus the genomic inflation factor
+#    reports Bonferroni AND Benjamini-Hochberg FDR, plus the genomic inflation factor;
+#    add --permute 200 when that factor is far from 1: it replaces the assumed chi2(1)
+#    with a null drawn from the data, giving a family-wise threshold plus calibrated
+#    per-SNP p-values and an FDR over them
 plasgenomicsutils ibd_selection_statistic --matrix ibd_matrix \
     --af afs/allele_freqs.tsv.gz --af-group afs/group_allele_freqs.tsv.gz \
     --meta meta.csv --group-col region --output ibd_selection

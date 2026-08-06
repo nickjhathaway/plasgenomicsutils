@@ -38,6 +38,100 @@ plasgenomicsutils ibd_gene_pairs --blocks blocks.tsv.gz --genes genes.tsv \
   --output gene_pairs.tsv.gz
 ```
 
+## Calling a selection peak significant
+
+`ibd_selection_statistic` reports up to four thresholds, all written to
+`<output>.*.threshold.txt` and applied as flag columns of the stats table. The last two
+appear only with `--permute`:
+
+| column | threshold | controls | rests on |
+|---|---|---|---|
+| `significant` | Bonferroni, `alpha / n_tests` | family-wise error | chi-square(1) |
+| `significant_fdr` | Benjamini-Hochberg over `pval` | false discovery rate | chi-square(1) |
+| `significant_perm` | `--permute N` genome-wide maxima | family-wise error | nothing |
+| `significant_fdr_perm` | Benjamini-Hochberg over `p_empirical` | false discovery rate | exchangeability across SNPs |
+
+The first two convert the statistic to a p-value through a chi-square(1) null. Whether
+that null fits is what **`lambda_gc`** measures — the median chi-square divided by the
+chi-square(1) median, which is 1 when the null is right. IBD sharing is strongly
+autocorrelated along a chromosome and pairs are not independent, so `lambda_gc` is
+routinely far below 1 in practice (0.07-0.26 across regions in a 250-sample *P.
+falciparum* cohort). Deflation like that means the p-values are not calibrated, and
+neither correction delivers the error rate it claims. The command prints a warning
+outside 0.8-1.25.
+
+Rescaling does not fix it. Standardising the statistic by its median and MAD forces
+`lambda_gc` to exactly 1 by construction, which makes the diagnostic vacuous while leaving
+the tail — the part that decides significance — worse, not better.
+
+`--permute` builds the null from the data instead. Each replicate slides every pair's IBD
+segments to a random circular offset, which keeps that pair's total sharing, segment count,
+segment lengths and along-genome autocorrelation intact while destroying any alignment of
+segments *between* pairs. The genome-wide maximum of each replicate is one draw from the
+null of "no locus is shared more than chance", and the 95th percentile of those maxima is a
+real 5% family-wise threshold:
+
+```bash
+plasgenomicsutils ibd_selection_statistic --matrix ibd_matrix \
+  --af freqs/allele_freqs.tsv.gz --af-group freqs/group_allele_freqs.tsv.gz \
+  --meta samples.tsv --group-col region \
+  --permute 200 --permute-seed 0 --output ibd_selection
+```
+
+Expect the permutation threshold to land well above the other two when `lambda_gc` is
+deflated, and the significant-SNP count to fall accordingly (that cohort: 193 SNPs by
+Bonferroni, 353 by BH, 78 by permutation). Cost is one full scan per replicate — roughly
+4 s for 28k SNPs and 30k pairs — and each group is permuted separately, so 200 replicates
+is minutes per scan. Without `--permute` the permutation columns are absent and nothing
+else changes.
+
+### Calibrated p-values, and an FDR worth quoting
+
+The same run also writes per-SNP p-values measured against that null, which is what makes
+a defensible FDR possible:
+
+| column | meaning | resolution | assumes |
+|---|---|---|---|
+| `p_pointwise` | how often the null at *this SNP* reached the observed value | `1/(N+1)` | nothing beyond the shift |
+| `p_empirical_binned` | how often any null *in this SNP's MAF bin* reached it | `n_bins/(N·n_snps)` | nothing beyond the shift |
+| `p_empirical` | how often *any* null value anywhere reached it | `1/(N·n_snps+1)` | the null is exchangeable across MAF bins |
+| `q_empirical` | Benjamini-Hochberg over whichever of the two `--empirical-pool` selects | — | the above, plus BH's usual dependence condition |
+
+All use the Phipson-Smyth `(1 + exceedances) / (1 + draws)` form, so nothing is ever
+reported as p = 0: a permutation cannot evidence a p below its own resolution.
+
+They trade resolution against assumptions, and you have to spend one to get the other.
+`p_pointwise` assumes the least but bottoms out at `1/(N+1)` — 0.005 at 200 replicates —
+far too coarse to correct over ~28,000 tests; read it on the top hits. `p_empirical` pools
+across every SNP to buy six orders of magnitude, which is what BH needs, but that is only
+legitimate if the null has the same shape in every MAF bin.
+
+**It often does not.** The command measures it: each bin's share of null values above one
+common reference, which exchangeability says should be 0.010 everywhere. On a real
+250-sample cohort those rates ran 0.000 to 0.027 across bins — some twenty standard errors
+apart, so a genuine difference in null shape rather than Monte Carlo noise. Pooling then
+makes `p_empirical` too *small* for SNPs in the heavy-tailed bins, which is the
+anti-conservative direction. The effect is a factor of two or three, so it does not touch
+the top hits, but it does move SNPs sitting near the q cutoff.
+
+`--empirical-pool bin` drops the assumption by keeping each SNP inside its own bin
+(`p_empirical_binned` drives `q_empirical` instead). That is correct rather than
+approximate, and `n_bins` times coarser — with the defaults, too coarse for a genome-wide
+FDR unless `N` goes up by about the same factor. Both columns are always written, so the
+cheapest check is to compare them and see whether anything you care about moves.
+
+**Pick `N` for the FDR, not just the threshold.** BH multiplies the rank-1 p-value by the
+number of tests, so the smallest reachable q is about `1/N` regardless of cohort size.
+With `N = 20` at `q < 0.05` the column is dead on arrival — nothing can be called. Use
+`N ≥ 10/fdr_alpha` (200 at the default) for an order of magnitude of headroom. The command
+computes `q_empirical_floor` and warns when it is close to your cutoff.
+
+**What this does not fix.** `pval` and `q_value` still come from the chi-square(1) and
+stay miscalibrated — do not quote them as probabilities. Use `p_empirical` / `q_empirical`
+when you need a number. The *ranking* was never affected either way: every step from
+`z_score` to `neg_log10_p` is monotone, so a bad reference distribution mislabels the axis
+without moving any SNP relative to another.
+
 ## Short IBD segments are dropped by default
 
 Small IBD blocks are commonly spurious, so every tool that reads hmm blocks discards

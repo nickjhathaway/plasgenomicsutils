@@ -40,6 +40,26 @@ def get_parser_selection_statistic() -> argparse.ArgumentParser:
                         "controls the expected share of false positives among the SNPs "
                         "called. Both are always written; this only sets where the "
                         "`significant_fdr` flag falls (default: same as --alpha)")
+    p.add_argument("--permute", type=int, default=0, metavar="N",
+                   help="Build a null by sliding every pair's IBD segments to random "
+                        "positions N times and recomputing. Unlike Bonferroni and BH this "
+                        "assumes nothing about the chi2 fit and accounts for one segment "
+                        "spanning many SNPs. Yields a family-wise threshold (the 1-alpha "
+                        "quantile of the genome-wide maxima), per-SNP empirical p-values "
+                        "and a Benjamini-Hochberg pass over those -- the only FDR here "
+                        "resting on calibrated p-values. Expect all of it to be far "
+                        "stricter. 200 is enough for alpha=0.05 (default: %(default)s, off)")
+    p.add_argument("--empirical-pool", choices=("global", "bin"), default="global",
+                   help="Which null --permute pools to get each SNP's empirical p-value. "
+                        "'global' uses every SNP's nulls, which resolves ~n_bins times "
+                        "finer and is what a genome-wide FDR needs, but assumes the null "
+                        "has the same shape in every MAF bin. 'bin' stays inside the "
+                        "SNP's own bin, dropping that assumption for a much coarser "
+                        "p-value. Both are always written (`p_empirical`, "
+                        "`p_empirical_binned`); this picks the one `q_empirical` uses "
+                        "(default: %(default)s)")
+    p.add_argument("--permute-seed", type=int, default=0,
+                   help="RNG seed for --permute (default: %(default)s)")
     p.add_argument("--output", default="ibd_selection", help="Output prefix")
     return p
 
@@ -48,17 +68,69 @@ def parse_args_selection_statistic():
     return get_parser_selection_statistic().parse_args()
 
 
+def _permute(args, mat, af, indent="  "):
+    """Run the permutation for one scan, or return None when --permute is off."""
+    if not args.permute:
+        return None
+    print(f"{indent}permuting ({args.permute} replicates)...", flush=True)
+    return S.permutation_null(mat, af, n_perm=args.permute, n_bins=args.n_bins,
+                              alpha=args.alpha, seed=args.permute_seed)
+
+
 def _report(info, label, indent="  "):
-    """One line per scan: both corrections, and the calibration behind them."""
+    """One line per scan: the corrections, and the calibration behind them."""
     lam = info["lambda_gc"]
     print(f"{indent}Valid SNPs: {info['n_tests']:,}"
           f"  |  Bonferroni (a={info['alpha']}) >= {info['neg_log10_p_threshold']:.2f}: "
           f"{info['n_significant']:,}"
           f"  |  BH FDR (q<{info['fdr_alpha']}): {info['n_significant_fdr']:,}")
+    if np.isfinite(info.get("neg_log10_p_perm_threshold", np.nan)):
+        print(f"{indent}Permutation ({info['n_perm']} replicates), built from the data so "
+              f"no chi2(1) assumption -- prefer these two where they disagree with the above:")
+        print(f"{indent}  FWER {info['alpha']} >= {info['neg_log10_p_perm_threshold']:.2f}: "
+              f"{info['n_significant_perm']:,}")
+        print(f"{indent}  BH on empirical p (q<{info['fdr_alpha']}): "
+              f"{info['n_significant_fdr_perm']:,}"
+              + (f" (>= {info['neg_log10_p_emp_fdr_threshold']:.2f})"
+                 if np.isfinite(info["neg_log10_p_emp_fdr_threshold"]) else ""))
+        qf, dead = info["q_empirical_floor"], info["frac_q_unreachable"]
+        if np.isfinite(qf) and qf > info["fdr_alpha"] / 10:
+            worst = "cannot reject anything" if qf > info["fdr_alpha"] else "has little headroom"
+            # the floor scales as 1/n_perm, so this is the count that would clear it
+            need = int(np.ceil(info["n_perm"] * qf / (info["fdr_alpha"] / 10) / 100) * 100)
+            print(f"{indent}  warning: with {info['n_perm']} replicates the smallest "
+                  f"reachable q is {qf:.3f}, so the empirical FDR {worst} at "
+                  f"q<{info['fdr_alpha']}. --permute {need} would give it an order of "
+                  f"magnitude of headroom.")
+        if np.isfinite(dead) and dead > 0.01:
+            print(f"{indent}  warning: {dead:.0%} of SNPs sit in a MAF bin too small to "
+                  f"reach q<{info['fdr_alpha']} however extreme their score, so the "
+                  f"empirical FDR is blind to them. Raise --permute, or lower --n-bins "
+                  f"to put more SNPs behind each p-value.")
+        lo, hi = info["perm_bin_tail_min"], info["perm_bin_tail_max"]
+        if np.isfinite(hi) and not (0.005 <= lo and hi <= 0.02):
+            off = (max(hi / 0.01, 0.01 / lo) if lo > 0 else np.inf)
+            size = f"~{off:.1f}x" if np.isfinite(off) else "an unbounded factor"
+            print(f"{indent}  note: MAF bins' null tails run {lo:.3f}-{hi:.3f} where "
+                  f"pooling wants 0.010, so `p_empirical` is off by up to {size} for "
+                  f"SNPs in the outlying bins -- too small in the heavy-tailed ones. Top "
+                  f"hits are unaffected at that size; SNPs near the q cutoff are not. "
+                  f"`p_empirical_binned` needs no pooling; "
+                  + ("it already drives `q_empirical`"
+                     if info["empirical_pool"] == "bin"
+                     else "compare against it, or switch with --empirical-pool bin"))
+    if 0 < info["n_bins_used"] and info["largest_bin_frac"] > 0.1:
+        print(f"{indent}MAF ties collapsed the binning to {info['n_bins_used']} non-empty "
+              f"bins, the largest holding {info['largest_bin_frac']:.0%} of SNPs -- fewer "
+              f"than requested, which coarsens the within-bin standardisation the "
+              f"statistic itself rests on, not just the p-values.")
     note = ""
     if np.isfinite(lam) and not (0.8 <= lam <= 1.25):
-        note = ("  <- far from 1: the chi2(1) null does not fit, so BOTH corrections rest "
-                "on miscalibrated p-values; prefer ranking SNPs and merging peaks")
+        note = ("  <- far from 1: the chi2(1) null does not fit, so Bonferroni and BH both "
+                "rest on miscalibrated p-values")
+        note += ("; use the permutation threshold" if np.isfinite(
+            info.get("neg_log10_p_perm_threshold", np.nan))
+            else "; re-run with --permute, or rank SNPs and merge peaks instead")
     print(f"{indent}Genomic inflation lambda = {lam:.2f}{note}")
 
 
@@ -80,7 +152,9 @@ def selection_statistic():
 
     print("\n--- Global selection statistic ---")
     stats, bin_df = S.compute_selection_statistic(mat, global_af, n_bins=args.n_bins, label="global")
-    out_df, info = S.assemble_output(snp_df, stats, args.alpha, fdr_alpha=args.fdr_alpha)
+    perm = _permute(args, mat, global_af)
+    out_df, info = S.assemble_output(snp_df, stats, args.alpha, fdr_alpha=args.fdr_alpha,
+                                     perm=perm, pool=args.empirical_pool)
     n_valid = info["n_tests"]
     _report(info, "global")
 
@@ -109,8 +183,10 @@ def selection_statistic():
         mat_sub = mat[row_idx, :]
         af_reg = S.get_af_for_group(group, snp_labels, group_af_table, global_af)
         stats_r, bin_df_r = S.compute_selection_statistic(mat_sub, af_reg, n_bins=args.n_bins, label=group)
+        perm_r = _permute(args, mat_sub, af_reg, indent="    ")
         out_r, info_r = S.assemble_output(snp_df, stats_r, args.alpha, group=group,
-                                          fdr_alpha=args.fdr_alpha)
+                                          fdr_alpha=args.fdr_alpha, perm=perm_r,
+                                          pool=args.empirical_pool)
         _report(info_r, group, indent="    ")
         bin_df_r.insert(0, "group", group)
         group_stats_dfs.append(out_r)
