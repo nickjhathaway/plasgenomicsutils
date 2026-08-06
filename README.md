@@ -56,6 +56,7 @@ plasgenomicsutils compute_allele_freqs --bcf clean.bcf --meta meta.tsv \
     --group-col region --output afs/
 
 # 4. IBD-based selection statistic (XiR,s), genome-wide and per-group
+#    reports Bonferroni AND Benjamini-Hochberg FDR, plus the genomic inflation factor
 plasgenomicsutils ibd_selection_statistic --matrix ibd_matrix \
     --af afs/allele_freqs.tsv.gz --af-group afs/group_allele_freqs.tsv.gz \
     --meta meta.csv --group-col region --output ibd_selection
@@ -307,6 +308,113 @@ the VCF reader does too — pass a SNP-filtered callset (or `--snps-only`) if yo
 SNPs only. `--population-name` tags every row for later cross-cohort merging;
 `--exclude-call-regions` drops CNV windows whose within-sample heterozygosity would
 otherwise depress Fws.
+
+## Coverage QC (from BAMs)
+
+`coverage_depth_stats` summarises sequencing depth per sample straight from indexed
+BAM/CRAM — mean, median, SD, quartiles and the *breadth* at a set of thresholds, per
+chromosome and genome-wide. Restrict it to a BED (the core genome is bundled) so
+subtelomeric and hypervariable regions do not drag every statistic down:
+
+```bash
+plasgenomicsutils coverage_depth_stats \
+  --bam-list bams.txt --regions builtin:pf3d7_core_regions \
+  --thresholds 1,5,10,20 --window 1000 \
+  --output coverage_by_sample.tsv.gz --windows-output coverage_windows.tsv.gz
+```
+
+Depth comes from **pysam** by default and from **mosdepth** when it is on `PATH` (it is in
+`environment.yml`), which is far faster on whole-genome BAMs — roughly a minute a sample
+against four. **The two do not define depth identically**, so the engine used is written
+into every output row and should be held fixed across a cohort:
+
+| engine | counts | agrees with |
+| --- | --- | --- |
+| `pysam` | reads — overlapping mates counted twice | `samtools depth`, base for base |
+| `mosdepth` | **fragments** — an overlapping mate pair counts once | runs 2–3% below `pysam` on real Pf WGS |
+
+Fragment depth is the better measure of independent evidence — two mates of one molecule
+are one observation, not two — which is the usual reason to prefer mosdepth over
+`samtools depth` in the first place. Read depth is what most tools report. Neither is
+wrong; mixing them across a cohort is, so the engine used is written into every row.
+
+```bash
+# pin fragment depth explicitly rather than depending on what is installed
+plasgenomicsutils coverage_depth_stats --bam-list bams.txt --engine mosdepth \
+  --regions builtin:pf3d7_core_regions --jobs 8 --output coverage.tsv.gz
+
+# read-level depth, comparable with samtools depth (and the only engine that can
+# apply a base-quality floor)
+plasgenomicsutils coverage_depth_stats --bam-list bams.txt --engine pysam \
+  --min-baseq 13 --jobs 8 --output coverage.reads.tsv.gz
+```
+
+`--jobs N` spreads samples across cores. Name your samples in the second column of
+`--bam-list` when the BAM filename is not the sample id:
+
+```
+/path/4089106922.sorted.bam	IMH07_4089106922
+```
+
+`coverage_dropout_regions` then answers the cross-sample question. Selective whole-genome
+amplification does not amplify uniformly, and a region that no sample amplifies reads as
+*invariant* rather than as missing. This finds the windows below depth in nearly every
+sample and merges them into regions:
+
+```bash
+plasgenomicsutils coverage_dropout_regions \
+  --windows coverage_windows.tsv.gz --regions builtin:pf3d7_core_regions \
+  --min-depth 5 --min-frac-samples 0.9 --merge-gap 1000 \
+  --genes genes.tsv --output dropouts.tsv.gz --bed-output dropouts.bed
+```
+
+Restricting to the core matters here: subtelomeric dropout is expected and would bury the
+regions worth acting on. The BED can be fed straight back in as a mask.
+
+Plot both with the R package — `coverage_qc()`, `plot_coverage_summary()`,
+`plot_coverage_by_chrom()`, `plot_coverage_dropout()`.
+
+## Sample QC: singleton counts
+
+`singleton_counts` counts, per sample, the variants where it is the only non-reference
+carrier. A sample far above the cohort's rate is usually contaminated, mixed-species or
+mis-aligned rather than interesting — MalariaGEN drop samples on this criterion when
+assembling the Pf analysis sets. Outliers are called by median absolute deviation, so the
+outliers being looked for cannot inflate the spread they are measured against:
+
+```bash
+plasgenomicsutils singleton_counts --vcf cohort.snps.bcf \
+  --min-depth 5 --max-missing-frac 0.2 --mad-cutoff 5 --output singletons.tsv.gz
+```
+
+The flag is two-sided, because the tails mean different things:
+
+- **Excess** private variants — contamination, a mixed-species infection, mis-alignment.
+- **Deficit** — another sample is absorbing them. The same scan records which partner each
+  sample shares its *doubletons* with, and names pairs above `--duplicate-frac` (0.9) as
+  near-identical. It deliberately does not call them duplicates: the same parasite
+  sequenced twice and one clone infecting two hosts look identical here, and in a
+  low-transmission setting the second is the common answer. Check IBD — a clone pair sits
+  near IBD 1 — and the collection records before dropping anything.
+
+`--min-depth` (default 5) matters on gVCF-derived callsets, which emit `0/0` at sites with
+**no reads at all** rather than `./.`; without it those count as confident reference calls.
+Singleton status is judged **within the samples analysed**, so `--samples` changes what
+counts as private.
+
+This runs inside `filter_pipeline` too, as a *report* step — it writes a table and passes
+the callset through untouched. Position is not arbitrary: `singleton_filter_add_ads` drops
+exactly the variants being counted, so the default config puts the report before it (and
+warns if a custom config puts it after, where every sample scores zero):
+
+```json
+{"steps": [
+  {"name": "hard_qc_filter"},
+  {"name": "singleton_counts", "report": true, "ext": "tsv",
+   "params": {"min_depth": 5, "max_missing_frac": 0.2}},
+  {"name": "singleton_filter_add_ads"}
+]}
+```
 
 ## Development
 

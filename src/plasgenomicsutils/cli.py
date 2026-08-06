@@ -30,11 +30,19 @@ from .scripts.ibd.gene_pairs import gene_pairs
 # -- Fws leaves ---------------------------------------------------------------
 from .scripts.fws.calculate_fws import calculate_fws
 
+# -- LD leaves ----------------------------------------------------------------
+from .scripts.ld.decay import ld_decay
+
+# -- Coverage leaves ----------------------------------------------------------
+from .scripts.cov.depth_stats import depth_stats
+from .scripts.cov.dropout_regions import dropout_regions
+
 # -- VCF leaves ---------------------------------------------------------------
 from .scripts.vcf.filter_ad_regenotype import filter_ad_regenotype
 from .scripts.vcf.harmonize_bcf import harmonize_bcf
 from .scripts.vcf.hard_qc_filter import hard_qc_filter
 from .scripts.vcf.singleton_filter_add_ads import singleton_filter_add_ads
+from .scripts.vcf.singleton_counts import singleton_counts
 from .scripts.vcf.biallelic_snp_filter import biallelic_snp_filter
 from .scripts.vcf.strip_stale_format import strip_stale_format
 from .scripts.vcf.tandem_repeat_mask import tandem_repeat_mask
@@ -76,6 +84,16 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
         "ibd_gene_pairs": Command(gene_pairs,
             "Sample pairs IBD over each gene, with how much of the gene is covered"),
     },
+    "ld": {
+        "ld_decay": Command(ld_decay,
+            "Mean r-squared vs SNP-pair distance per group: how fast LD decays"),
+    },
+    "coverage": {
+        "coverage_depth_stats": Command(depth_stats,
+            "Per-sample depth: mean/median/SD and breadth at thresholds, per chromosome"),
+        "coverage_dropout_regions": Command(dropout_regions,
+            "Regions below depth in nearly every sample (sWGA amplification dropouts)"),
+    },
     "vcf": {
         "filter_ad_regenotype": Command(filter_ad_regenotype,
             "Clean within-sample AD artifacts by depth/frequency, then re-genotype"),
@@ -103,6 +121,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Keep variants within a minor-allele-frequency window"),
         "filter_pipeline": Command(filter_pipeline,
             "Run an ordered, config-driven chain of filtering steps, tallying counts"),
+        "singleton_counts": Command(singleton_counts,
+            "Per-sample count of variants where it is the only non-reference carrier"),
         "strand_bias_scan": Command(strand_bias_scan,
             "Flag strand-bias (SSE) fake-het artifacts from FORMAT/ADF+ADR; emit a blacklist BED"),
         "strand_read_check": Command(strand_read_check,

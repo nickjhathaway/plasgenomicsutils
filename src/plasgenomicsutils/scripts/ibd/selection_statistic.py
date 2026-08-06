@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from ...lib import ibd_matrix
@@ -32,13 +33,33 @@ def get_parser_selection_statistic() -> argparse.ArgumentParser:
     p.add_argument("--n-bins", type=int, default=100,
                    help="Number of AF bins for normalisation (default: 100)")
     p.add_argument("--alpha", type=float, default=0.05,
-                   help="Genome-wide significance level (default: 0.05)")
+                   help="Family-wise level for the Bonferroni threshold, which controls "
+                        "the chance of even one false positive (default: %(default)s)")
+    p.add_argument("--fdr-alpha", type=float, default=None,
+                   help="q-value cutoff for the Benjamini-Hochberg column, which instead "
+                        "controls the expected share of false positives among the SNPs "
+                        "called. Both are always written; this only sets where the "
+                        "`significant_fdr` flag falls (default: same as --alpha)")
     p.add_argument("--output", default="ibd_selection", help="Output prefix")
     return p
 
 
 def parse_args_selection_statistic():
     return get_parser_selection_statistic().parse_args()
+
+
+def _report(info, label, indent="  "):
+    """One line per scan: both corrections, and the calibration behind them."""
+    lam = info["lambda_gc"]
+    print(f"{indent}Valid SNPs: {info['n_tests']:,}"
+          f"  |  Bonferroni (a={info['alpha']}) >= {info['neg_log10_p_threshold']:.2f}: "
+          f"{info['n_significant']:,}"
+          f"  |  BH FDR (q<{info['fdr_alpha']}): {info['n_significant_fdr']:,}")
+    note = ""
+    if np.isfinite(lam) and not (0.8 <= lam <= 1.25):
+        note = ("  <- far from 1: the chi2(1) null does not fit, so BOTH corrections rest "
+                "on miscalibrated p-values; prefer ranking SNPs and merging peaks")
+    print(f"{indent}Genomic inflation lambda = {lam:.2f}{note}")
 
 
 def _save(df, path):
@@ -59,17 +80,14 @@ def selection_statistic():
 
     print("\n--- Global selection statistic ---")
     stats, bin_df = S.compute_selection_statistic(mat, global_af, n_bins=args.n_bins, label="global")
-    out_df, threshold = S.assemble_output(snp_df, stats, args.alpha)
-    n_valid = int((~out_df["neg_log10_p"].isna()).sum())
-    n_sig = int(out_df["significant"].sum())
-    print(f"  Valid SNPs: {n_valid:,}  |  Bonferroni threshold: {threshold:.3f}  |  Significant: {n_sig:,}")
+    out_df, info = S.assemble_output(snp_df, stats, args.alpha, fdr_alpha=args.fdr_alpha)
+    n_valid = info["n_tests"]
+    _report(info, "global")
 
     _save(out_df, f"{args.output}.global.selection_stats.tsv.gz")
     _save(bin_df, f"{args.output}.global.bin_stats.tsv.gz")
-    Path(f"{args.output}.global.threshold.txt").write_text(
-        "group\talpha\tn_tests\tneg_log10_p_threshold\n"
-        f"global\t{args.alpha}\t{n_valid}\t{threshold:.6f}\n"
-    )
+    pd.DataFrame([dict(group="global", **info)]).to_csv(
+        f"{args.output}.global.threshold.txt", sep="\t", index=False)
     print(f"  -> {args.output}.global.threshold.txt")
 
     if not args.meta:
@@ -91,17 +109,13 @@ def selection_statistic():
         mat_sub = mat[row_idx, :]
         af_reg = S.get_af_for_group(group, snp_labels, group_af_table, global_af)
         stats_r, bin_df_r = S.compute_selection_statistic(mat_sub, af_reg, n_bins=args.n_bins, label=group)
-        out_r, thresh_r = S.assemble_output(snp_df, stats_r, args.alpha, group=group)
-        n_valid_r = int((~out_r["neg_log10_p"].isna()).sum())
-        n_sig_r = int(out_r["significant"].sum())
-        print(f"    Valid SNPs: {n_valid_r:,}  |  Bonferroni threshold: {thresh_r:.3f}  |  Significant: {n_sig_r:,}")
+        out_r, info_r = S.assemble_output(snp_df, stats_r, args.alpha, group=group,
+                                          fdr_alpha=args.fdr_alpha)
+        _report(info_r, group, indent="    ")
         bin_df_r.insert(0, "group", group)
         group_stats_dfs.append(out_r)
         group_bin_dfs.append(bin_df_r)
-        threshold_rows.append({
-            "group": group, "alpha": args.alpha,
-            "n_tests": n_valid_r, "neg_log10_p_threshold": thresh_r,
-        })
+        threshold_rows.append(dict(group=group, **info_r))
 
     if group_stats_dfs:
         print("\n--- Saving per-group outputs ---")

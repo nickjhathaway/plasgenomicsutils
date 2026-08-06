@@ -9,7 +9,24 @@ Method (Henden / Nygaard-style normalisation):
   3. divide by sqrt(p(1-p)), p = SNP allele frequency
   4. row-sum / sqrt(n_pairs) -> raw per-SNP statistic
   5. bin SNPs into equal-frequency MAF bins; within-bin z-score
-  6. z^2 -> chi2(1df) -> p -> -log10(p); Bonferroni threshold
+  6. z^2 -> chi2(1df) -> p -> -log10(p)
+  7. two multiple-testing views: Bonferroni (family-wise) and Benjamini-Hochberg (FDR),
+     plus the genomic inflation factor that says how much either can be trusted
+
+**On the thresholds.** Bonferroni asks for near-certainty that no SNP called is a false
+positive; BH allows a stated share of them and so calls more. Both are reported, because
+neither is obviously right here and the difference is worth seeing.
+
+What is worth more than the choice between them is `lambda_gc`. The z-scores are
+standardised to zero mean and unit variance *within each MAF bin*, which fixes the first
+two moments and leaves the shape alone -- and the shape of IBD sharing is nothing like a
+normal. On real *P. falciparum* data lambda comes out near 0.1 rather than 1: a tight bulk
+with very heavy tails. Every p-value here descends from a chi2(1) that does not fit, so
+both thresholds inherit that, and the honest use of either is as a *ranking* device.
+
+Also note that neither correction knows about linkage. Adjacent SNPs in one sweep are not
+independent tests, so the SNP counts overstate the number of findings; merge significant
+SNPs into peaks before counting discoveries.
 """
 
 from __future__ import annotations
@@ -206,9 +223,55 @@ def _normalise_and_finalise(raw_stat, af, valid, n_bins):
     }, bin_df
 
 
-def assemble_output(snp_df, stats, alpha, group=None) -> tuple[pd.DataFrame, float]:
+def benjamini_hochberg(pval):
+    """Benjamini-Hochberg q-values; `NaN` in, `NaN` out.
+
+    BH controls the expected *proportion* of false positives among the SNPs called, where
+    Bonferroni controls the probability of even one. It is valid under independence and
+    under positive regression dependency -- the usual justification for using it on a
+    genome scan, since SNPs in linkage are positively correlated. Treat that as an
+    approximation: BH is now known not to control FDR in general for correlated two-sided
+    tests. The larger practical worry is upstream of either correction, in whether the
+    p-values are calibrated at all -- see :func:`genomic_inflation`.
+    """
+    p = np.asarray(pval, dtype=float)
+    q = np.full(p.shape, np.nan)
+    ok = np.flatnonzero(~np.isnan(p))
+    if not ok.size:
+        return q
+    m = ok.size
+    order = ok[np.argsort(p[ok])]
+    ranked = p[order] * m / np.arange(1, m + 1)
+    q[order] = np.minimum(np.minimum.accumulate(ranked[::-1])[::-1], 1.0)
+    return q
+
+
+def genomic_inflation(chi2_stat):
+    """Median chi2 over its null expectation -- 1.0 when the reference is right.
+
+    Far from 1 means the chi2(1) null is the wrong distribution, and every p-value drawn
+    from it is wrong with it. That happens easily here: the z-scores are standardised to
+    unit variance within each MAF bin, which pins the first two moments and says nothing
+    about the shape, while IBD sharing is autocorrelated and heavy-tailed. Read this
+    before reading any threshold.
+    """
+    v = np.asarray(chi2_stat, dtype=float)
+    v = v[~np.isnan(v)]
+    if not v.size:
+        return np.nan
+    return float(np.median(v) / chi2.ppf(0.5, 1))
+
+
+def assemble_output(snp_df, stats, alpha, group=None, fdr_alpha=None):
+    """Per-SNP table plus both thresholds and the calibration diagnostic.
+
+    Returns ``(df, info)``. ``info`` holds the Bonferroni and Benjamini-Hochberg cutoffs
+    on the ``-log10(p)`` scale, so either can be drawn as a line, and ``lambda_gc``.
+    """
+    fdr_alpha = alpha if fdr_alpha is None else fdr_alpha
     n_valid = int(np.sum(~np.isnan(stats["chi2_stat"])))
     threshold = -np.log10(alpha / n_valid) if n_valid > 0 else np.nan
+
     out = snp_df.copy()
     if group is not None:
         out.insert(0, "group", group)
@@ -219,5 +282,23 @@ def assemble_output(snp_df, stats, alpha, group=None) -> tuple[pd.DataFrame, flo
     out["chi2_stat"] = stats["chi2_stat"]
     out["pval"] = stats["pval"]
     out["neg_log10_p"] = stats["neg_log10_p"]
-    out["significant"] = out["neg_log10_p"] >= threshold
-    return out, threshold
+    out["q_value"] = benjamini_hochberg(stats["pval"])
+    out["significant"] = out["neg_log10_p"] >= threshold          # Bonferroni (FWER)
+    out["significant_fdr"] = out["q_value"] < fdr_alpha           # Benjamini-Hochberg
+
+    # The BH critical value for the number of rejections, k * q / m, as -log10(p) so it
+    # plots as a line. Not the largest p actually called: this is the cutoff BH applies,
+    # so `neg_log10_p >= line` reproduces the flag exactly. It is always at or below the
+    # Bonferroni line (which is the k = 1 case).
+    n_rej = int(out["significant_fdr"].fillna(False).sum())
+    fdr_threshold = (float(-np.log10(n_rej * fdr_alpha / n_valid))
+                     if n_rej and n_valid else np.nan)
+
+    info = {
+        "alpha": alpha, "n_tests": n_valid, "neg_log10_p_threshold": threshold,
+        "fdr_alpha": fdr_alpha, "neg_log10_p_fdr_threshold": fdr_threshold,
+        "n_significant": int(out["significant"].sum()),
+        "n_significant_fdr": int(out["significant_fdr"].fillna(False).sum()),
+        "lambda_gc": genomic_inflation(stats["chi2_stat"]),
+    }
+    return out, info
