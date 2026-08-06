@@ -3,14 +3,36 @@
 Allele frequencies must be supplied externally and are never proxied from the
 IBD matrix.
 
-Method (Henden / Nygaard-style normalisation):
+Method:
   1. binary IBD matrix (pairs x SNPs)
-  2. subtract per-pair means, then per-SNP means
+  2. subtract per-pair means -- removes each pair's overall relatedness
   3. divide by sqrt(p(1-p)), p = SNP allele frequency
-  4. row-sum / sqrt(n_pairs) -> raw per-SNP statistic
+  4. sum over pairs / sqrt(n_pairs) -> raw per-SNP statistic
   5. bin SNPs into equal-frequency MAF bins; within-bin z-score
-  6. z^2 -> chi2(1df) -> p -> -log10(p)
+  6. z -> p -> -log10(p), upper tail by default (see ``tail``)
   7. multiple-testing views, and the diagnostics that say what each is worth
+
+**Two variants, and why.** Henden et al. (PLoS Genet 2018) describe XiR,s with a second
+centring between steps 2 and 4: *"we subtract the row mean from each row"*, each row being
+one SNP, followed by *"we calculate row sums"*. Centring a row and then summing that same
+row cancels exactly, so the described statistic is identically zero and what survives is
+floating-point residue. That residue is not random -- it grows with the number of pairs
+sharing, so it behaves like a noisy, uncalibrated proxy for excess sharing, which is why
+the recipe has looked serviceable. It is not reproducible: at float32 the residue is ~1e-5,
+at float64 ~1e-14, and the two rank SNPs almost independently. The same cancellation is
+present in isoRelate's ``iRfunction`` and in ibdutils' ``calc_xirs_raw_stats_per_chr``; on
+one real cohort those two and this one agreed on 29 of their top 100 SNPs.
+
+``variant="corrected"`` (the default) omits the per-SNP centring, so step 4 measures what
+the method is for: sharing at a locus above what these pairs' relatedness predicts.
+``variant="published"`` restores the cancellation, in float32, purely to reproduce output
+from earlier versions of this tool; it prints a warning and cannot be made to agree with
+isoRelate or ibdutils, which cancel at a different precision.
+
+**Tail.** ``tail="upper"`` (the default) asks only whether a locus is shared *more* than
+expected, which is what a positive-selection scan claims. ``tail="two-sided"`` squares the
+z-score into a chi2(1), which scores a sharing *deficit* exactly like an excess -- what the
+published recipe does. Every row carries a ``direction`` column either way.
 
 **Choosing a threshold.** Three are reported, and they differ in what they control and in
 what they assume:
@@ -46,7 +68,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2
+from scipy.stats import chi2, norm
 
 from .intervals import SNP_COORD_SYSTEM, check_snp_coord_system
 from ..utils.small_utils import Utils
@@ -143,35 +165,61 @@ def within_group_row_indices(pair_labels, meta, group_col, group) -> np.ndarray:
 # core statistic
 # ---------------------------------------------------------------------------
 
+VARIANTS = ("corrected", "published")
+TAILS = ("upper", "two-sided")
+
+# The corrected statistic accumulates in float64. The published recipe's per-SNP sum is
+# mathematically zero, so what it reports is rounding residue: float32 gives ~1e-5 that
+# standardises into a convincing-looking scan, float64 gives ~1e-14 and an *uncorrelated*
+# set of peaks. Its accumulator is therefore part of its answer, and it keeps float32 --
+# the width every earlier run of this tool used -- so that "published" reproduces those
+# outputs exactly. Nothing makes it agree with isoRelate or ibdutils, which are float64.
+_DTYPE = np.float64
+_VARIANT_DTYPE = {"corrected": np.float64, "published": np.float32}
+
+
+def _variant_dtype(variant):
+    return _DTYPE if variant == "corrected" else _VARIANT_DTYPE[variant]
+
+
 def compute_selection_statistic(mat, af: np.ndarray, n_bins: int = 100,
-                                label: str = "") -> tuple[dict, pd.DataFrame]:
+                                label: str = "", variant: str = "corrected",
+                                tail: str = "upper") -> tuple[dict, pd.DataFrame]:
+    """Per-SNP selection statistic. See the module docstring for ``variant`` and ``tail``."""
+    if variant not in VARIANTS:
+        raise ValueError(f"variant must be one of {VARIANTS}, got {variant!r}")
     n_pairs, n_snps = mat.shape
     tag = f"[{label}] " if label else ""
     print(f"  {tag}n_pairs={n_pairs:,}  n_snps={n_snps:,}")
-    estimated_gb = n_pairs * n_snps * 4 / 1e9
+    estimated_gb = n_pairs * n_snps * np.dtype(_variant_dtype(variant)).itemsize / 1e9
     if estimated_gb > 16:
         print(f"  {tag}~{estimated_gb:.1f} GB dense — using chunked path")
-        return _compute_chunked(mat, af, n_bins)
+        return _compute_chunked(mat, af, n_bins, variant=variant, tail=tail)
     print(f"  {tag}~{estimated_gb:.1f} GB dense — using dense path")
-    return _compute_dense(mat, af, n_bins)
+    return _compute_dense(mat, af, n_bins, variant=variant, tail=tail)
 
 
-def _compute_dense(mat, af, n_bins):
+def _compute_dense(mat, af, n_bins, variant="corrected", tail="upper"):
     n_pairs, n_snps = mat.shape
-    X = mat.toarray().astype(np.float32).T  # (snps, pairs)
-    X -= X.mean(axis=0, keepdims=True)      # per-pair means
-    X -= X.mean(axis=1, keepdims=True)      # per-SNP means
+    dt = _variant_dtype(variant)
+    X = mat.toarray().astype(dt).T          # (snps, pairs)
+    X -= X.mean(axis=0, keepdims=True)      # per-pair: removes each pair's relatedness
+    if variant == "published":
+        # Centring each SNP and then summing that same SNP cancels exactly; kept only to
+        # reproduce isoRelate / ibdutils output.
+        X -= X.mean(axis=1, keepdims=True)
     valid = ~np.isnan(af) & (af > 0) & (af < 1)
-    denom = np.where(valid, np.sqrt(af * (1 - af)), np.nan).astype(np.float32)
+    denom = np.where(valid, np.sqrt(af * (1 - af)), np.nan).astype(dt)
     X /= denom[:, np.newaxis]
     raw_stat = np.nansum(X, axis=1) / np.sqrt(n_pairs)
     raw_stat = np.where(valid, raw_stat, np.nan)
-    return _normalise_and_finalise(raw_stat, af, valid, n_bins)
+    return _normalise_and_finalise(raw_stat, af, valid, n_bins, tail=tail)
 
 
-def _compute_chunked(mat, af, n_bins, chunk_size=500):
+def _compute_chunked(mat, af, n_bins, chunk_size=500, variant="corrected", tail="upper"):
     n_pairs, n_snps = mat.shape
-    pair_means = np.asarray(mat.mean(axis=1)).ravel().astype(np.float32)
+    dt = _variant_dtype(variant)
+    pair_means = np.asarray(mat.mean(axis=1)).ravel().astype(dt)
     valid = ~np.isnan(af) & (af > 0) & (af < 1)
     raw_stat = np.full(n_snps, np.nan, dtype=np.float64)
     n_chunks = (n_snps + chunk_size - 1) // chunk_size
@@ -180,20 +228,21 @@ def _compute_chunked(mat, af, n_bins, chunk_size=500):
         end = min(start + chunk_size, n_snps)
         if c % max(1, n_chunks // 10) == 0:
             print(f"    chunk {c+1}/{n_chunks}  SNPs {start}-{end}", end="\r", flush=True)
-        chunk = mat[:, start:end].toarray().astype(np.float32).T  # (chunk, pairs)
+        chunk = mat[:, start:end].toarray().astype(dt).T  # (chunk, pairs)
         chunk -= pair_means[np.newaxis, :]
-        chunk -= chunk.mean(axis=1, keepdims=True)
+        if variant == "published":
+            chunk -= chunk.mean(axis=1, keepdims=True)
         chunk_af = af[start:end]
         chunk_valid = valid[start:end]
-        denom = np.where(chunk_valid, np.sqrt(chunk_af * (1 - chunk_af)), np.nan).astype(np.float32)
+        denom = np.where(chunk_valid, np.sqrt(chunk_af * (1 - chunk_af)), np.nan).astype(dt)
         chunk /= denom[:, np.newaxis]
         rs = np.nansum(chunk, axis=1) / np.sqrt(n_pairs)
         raw_stat[start:end] = np.where(chunk_valid, rs, np.nan)
     print()
-    return _normalise_and_finalise(raw_stat, af, valid, n_bins)
+    return _normalise_and_finalise(raw_stat, af, valid, n_bins, tail=tail)
 
 
-def _normalise_and_finalise(raw_stat, af, valid, n_bins):
+def _normalise_and_finalise(raw_stat, af, valid, n_bins, tail="upper"):
     n_snps = len(raw_stat)
     maf = np.where(af <= 0.5, af, 1 - af)
 
@@ -223,13 +272,23 @@ def _normalise_and_finalise(raw_stat, af, valid, n_bins):
         })
     bin_df = pd.DataFrame(bin_records)
 
+    if tail not in TAILS:
+        raise ValueError(f"tail must be one of {TAILS}, got {tail!r}")
     chi2_stat = z_score ** 2
-    pval = np.where(~np.isnan(chi2_stat), chi2.sf(chi2_stat, df=1), np.nan)
+    if tail == "two-sided":
+        # chi2(1) on z^2 is the two-sided normal test, so a SNP shared LESS than expected
+        # scores exactly like one shared more
+        pval = np.where(~np.isnan(chi2_stat), chi2.sf(chi2_stat, df=1), np.nan)
+    else:
+        # excess sharing only: a deficit gets p -> 1 rather than a mirrored small p
+        pval = np.where(~np.isnan(z_score), norm.sf(z_score), np.nan)
     neg_log10_p = np.where(pval > 0, -np.log10(pval), np.nan)
+    direction = np.where(np.isnan(z_score), "",
+                         np.where(z_score >= 0, "excess", "deficit"))
 
     return {
         "raw_stat": raw_stat, "z_score": z_score,
-        "chi2_stat": chi2_stat, "pval": pval,
+        "chi2_stat": chi2_stat, "pval": pval, "direction": direction,
         "neg_log10_p": neg_log10_p, "bin_id": bin_ids, "maf": maf,
     }, bin_df
 
@@ -274,7 +333,7 @@ def genomic_inflation(chi2_stat):
 
 
 def permutation_null(mat, af, n_perm=200, n_bins=100, alpha=0.05, seed=0,
-                     progress=None):
+                     progress=None, variant="corrected", tail="upper"):
     """Null distribution for the selection statistic, built by moving the IBD around.
 
     Bonferroni and Benjamini-Hochberg both read their p-values off a chi2(1) that does not
@@ -339,7 +398,8 @@ def permutation_null(mat, af, n_perm=200, n_bins=100, alpha=0.05, seed=0,
 
     coo = mat.tocoo()
     n_pairs, n_snps = mat.shape
-    obs = compute_selection_statistic(mat, af, n_bins=n_bins, label="")[0]["neg_log10_p"]
+    obs = compute_selection_statistic(mat, af, n_bins=n_bins, label="", variant=variant,
+                                      tail=tail)[0]["neg_log10_p"]
     obs_ok = np.isfinite(obs)
 
     rng = np.random.default_rng(seed)
@@ -360,7 +420,8 @@ def permutation_null(mat, af, n_perm=200, n_bins=100, alpha=0.05, seed=0,
         shift = rng.integers(0, n_snps, size=n_pairs)
         col = (coo.col + shift[coo.row]) % n_snps
         null = sparse.coo_matrix((coo.data, (coo.row, col)), shape=mat.shape).tocsr()
-        st, _ = compute_selection_statistic(null, af, n_bins=n_bins, label="")
+        st, _ = compute_selection_statistic(null, af, n_bins=n_bins, label="",
+                                            variant=variant, tail=tail)
         v = st["neg_log10_p"]
         maxima[r] = np.nanmax(v)
 
@@ -421,7 +482,7 @@ def permutation_null(mat, af, n_perm=200, n_bins=100, alpha=0.05, seed=0,
 
 
 def assemble_output(snp_df, stats, alpha, group=None, fdr_alpha=None, perm=None,
-                    pool="global"):
+                    pool="global", variant="corrected", tail="upper"):
     """Per-SNP table plus every threshold and the calibration diagnostic.
 
     ``perm`` is the dict from :func:`permutation_null`, or ``None`` to skip the
@@ -447,6 +508,8 @@ def assemble_output(snp_df, stats, alpha, group=None, fdr_alpha=None, perm=None,
     out["z_score"] = stats["z_score"]
     out["chi2_stat"] = stats["chi2_stat"]
     out["pval"] = stats["pval"]
+    if "direction" in stats:
+        out["direction"] = stats["direction"]
     out["neg_log10_p"] = stats["neg_log10_p"]
     out["q_value"] = benjamini_hochberg(stats["pval"])
     out["significant"] = out["neg_log10_p"] >= threshold          # Bonferroni (FWER)
@@ -482,11 +545,13 @@ def assemble_output(snp_df, stats, alpha, group=None, fdr_alpha=None, perm=None,
     # sit well below, since one stray null exceedance at the top SNP multiplies it. In
     # round terms q_floor ~ 1 / n_perm, so n_perm >= 10 / fdr_alpha buys an order of
     # magnitude of headroom (200 replicates at the default q < 0.05).
-    # The smallest q each SNP could reach: BH multiplies its p by the number of tests, and
-    # its p bottoms out at 1/(1 + draws behind it). Under global pooling every SNP has the
-    # same draws and so the same floor; under bin pooling the floor is per-SNP, and MAF
-    # bins are wildly unequal in practice (ties in MAF collapse the quantile edges), so a
-    # single "best case" number would hide most of the column being unreachable.
+    # The smallest q a *lone* extreme SNP could reach: BH gives rank k the value p*m/k, and
+    # p bottoms out at 1/(1 + draws behind it), so at rank 1 that is m/(1 + draws). A block
+    # of k SNPs tied at the resolution limit reaches k times lower, which is why this is a
+    # conservative bound rather than a hard cutoff. Under global pooling every SNP has the
+    # same draws and so the same bound; under bin pooling it is per-SNP, and MAF bins are
+    # wildly unequal in practice (ties collapse the quantile edges), so a single "best case"
+    # number would hide most of the column being out of reach.
     # How the MAF binning actually came out. Requesting N equal-frequency bins does not
     # give N: allele frequency is k/n for a smallish n, so MAF ties collapse the quantile
     # edges. This is a property of the statistic, not of the permutation, so it is
@@ -528,6 +593,7 @@ def assemble_output(snp_df, stats, alpha, group=None, fdr_alpha=None, perm=None,
         "n_perm": perm["n_perm"] if perm else 0,
         "p_empirical_resolution": (1.0 / (1 + perm["n_pool"])) if perm else np.nan,
         "q_empirical_floor": q_floor, "empirical_pool": (pool if perm else ""),
+        "xirs_variant": variant, "tail": tail,
         "frac_q_unreachable": frac_dead,
         "n_bins_used": n_bins_used, "largest_bin_frac": big_bin,
         "perm_bin_tail_min": (float(np.nanmin(perm["bin_tail_rate"])) if perm else np.nan),

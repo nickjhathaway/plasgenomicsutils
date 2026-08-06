@@ -215,7 +215,9 @@ def test_empirical_p_values_are_calibrated_and_ordered_like_the_statistic():
     ok = np.isfinite(obs) & np.isfinite(perm["p_pooled"])
     by_score = np.argsort(obs[ok])
     assert np.all(np.diff(perm["p_pooled"][ok][by_score]) <= 0)   # non-increasing
-    assert spearmanr(obs[ok], perm["p_pooled"][ok]).statistic < -0.999
+    # not exactly -1: under the upper tail every deficit shares p ~ 1, so the empirical
+    # p-values carry a large tie block that Spearman penalises
+    assert spearmanr(obs[ok], perm["p_pooled"][ok]).statistic < -0.99
 
 
 def test_empirical_fdr_lands_between_the_family_wise_line_and_plain_bh():
@@ -353,9 +355,13 @@ def test_too_few_replicates_cannot_resolve_an_fdr_and_the_output_says_so():
 
     thin = permutation_null(mat, af, n_perm=10, n_bins=10, seed=9)
     _, lean = assemble_output(snp, stats, alpha=0.05, perm=thin)
-    assert lean["q_empirical_floor"] > 0.05          # cannot reject at q < 0.05 at all
-    assert lean["n_significant_fdr_perm"] == 0
-    # ...while the family-wise threshold still works at that many replicates
+    # a lone top SNP could not clear q<0.05 at this resolution...
+    assert lean["q_empirical_floor"] > 0.05
+    # ...though a block of SNPs tied at the limit still can, since BH divides by rank --
+    # which is exactly why the floor is reported as a bound and not as a verdict
+    k = int(np.ceil(lean["q_empirical_floor"] / 0.05))
+    assert lean["n_significant_fdr_perm"] == 0 or lean["n_significant_fdr_perm"] >= k
+    # the family-wise threshold works at that many replicates either way
     assert lean["n_significant_perm"] >= 1
 
     # more replicates buy resolution proportionally
@@ -375,3 +381,76 @@ def test_no_permutation_leaves_the_columns_out():
         assert c not in out.columns
     assert np.isnan(info["neg_log10_p_perm_threshold"])
     assert info["n_perm"] == 0
+
+
+# --------------------------------------------------------------------------- #
+#  The statistic itself: variant, tail, and the precision guard                #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_statistic_does_not_collapse_when_the_precision_changes():
+    """The guard that catches a cancelling formula.
+
+    `variant="published"` centres each SNP and then sums that same SNP, which is exactly
+    zero, so what survives is rounding residue: it shrinks by ~1e9 between float32 and
+    float64 and the two give unrelated answers. A statistic worth reporting is insensitive
+    to the accumulator's width, so assert that of the default.
+    """
+    from plasgenomicsutils.lib import ibd_selection as sel
+
+    mat = _ibd_matrix(hotspot=900, seed=3)
+    af = _af()
+    got = {}
+    for name, dt in (("f32", np.float32), ("f64", np.float64)):
+        orig, sel._DTYPE = sel._DTYPE, dt
+        try:
+            got[name] = sel.compute_selection_statistic(mat, af, n_bins=10)[0]["raw_stat"]
+        finally:
+            sel._DTYPE = orig
+    a, b = got["f32"], got["f64"]
+    ok = np.isfinite(a) & np.isfinite(b)
+    # same to single-precision relative tolerance, not merely correlated
+    assert np.allclose(a[ok], b[ok], rtol=1e-4)
+    assert np.nanmax(np.abs(b)) > 1.0          # O(1)+ , not a rounding residue
+
+
+def test_the_published_variant_reproduces_the_cancellation_it_is_kept_for():
+    from plasgenomicsutils.lib.ibd_selection import compute_selection_statistic
+
+    mat = _ibd_matrix(hotspot=900, seed=3)
+    af = _af()
+    pub = compute_selection_statistic(mat, af, n_bins=10, variant="published")[0]
+    cor = compute_selection_statistic(mat, af, n_bins=10, variant="corrected")[0]
+    # The published recipe's per-SNP sum cancels, so all that is left is rounding residue --
+    # tiny, and orders of magnitude below the corrected statistic. It keeps float32 (see
+    # `_VARIANT_DTYPE`), so the residue sits near 1e-5 rather than 1e-14.
+    assert np.nanmax(np.abs(pub["raw_stat"])) < 1e-3
+    assert np.nanmax(np.abs(cor["raw_stat"])) > 1.0
+    assert np.nanmax(np.abs(cor["raw_stat"])) / np.nanmax(np.abs(pub["raw_stat"])) > 1e4
+    with pytest.raises(ValueError, match="variant must be"):
+        compute_selection_statistic(mat, af, n_bins=10, variant="nope")
+
+
+def test_the_upper_tail_stops_a_sharing_deficit_scoring_as_selection():
+    from plasgenomicsutils.lib.ibd_selection import compute_selection_statistic
+
+    # scattered segments, so the z-scores are symmetric noise and deficits exist at all: on
+    # a real hotspot the corrected statistic runs one way only (about -0.2 to +10 here),
+    # which is the point of it
+    mat = _ibd_matrix(hotspot=None, seed=3)
+    af = _af()
+    two = compute_selection_statistic(mat, af, n_bins=10, tail="two-sided")[0]
+    up = compute_selection_statistic(mat, af, n_bins=10, tail="upper")[0]
+    assert np.allclose(two["z_score"], up["z_score"], equal_nan=True)   # same statistic
+
+    deficit = np.isfinite(up["z_score"]) & (up["z_score"] < -2)
+    assert deficit.any()
+    # two-sided scores a deficit like an excess; the upper tail sends it to p -> 1
+    assert np.nanmax(two["neg_log10_p"][deficit]) > 1
+    assert np.nanmax(up["neg_log10_p"][deficit]) < 0.05
+    # and the direction column names it either way
+    assert set(np.asarray(up["direction"])[deficit]) == {"deficit"}
+    excess = np.isfinite(up["z_score"]) & (up["z_score"] > 2)
+    assert set(np.asarray(up["direction"])[excess]) == {"excess"}
+    with pytest.raises(ValueError, match="tail must be"):
+        compute_selection_statistic(mat, af, n_bins=10, tail="nope")

@@ -30,6 +30,19 @@ def get_parser_selection_statistic() -> argparse.ArgumentParser:
                    help="Sample metadata CSV with columns: sample, <group-col>")
     p.add_argument("--group-col", default="group",
                    help="Column in --meta to use as group (default: group)")
+    p.add_argument("--xirs-variant", choices=("corrected", "published"), default="corrected",
+                   help="'published' reproduces the recipe in Henden et al. and its "
+                        "implementations (isoRelate `iRfunction`, ibdutils `calc_xirs`): it "
+                        "centres each SNP and then sums that same SNP, which cancels to zero, "
+                        "so the output is floating-point residue and two implementations of "
+                        "it disagree. Use only to reproduce prior work. 'corrected' (default) "
+                        "omits the per-SNP centring, so the statistic measures what it "
+                        "claims: excess IBD sharing at a locus (default: %(default)s)")
+    p.add_argument("--tail", choices=("upper", "two-sided"), default="upper",
+                   help="'upper' asks only whether a locus is shared MORE than expected, "
+                        "which is what a positive-selection scan means. 'two-sided' scores a "
+                        "sharing deficit identically to an excess (what z^2 -> chi2(1) does, "
+                        "and what the published recipe uses) (default: %(default)s)")
     p.add_argument("--n-bins", type=int, default=100,
                    help="Number of AF bins for normalisation (default: 100)")
     p.add_argument("--alpha", type=float, default=0.05,
@@ -74,12 +87,17 @@ def _permute(args, mat, af, indent="  "):
         return None
     print(f"{indent}permuting ({args.permute} replicates)...", flush=True)
     return S.permutation_null(mat, af, n_perm=args.permute, n_bins=args.n_bins,
-                              alpha=args.alpha, seed=args.permute_seed)
+                              alpha=args.alpha, seed=args.permute_seed,
+                              variant=args.xirs_variant, tail=args.tail)
 
 
 def _report(info, label, indent="  "):
     """One line per scan: the corrections, and the calibration behind them."""
     lam = info["lambda_gc"]
+    if info.get("xirs_variant") == "published":
+        print(f"{indent}WARNING: --xirs-variant published sums each SNP after centring it, "
+              f"which cancels to zero, so these numbers are floating-point residue rather "
+              f"than a statistic. For reproducing prior work only.")
     print(f"{indent}Valid SNPs: {info['n_tests']:,}"
           f"  |  Bonferroni (a={info['alpha']}) >= {info['neg_log10_p_threshold']:.2f}: "
           f"{info['n_significant']:,}"
@@ -95,13 +113,12 @@ def _report(info, label, indent="  "):
                  if np.isfinite(info["neg_log10_p_emp_fdr_threshold"]) else ""))
         qf, dead = info["q_empirical_floor"], info["frac_q_unreachable"]
         if np.isfinite(qf) and qf > info["fdr_alpha"] / 10:
-            worst = "cannot reject anything" if qf > info["fdr_alpha"] else "has little headroom"
-            # the floor scales as 1/n_perm, so this is the count that would clear it
             need = int(np.ceil(info["n_perm"] * qf / (info["fdr_alpha"] / 10) / 100) * 100)
-            print(f"{indent}  warning: with {info['n_perm']} replicates the smallest "
-                  f"reachable q is {qf:.3f}, so the empirical FDR {worst} at "
-                  f"q<{info['fdr_alpha']}. --permute {need} would give it an order of "
-                  f"magnitude of headroom.")
+            k = int(np.ceil(qf / info["fdr_alpha"]))
+            print(f"{indent}  warning: with {info['n_perm']} replicates a lone top SNP "
+                  f"bottoms out at q={qf:.3f}, so nothing clears q<{info['fdr_alpha']} "
+                  f"unless at least {k} SNPs tie at the resolution limit (BH divides by "
+                  f"rank). --permute {need} would give an order of magnitude of headroom.")
         if np.isfinite(dead) and dead > 0.01:
             print(f"{indent}  warning: {dead:.0%} of SNPs sit in a MAF bin too small to "
                   f"reach q<{info['fdr_alpha']} however extreme their score, so the "
@@ -151,10 +168,13 @@ def selection_statistic():
     group_af_table = S.load_group_af_table(args.af_group) if args.af_group else None
 
     print("\n--- Global selection statistic ---")
-    stats, bin_df = S.compute_selection_statistic(mat, global_af, n_bins=args.n_bins, label="global")
+    stats, bin_df = S.compute_selection_statistic(mat, global_af, n_bins=args.n_bins,
+                                                 label="global", variant=args.xirs_variant,
+                                                 tail=args.tail)
     perm = _permute(args, mat, global_af)
     out_df, info = S.assemble_output(snp_df, stats, args.alpha, fdr_alpha=args.fdr_alpha,
-                                     perm=perm, pool=args.empirical_pool)
+                                     perm=perm, pool=args.empirical_pool,
+                                     variant=args.xirs_variant, tail=args.tail)
     n_valid = info["n_tests"]
     _report(info, "global")
 
@@ -182,11 +202,14 @@ def selection_statistic():
             continue
         mat_sub = mat[row_idx, :]
         af_reg = S.get_af_for_group(group, snp_labels, group_af_table, global_af)
-        stats_r, bin_df_r = S.compute_selection_statistic(mat_sub, af_reg, n_bins=args.n_bins, label=group)
+        stats_r, bin_df_r = S.compute_selection_statistic(mat_sub, af_reg, n_bins=args.n_bins,
+                                                         label=group, variant=args.xirs_variant,
+                                                         tail=args.tail)
         perm_r = _permute(args, mat_sub, af_reg, indent="    ")
         out_r, info_r = S.assemble_output(snp_df, stats_r, args.alpha, group=group,
                                           fdr_alpha=args.fdr_alpha, perm=perm_r,
-                                          pool=args.empirical_pool)
+                                          pool=args.empirical_pool,
+                                          variant=args.xirs_variant, tail=args.tail)
         _report(info_r, group, indent="    ")
         bin_df_r.insert(0, "group", group)
         group_stats_dfs.append(out_r)

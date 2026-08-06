@@ -38,6 +38,43 @@ plasgenomicsutils ibd_gene_pairs --blocks blocks.tsv.gz --genes genes.tsv \
   --output gene_pairs.tsv.gz
 ```
 
+## The selection statistic has two variants
+
+`ibd_selection_statistic` measures excess IBD sharing at a locus: centre the binary matrix
+by pair (removing each pair's overall relatedness), scale by `sqrt(p(1-p))`, sum over pairs,
+then standardise within MAF bins.
+
+Henden et al. (PLoS Genet 2018), who introduced XiR,s, describe a **second** centring in
+between: *"we subtract the row mean from each row"* — a row being one SNP — followed by
+*"we calculate row sums"*. Centring a row and then summing that same row cancels to zero,
+so the statistic as described is identically zero and what gets reported is floating-point
+residue. The residue is not random — it grows with how many pairs share — so it acts as a
+noisy, uncalibrated stand-in for excess sharing, which is why the recipe has looked usable.
+It is not reproducible: float32 leaves ~1e-5, float64 ~1e-14, and the two rank SNPs almost
+independently. The same cancellation is in isoRelate's `iRfunction` and ibdutils'
+`calc_xirs_raw_stats_per_chr`; on one real cohort those two and this tool shared 29 of their
+top 100 SNPs.
+
+| `--xirs-variant` | step 2 | accumulator | use |
+|---|---|---|---|
+| `corrected` (default) | pair centring only | float64 | what the method claims to measure |
+| `published` | pair **and** SNP centring | float32 | reproducing this tool's earlier output |
+
+`published` prints a warning, and cannot be made to agree with isoRelate or ibdutils since
+those cancel at a different precision. On a real 249-sample cohort the switch turns a
+`-log10 p` of 111.6 at `z = -22.5` (a sharing *deficit* scored as a selection peak) into
+41.9 at `z = +13.6` at the same locus, and takes every region from 29-100% deficits among
+its significant SNPs to **0%**.
+
+### Direction, and which tail
+
+Every row carries a `direction` column, `excess` or `deficit`, from the sign of `z_score`.
+
+`--tail upper` (the default) asks only whether a locus is shared *more* than expected, which
+is what a positive-selection scan means. `--tail two-sided` squares the z-score into a
+chi-square(1) — the published behaviour — which gives a deficit exactly the same p-value as
+an equal excess, so `neg_log10_p` alone cannot tell them apart.
+
 ## Calling a selection peak significant
 
 `ibd_selection_statistic` reports up to four thresholds, all written to
