@@ -132,6 +132,45 @@ when you need a number. The *ranking* was never affected either way: every step 
 `z_score` to `neg_log10_p` is monotone, so a bad reference distribution mislabels the axis
 without moving any SNP relative to another.
 
+### The threshold file
+
+`<output>.<scan>.threshold.txt` is one row per scan (`global`, or one per group) holding
+every cutoff and the diagnostics behind it. Cutoffs are on the `-log10(p)` scale so each
+can be drawn as a horizontal line; the `*_perm*` and `*_emp*` entries appear only with
+`--permute`.
+
+| column | meaning |
+|---|---|
+| `n_tests` | SNPs with a usable statistic — the `m` in every correction |
+| `neg_log10_p_threshold`, `n_significant` | Bonferroni cutoff and count |
+| `neg_log10_p_fdr_threshold`, `n_significant_fdr` | BH critical value `k·q/m`, and count |
+| `neg_log10_p_perm_threshold`, `n_significant_perm` | permutation family-wise cutoff, and count |
+| `neg_log10_p_emp_fdr_threshold`, `n_significant_fdr_perm` | lowest score BH kept over the empirical p-values, and count |
+| `alpha`, `fdr_alpha` | the levels those were computed at |
+| `lambda_gc` | genomic inflation; 1 when the chi-square(1) fits |
+| `n_perm`, `empirical_pool` | replicates run, and which pooling drove `q_empirical` |
+| `p_empirical_resolution`, `q_empirical_floor` | finest p and finest q the permutation can reach |
+| `frac_q_unreachable` | share of SNPs whose own draws cannot reach `fdr_alpha` (0 under `global` pooling) |
+| `perm_bin_tail_min`, `perm_bin_tail_max` | the exchangeability check — both want 0.010 |
+| `n_bins_used`, `largest_bin_frac` | how the MAF binning actually came out (see below) |
+
+### MAF ties coarsen the binning
+
+Step 5 bins SNPs into `--n-bins` equal-frequency MAF bins, but allele frequency is *k/n*
+for a smallish *n*, so MAF is heavily tied and the quantile edges collapse onto each other.
+Asking for 100 bins routinely yields far fewer, with one bin holding a large share of the
+genome — and the smaller the group, the fewer distinct *k/n* values and the worse it gets.
+On a real *P. falciparum* cohort the per-region counts ranged from 41 non-empty bins down
+to 10, the largest bin holding 13% to 43% of SNPs.
+
+`n_bins_used` and `largest_bin_frac` report it on every run, and the command warns when one
+bin exceeds 10%. Two things to know:
+
+- It weakens the **MAF control in the statistic itself**, not only the p-values: a bin
+  holding 40% of the genome is not standardising like-with-like.
+- Lowering `--n-bins` does not repair it. No choice of bin count splits a tie, so the
+  largest bin stays the same size, and `lambda_gc` barely moves.
+
 ## Short IBD segments are dropped by default
 
 Small IBD blocks are commonly spurious, so every tool that reads hmm blocks discards

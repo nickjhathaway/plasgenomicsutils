@@ -10,43 +10,34 @@ Method (Henden / Nygaard-style normalisation):
   4. row-sum / sqrt(n_pairs) -> raw per-SNP statistic
   5. bin SNPs into equal-frequency MAF bins; within-bin z-score
   6. z^2 -> chi2(1df) -> p -> -log10(p)
-  7. two multiple-testing views: Bonferroni (family-wise) and Benjamini-Hochberg (FDR),
-     plus the genomic inflation factor that says how much either can be trusted
-  8. optionally `permutation_null`, which replaces steps 6-7's assumed reference with one
-     drawn from the data
+  7. multiple-testing views, and the diagnostics that say what each is worth
 
-**On the thresholds.** Bonferroni asks for near-certainty that no SNP called is a false
-positive; BH allows a stated share of them and so calls more. Both are reported, because
-neither is obviously right here and the difference is worth seeing.
+**Choosing a threshold.** Three are reported, and they differ in what they control and in
+what they assume:
 
-What is worth more than the choice between them is `lambda_gc`. The z-scores are
-standardised to zero mean and unit variance *within each MAF bin*, which fixes the first
-two moments and leaves the shape alone -- and the shape of IBD sharing is nothing like a
-normal. On real *P. falciparum* data lambda comes out near 0.1 rather than 1: a tight bulk
-with very heavy tails. Every p-value here descends from a chi2(1) that does not fit, so
-both thresholds inherit that.
+* **Bonferroni** (`significant`) -- family-wise: near-certainty that no SNP called is a
+  false positive. Reads the p-value off a chi2(1).
+* **Benjamini-Hochberg** (`significant_fdr`) -- a stated share of the SNPs called may be
+  false, so it calls more. Also off the chi2(1).
+* **Permutation** (`significant_perm`, `significant_fdr_perm`) -- from
+  :func:`permutation_null`, which draws the reference from the data instead. Family-wise
+  and FDR flavours both.
 
-Rescaling cannot repair it. Standardising by median and MAD instead of mean and sd drives
-lambda to exactly 1 by construction -- the diagnostic stops diagnosing -- while the tail
-that actually decides significance gets further from normal, not closer.
+`lambda_gc` decides which to trust: the median chi2 over the chi2(1) median, 1 when the
+reference fits. The z-scores are standardised to zero mean and unit variance *within each
+MAF bin*, which fixes the first two moments and leaves the shape alone -- and the shape of
+IBD sharing is nothing like a normal. On real *P. falciparum* data lambda comes out near
+0.1, a tight bulk with very heavy tails, so the two chi2(1) thresholds are miscalibrated
+and the permutation pair is the one to quote.
 
-`permutation_null` sidesteps the assumption. It re-draws the null by sliding each pair's
-IBD segments to a random circular offset, so per-pair sharing, segment lengths and
-along-genome autocorrelation all survive and only the alignment of segments *between*
-pairs is destroyed. The 95th percentile of the per-replicate genome-wide maxima is then a
-family-wise threshold that owes nothing to chi2(1), and the full null gives per-SNP
-empirical p-values that a Benjamini-Hochberg pass can legitimately be run over. It costs
-one full scan per replicate.
+Either way the *ranking* stands: every step from `z_score` to `neg_log10_p` is monotone, so
+a poorly fitting reference mislabels the axis without moving any SNP relative to another.
+`pval` and `q_value` inherit the misfit and should not be read as probabilities;
+`p_empirical` / `q_empirical` are their calibrated counterparts.
 
-Note what that does and does not repair. `pval` and `q_value` still come from the chi2(1)
-and remain miscalibrated -- do not quote them as probabilities. `p_empirical` and
-`q_empirical` are the calibrated pair. The *ranking* was never in doubt either way: every
-step from `z_score` to `neg_log10_p` is monotone, so the misfit moves no SNP relative to
-another and only mislabels the axis.
-
-Note also that no correction here knows about linkage. Adjacent SNPs in one sweep are not
-independent tests, so the SNP counts overstate the number of findings; merge significant
-SNPs into peaks before counting discoveries.
+No correction here knows about linkage. Adjacent SNPs in one sweep are not independent
+tests, so SNP counts overstate the number of findings; merge significant SNPs into peaks
+before counting discoveries.
 """
 
 from __future__ import annotations
@@ -286,72 +277,63 @@ def permutation_null(mat, af, n_perm=200, n_bins=100, alpha=0.05, seed=0,
                      progress=None):
     """Null distribution for the selection statistic, built by moving the IBD around.
 
-    Neither Bonferroni nor Benjamini-Hochberg is trustworthy on this statistic. Both
-    assume the chi2(1) reference fits, and it does not (see :func:`genomic_inflation`),
-    and both treat SNPs as independent tests when one IBD segment spans hundreds of them.
-    This generates the null instead of assuming it.
+    Bonferroni and Benjamini-Hochberg both read their p-values off a chi2(1) that does not
+    fit (see :func:`genomic_inflation`), and both treat SNPs as independent tests when one
+    IBD segment spans hundreds of them. This generates the null rather than assuming it.
 
     Each replicate slides **every pair's IBD segments to a random position** along the SNP
     axis, wrapping at the end. That keeps each pair's total sharing, its segment count and
     its segment lengths exactly as observed -- so relatedness, block structure and the
     resulting autocorrelation all survive -- and destroys only the thing being tested:
     whether pairs share *the same* locus. The statistic is then recomputed from scratch,
-    MAF binning and all.
+    MAF binning and all. Expect the result to be far stricter than the parametric lines:
+    on real data every replicate's genome-wide maximum can clear the Bonferroni line, in
+    which case that line's true family-wise error rate is 100%, not 5%.
 
-    Three summaries come out of the one pass, in increasing order of resolution and of
-    what they assume:
+    Four summaries come out of the one pass, trading resolution against assumptions:
 
     ``threshold``
-        The ``1 - alpha`` quantile of the per-replicate genome-wide **maxima**: the
-        largest score reachable with no locus-specific sharing. A family-wise line, and
-        the assumption-free one.
+        The ``1 - alpha`` quantile of the per-replicate genome-wide **maxima**: the largest
+        score reachable with no locus-specific sharing. Family-wise, and the one summary
+        that pools nothing across SNPs.
     ``p_pointwise``
         Per SNP, how often the null at *that same SNP* reached the observed value. Assumes
-        nothing beyond the shift itself, but cannot resolve below ``1 / (n_perm + 1)``, so
-        it is a sanity check on the top hits rather than an input to FDR.
-    ``p_pooled``
-        Per SNP, how often *any* null value anywhere in the genome reached the observed
-        value. Resolution ``1 / (n_perm * n_snps + 1)`` -- fine enough to feed
-        Benjamini-Hochberg -- at the price of assuming the null is exchangeable across
-        SNPs. The within-MAF-bin standardisation is what is supposed to make that true;
-        ``bin_tail_rate`` reports whether it did (see below).
+        nothing beyond the shift, but cannot resolve below ``1 / (n_perm + 1)``, so it is a
+        check on the top hits rather than an input to FDR.
     ``p_stratified``
-        The same count taken only within the SNP's own MAF bin, which drops the
-        exchangeability assumption entirely. Correct where ``p_pooled`` is approximate,
-        but ``n_bins`` times coarser -- with the defaults that is a resolution of about
-        1e-5, too blunt for a genome-wide FDR, so it is a cross-check rather than a
-        replacement unless ``n_perm`` is raised by roughly the same factor.
+        The same count within the SNP's own MAF bin. Also assumption-free, and ``n_bins``
+        times finer than pointwise -- but the floor is per-SNP, and MAF ties make the bins
+        very unequal, so SNPs in small bins can be unreachable at any score.
+    ``p_pooled``
+        Per SNP, how often *any* null value anywhere reached the observed value. Resolution
+        ``1 / (n_perm * n_snps + 1)``, fine enough to feed Benjamini-Hochberg, at the price
+        of assuming the null is exchangeable across MAF bins. ``bin_tail_rate`` reports
+        whether it is.
 
-    Both p-values use the Phipson-Smyth ``(1 + exceedances) / (1 + draws)`` form, so no
-    SNP is ever assigned p = 0 -- a permutation cannot evidence a p smaller than its own
-    resolution.
+    All three p-values use the Phipson-Smyth ``(1 + exceedances) / (1 + draws)`` form, so
+    none is ever 0 -- a permutation cannot evidence a p below its own resolution.
 
     ``bin_tail_rate`` is the exchangeability check behind ``p_pooled``: the share of each
-    MAF bin's null values landing above one common reference (the 99th percentile of the
-    first replicate). Under exchangeability every bin returns 0.01; a bin far from that is
-    a bin whose null is shaped differently from the rest, and pooling across it is doing
-    the SNPs in it a quiet disservice.
-
-    Expect the family-wise line to be far stricter than the parametric ones. Measured on
-    one group of a real 249-sample cohort (4,278 pairs, 27,897 SNPs, 200 replicates), the
-    null maxima ran 7.4 to 33.8 with a median of 12.7, against a Bonferroni line of 5.73
-    -- so **every one of the 200 replicates produced a genome-wide maximum that Bonferroni
-    would have called significant**, on data constructed to hold no shared locus at all. A
-    nominal 5% family-wise line with an actual family-wise error rate of 100% is the
-    concrete cost of the chi2(1) misfit.
+    MAF bin's nulls above one common reference (the 99th percentile of the first
+    replicate). Exchangeability puts every bin at 0.01; a bin far off has a differently
+    shaped null, and pooling across it makes its SNPs' p-values too small. Bins with fewer
+    than 1000 draws are left ``NaN``, since a 1% rate is unresolvable below that.
 
     Args:
         mat: The (pairs x SNPs) binary matrix for one group.
         af: Allele frequencies aligned to its columns.
-        n_perm: Replicates. 200 is enough for a 5% quantile and gives ``p_pooled`` about
-            six significant figures of headroom; raise it for a smaller alpha.
+        n_perm: Replicates. 200 suffices for a 5% quantile. Benjamini-Hochberg over
+            ``p_pooled`` needs ``n_perm >= 10 / q`` for an order of magnitude of headroom,
+            because the smallest reachable q is about ``1 / n_perm`` whatever the cohort
+            size.
         n_bins, alpha, seed: MAF bins, family-wise level, RNG seed.
         progress: Optional ``callable(i, n_perm)`` for a progress line.
 
     Returns:
         A dict with ``threshold``, ``maxima``, ``p_pointwise``, ``p_pooled``,
-        ``bin_tail_rate``, ``n_perm`` and ``n_pool``. Everything per-SNP is aligned to the
-        columns of ``mat`` and carries ``NaN`` wherever the observed statistic does.
+        ``p_stratified``, ``n_stratified``, ``bin_tail_rate``, ``bin_tail_rate_skipped``,
+        ``n_perm`` and ``n_pool``. Everything per-SNP is aligned to the columns of ``mat``
+        and carries ``NaN`` wherever the observed statistic does.
     """
     from scipy import sparse
 
