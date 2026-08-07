@@ -26,6 +26,12 @@ def get_parser_filter_ad_regenotype() -> argparse.ArgumentParser:
                         "it from AD. A call can lose support and go missing but never gain a "
                         "new allele, preserving the upstream caller's genotypes where they "
                         "disagree with raw read counts.")
+    p.add_argument("--ploidy", type=int, choices=(1, 2), default=None,
+                   help="Output genotype ploidy. Default keeps the conventional diploid "
+                        "coding (0/1 = mixed infection). If set, it is validated against the "
+                        "input ploidy per record: greater than the input errors (cannot "
+                        "promote), less than warns and trims genotype-linked fields (PL/GL) "
+                        "to match. 1 = haploid (single best allele), 2 = diploid.")
     return p
 
 
@@ -37,7 +43,7 @@ def filter_ad_regenotype():
     args = parse_args_filter_ad_regenotype()
     _run(args.input_vcf, args.output_vcf,
          min_reads=args.min_reads, min_freq=args.min_freq, het_min_af=args.het_min_af,
-         restrict_to_called=args.restrict_to_called_alleles)
+         restrict_to_called=args.restrict_to_called_alleles, ploidy=args.ploidy)
     print("Done.")
 
 

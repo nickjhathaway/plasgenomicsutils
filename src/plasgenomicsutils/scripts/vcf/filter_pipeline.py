@@ -20,6 +20,8 @@ def get_parser_filter_pipeline() -> argparse.ArgumentParser:
     p.add_argument("--outdir", default="filter_pipeline", help="Output directory")
     p.add_argument("--emit-default-config", metavar="PATH", default=None,
                    help="Write a starting default config to PATH and exit")
+    p.add_argument("--no-snp-bed", action="store_true",
+                   help="Do not auto-write the final SNP-panel BED (used by the IBD tools)")
     return p
 
 
@@ -39,7 +41,7 @@ def filter_pipeline():
         raise SystemExit("ERROR: --input and --config are required (or use --emit-default-config)")
 
     config = P.load_config(args.config)
-    tally = P.run_pipeline(args.input, args.outdir, config)
+    tally = P.run_pipeline(args.input, args.outdir, config, emit_snp_bed=not args.no_snp_bed)
 
     print("\n=== variant counts per step ===")
     for row in tally:

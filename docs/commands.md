@@ -22,6 +22,21 @@ plasgenomicsutils <command> -h     # options for one command
 | `analyze_ibd_matrix` | Per-pair / per-SNP / per-region / per-chromosome IBD summaries |
 | `ibd_selection_statistic` | IBD-based selection statistic (XiR,s), genome-wide and per-region |
 | `ibd_fraction_and_snp_density` | Per-pair IBD fraction (callable denominator) and SNP density |
+| `ibd_gene_overlap` | Fraction of pairs whose IBD block overlaps each gene, per group pair |
+| `ibd_gene_pairs` | Sample pairs IBD over each gene, with how much of the gene is covered |
+
+## `ld`
+
+| command | what it does |
+| --- | --- |
+| `ld_decay` | Mean r² vs SNP-pair distance per group: how fast LD decays |
+
+## `coverage`
+
+| command | what it does |
+| --- | --- |
+| `coverage_depth_stats` | Per-sample depth: mean/median/SD and breadth at thresholds, per chromosome |
+| `coverage_dropout_regions` | Regions below depth in nearly every sample (sWGA amplification dropouts) |
 
 ## `vcf`
 
@@ -31,7 +46,9 @@ plasgenomicsutils <command> -h     # options for one command
 | `harmonize_bcf` | Harmonize ALT sets of separately-called cohorts for `bcftools merge` |
 | `hard_qc_filter` | GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS |
 | `singleton_filter_add_ads` | Drop near-private variants and add the `FORMAT/ADS` summed-depth tag |
+| `singleton_counts` | Per-sample count of variants where it is the only non-reference carrier |
 | `biallelic_snp_filter` | Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping |
+| `strip_stale_format` | Strip stale genotype-linked FORMAT fields (e.g. `PL`) that no longer match the genotypes |
 | `tandem_repeat_mask` | Remove variants overlapping a tandem-repeat BED |
 | `core_region_filter` | Keep only variants inside the core-genome BED |
 | `paralog_mask` | Remove variants overlapping paralogous/multigene-family genes |

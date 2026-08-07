@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "plasgenomicsutils"
-version = "0.1.0"
+version = "0.2.0"
 description = "A collection of utilities for post processing Plasmodium genomics data (VCF filtering/harmonization, IBD post-analysis, Fws)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,7 @@ dependencies = [
     "scipy>=1.9",
     "pysam>=0.21",
     "cyvcf2>=0.30",
+    "scikit-allel>=1.3",
 ]
 
 [project.optional-dependencies]
@@ -35,11 +36,11 @@ plasgenomicsutils = "plasgenomicsutils.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/plasgenomicsutils"]
-# bundle the reference BED assets (core / paralog / tandem-repeat masks)
+# Bundle the reference BED assets (core / paralog / tandem-repeat masks). `packages`
+# already maps them into the wheel; `artifacts` just guarantees the .bed files are kept
+# even if a future .gitignore would exclude them. (Do NOT also add a force-include for the
+# same directory — that double-adds each file at the same wheel path and hatchling errors.)
 artifacts = ["src/plasgenomicsutils/assets/*.bed"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/plasgenomicsutils/assets" = "plasgenomicsutils/assets"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

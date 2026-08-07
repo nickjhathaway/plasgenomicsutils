@@ -28,21 +28,29 @@ def test_global_and_region_allele_freqs(tmp_path):
     g, r = compute_allele_freqs(str(vcf), s2r)
 
     # global: site10 = (0+1+2)/6 = 0.5 ; site20 = (1+2)/4 = 0.75 (s3 missing -> excluded)
-    assert _af(g, "chr1:10") == pytest.approx(0.5)
-    assert _af(g, "chr1:20") == pytest.approx(0.75)
+    assert _af(g, "chr1:9") == pytest.approx(0.5)
+    assert _af(g, "chr1:19") == pytest.approx(0.75)
 
-    ga = r[r.region == "A"]
-    gb = r[r.region == "B"]
-    assert _af(ga, "chr1:10") == pytest.approx(0.25)   # s1,s2 -> (0+1)/4
-    assert _af(ga, "chr1:20") == pytest.approx(0.75)   # (1+2)/4
-    assert _af(gb, "chr1:10") == pytest.approx(1.0)    # s3 hom-alt
-    assert math.isnan(_af(gb, "chr1:20"))              # s3 missing -> AN 0 -> NaN
+    ga = r[r.group == "A"]
+    gb = r[r.group == "B"]
+    assert _af(ga, "chr1:9") == pytest.approx(0.25)   # s1,s2 -> (0+1)/4
+    assert _af(ga, "chr1:19") == pytest.approx(0.75)   # (1+2)/4
+    assert _af(gb, "chr1:9") == pytest.approx(1.0)    # s3 hom-alt
+    assert math.isnan(_af(gb, "chr1:19"))              # s3 missing -> AN 0 -> NaN
 
 
-def test_zero_based_snp_ids(tmp_path):
+def test_snp_ids_are_always_zero_based(tmp_path):
     vcf = tmp_path / "mini.vcf"
     vcf.write_text(_VCF)
-    g1, _ = compute_allele_freqs(str(vcf))
-    g0, _ = compute_allele_freqs(str(vcf), zero_based=True)
-    assert list(g1.snp_id) == ["chr1:10", "chr1:20"]
-    assert list(g0.snp_id) == ["chr1:9", "chr1:19"]
+    g, _ = compute_allele_freqs(str(vcf))
+    # VCF POS 10 and 20 -> the canonical 0-based labels; there is no toggle for 1-based
+    assert list(g.snp_id) == ["chr1:9", "chr1:19"]
+    assert "pos_vcf" not in g.columns              # opt-in, so the table stays small
+
+
+def test_with_pos_vcf_adds_the_one_based_column(tmp_path):
+    vcf = tmp_path / "mini.vcf"
+    vcf.write_text(_VCF)
+    g, _ = compute_allele_freqs(str(vcf), with_pos_vcf=True)
+    assert list(g.pos_vcf) == [10, 20]             # what the VCF itself says
+    assert list(g.snp_id) == ["chr1:9", "chr1:19"]  # the key is unchanged

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 
 from ...lib import ibd_matrix
+from ...lib.ibd_matrix import IBD_MIN_BLOCK_KB, IBD_MIN_BLOCK_SNP
 from ...lib.vcf_io import SnpPanel
 
 
@@ -21,6 +22,12 @@ def get_parser_build_matrix() -> argparse.ArgumentParser:
     p.add_argument("--output", default="ibd_matrix", help="Output prefix (default: ibd_matrix)")
     p.add_argument("--all-blocks", action="store_true",
                    help="Include blocks with different>0 (default: only different==0)")
+    p.add_argument("--min-block-snp", type=int, default=IBD_MIN_BLOCK_SNP,
+                   help="Drop IBD segments with fewer than this many SNPs; short, SNP-poor "
+                        "segments are commonly spurious (default: %(default)s, 0 disables)")
+    p.add_argument("--min-block-kb", type=float, default=IBD_MIN_BLOCK_KB,
+                   help="Drop IBD segments shorter than this many kb "
+                        "(default: %(default)s, 0 disables)")
     p.add_argument("--sep", default="\t", help="Separator for blocks file (default: tab)")
     return p
 
@@ -44,9 +51,12 @@ def build_matrix():
     print(f"Found {len(pair_labels):,} unique pairs")
 
     print("\n--- Building IBD matrix ---")
+    print(f"Keeping IBD segments with >= {args.min_block_snp} SNPs and "
+          f">= {args.min_block_kb} kb")
     mat = ibd_matrix.build_matrix(
         blocks_df, panel, pair_to_row,
         only_different_zero=not args.all_blocks,
+        min_block_snp=args.min_block_snp, min_block_kb=args.min_block_kb,
     )
     density = mat.nnz / (mat.shape[0] * mat.shape[1]) if mat.shape[0] and mat.shape[1] else 0.0
     print(f"Matrix: {mat.shape[0]:,} pairs x {mat.shape[1]:,} SNPs  "

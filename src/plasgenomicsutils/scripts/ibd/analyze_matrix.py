@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Downstream per-pair / per-SNP / per-region / per-chromosome IBD summaries."""
+"""Downstream per-pair / per-SNP / per-group / per-chromosome IBD summaries."""
 
 from __future__ import annotations
 
@@ -17,14 +17,15 @@ def get_parser_analyze_matrix() -> argparse.ArgumentParser:
         prog="plasgenomicsutils analyze_ibd_matrix",
         description="Downstream analysis of the binary IBD matrix",
     )
-    p.add_argument("--matrix", required=True, help="Prefix from build_ibd_matrix")
-    p.add_argument("--meta", help="Sample metadata CSV (columns: sample, <region_col>)")
-    p.add_argument("--region-col", default="region",
-                   help="Column in metadata to use as region (default: region)")
+    p.add_argument("--matrix", required=True,
+                   help="Matrix from build_ibd_matrix: the prefix or the .npz path")
+    p.add_argument("--meta", help="Sample metadata CSV (columns: sample, <group_col>)")
+    p.add_argument("--group-col", default="group",
+                   help="Column in metadata to use as group (default: group)")
     p.add_argument("--output", default="ibd_analysis", help="Output prefix")
-    p.add_argument("--pairwise-region-snp", action="store_true",
-                   help="Also compute per-SNP IBD for every pairwise region combination. "
-                        "Output: <output>.per_snp_pairwise_region.tsv.gz. Requires --meta.")
+    p.add_argument("--pairwise-group-snp", action="store_true",
+                   help="Also compute per-SNP IBD for every pairwise group combination. "
+                        "Output: <output>.per_snp_pairwise_group.tsv.gz. Requires --meta.")
     return p
 
 
@@ -59,41 +60,41 @@ def analyze_matrix():
     _save(chr_sum, f"{args.output}.per_chr.tsv.gz")
 
     if not args.meta:
-        print("\n(No --meta provided; skipping region-level analysis)")
+        print("\n(No --meta provided; skipping group-level analysis)")
         return
 
-    print(f"\n--- Region-level IBD (region_col='{args.region_col}') ---")
-    meta = pd.read_csv(args.meta)
-    annotated = A.annotate_pairs_with_regions(pair_sum, meta, args.region_col)
+    print(f"\n--- Group-level IBD (group_col='{args.group_col}') ---")
+    meta = Utils.read_table(args.meta)   # auto-detect tab / comma
+    annotated = A.annotate_pairs_with_groups(pair_sum, meta, args.group_col)
     _save(annotated, f"{args.output}.per_pair_annotated.tsv.gz")
 
-    wb = A.within_between_region_ibd(annotated)
+    wb = A.within_between_group_ibd(annotated)
     print(wb.to_string(index=False))
-    _save(wb, f"{args.output}.within_between_region.tsv.gz")
+    _save(wb, f"{args.output}.within_between_group.tsv.gz")
 
-    _save(A.pairwise_region_ibd(annotated), f"{args.output}.pairwise_region_ibd.tsv.gz")
+    _save(A.pairwise_group_ibd(annotated), f"{args.output}.pairwise_group_ibd.tsv.gz")
 
-    print("\n--- Per-region per-SNP IBD frequency ---")
-    regions = sorted(set(annotated["region1"].tolist() + annotated["region2"].tolist()) - {"unknown"})
-    print(f"Found {len(regions)} regions: {', '.join(regions)}")
-    region_snp_dfs = []
-    for region in regions:
-        region_snp = A.per_snp_summary_for_region(mat, annotated, snp_labels, region)
-        if region_snp.empty:
-            print(f"  Skipping '{region}' — no within-region pairs")
+    print("\n--- Per-group per-SNP IBD frequency ---")
+    groups = sorted(set(annotated["group1"].tolist() + annotated["group2"].tolist()) - {"unknown"})
+    print(f"Found {len(groups)} groups: {', '.join(groups)}")
+    group_snp_dfs = []
+    for group in groups:
+        group_snp = A.per_snp_summary_for_group(mat, annotated, snp_labels, group)
+        if group_snp.empty:
+            print(f"  Skipping '{group}' — no within-group pairs")
             continue
-        print(f"  Processed '{region}' ({region_snp['n_pairs_total'].iloc[0]:,} pairs)")
-        region_snp_dfs.append(region_snp)
-    if region_snp_dfs:
-        _save(pd.concat(region_snp_dfs, ignore_index=True), f"{args.output}.per_snp_per_region.tsv.gz")
+        print(f"  Processed '{group}' ({group_snp['n_pairs_total'].iloc[0]:,} pairs)")
+        group_snp_dfs.append(group_snp)
+    if group_snp_dfs:
+        _save(pd.concat(group_snp_dfs, ignore_index=True), f"{args.output}.per_snp_per_group.tsv.gz")
 
-    if args.pairwise_region_snp:
-        print("\n--- Pairwise region per-SNP IBD frequency ---")
-        region_pairs = [(ra, rb) for i, ra in enumerate(regions) for rb in regions[i:]]
-        print(f"  {len(region_pairs)} region pairs")
+    if args.pairwise_group_snp:
+        print("\n--- Pairwise group per-SNP IBD frequency ---")
+        group_pairs = [(ra, rb) for i, ra in enumerate(groups) for rb in groups[i:]]
+        print(f"  {len(group_pairs)} group pairs")
         pairwise_snp_dfs = []
-        for ra, rb in region_pairs:
-            df = A.per_snp_summary_between_regions(mat, annotated, snp_labels, ra, rb)
+        for ra, rb in group_pairs:
+            df = A.per_snp_summary_between_groups(mat, annotated, snp_labels, ra, rb)
             if df.empty:
                 print(f"  Skipping '{ra}' x '{rb}' — no pairs")
                 continue
@@ -101,7 +102,7 @@ def analyze_matrix():
             pairwise_snp_dfs.append(df)
         if pairwise_snp_dfs:
             _save(pd.concat(pairwise_snp_dfs, ignore_index=True),
-                  f"{args.output}.per_snp_pairwise_region.tsv.gz")
+                  f"{args.output}.per_snp_pairwise_group.tsv.gz")
 
     print(f"\nAll outputs written with prefix '{args.output}.*'")
 

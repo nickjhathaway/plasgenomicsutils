@@ -1,0 +1,45 @@
+# bash completion for plasgenomicsutils
+# enable with:
+#   plasgenomicsutils --bash-completion >> ~/.bash_completion && source ~/.bash_completion
+
+_plasgenomicsutils_complete()
+{
+    # keep '_' and '=' out of the word breaks so --region-col / --bcf=path stay one token
+    local _OLD_WB="${COMP_WORDBREAKS-}"
+    COMP_WORDBREAKS="${COMP_WORDBREAKS//_/}"
+    COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"
+
+    local cur
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    # 1) first token: the command name (queried live from the CLI)
+    if [[ ${COMP_CWORD} -eq 1 ]]; then
+        local cmds
+        cmds="$("${COMP_WORDS[0]}" --list-plain 2>/dev/null | awk -F'\t' '{print $1}')"
+        COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
+        COMP_WORDBREAKS="$_OLD_WB"
+        return 0
+    fi
+
+    # 2) an option for a leaf command: scrape its -h output for -x / --long flags.
+    # Keep only the flag portion of each option line (strip the indent, then cut at the
+    # 2+ spaces before the help text) so words like "hmmibd-rs" in a description can't
+    # masquerade as flags.
+    if [[ "${cur}" == -* ]]; then
+        local opts
+        opts="$("${COMP_WORDS[0]}" "${COMP_WORDS[1]}" -h 2>/dev/null \
+            | awk '/^[[:space:]]+-/ { sub(/^[[:space:]]+/, ""); sub(/  .*/, ""); print }' \
+            | grep -oE -- '-{1,2}[A-Za-z0-9][-A-Za-z0-9_]*' | sort -u)"
+        COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+        COMP_WORDBREAKS="$_OLD_WB"
+        return 0
+    fi
+
+    # 3) otherwise, filename completion for positional args
+    COMPREPLY=( $(compgen -f -- "${cur}") )
+    COMP_WORDBREAKS="$_OLD_WB"
+    return 0
+}
+
+complete -F _plasgenomicsutils_complete plasgenomicsutils

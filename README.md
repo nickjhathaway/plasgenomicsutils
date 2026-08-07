@@ -5,7 +5,7 @@
 [![tests](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml/badge.svg)](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml)
 <!-- badges: end -->
 
-> **Version 0.1.0** — early development; APIs, defaults, and outputs may change
+> **Version 0.2.0** — early development; APIs, defaults, and outputs may change
 > between versions.
 
 A collection of utilities for **post processing Plasmodium genomics data** —
@@ -46,27 +46,57 @@ Downstream of an IBD caller (we use [`hmmibd-rs`](https://github.com/bguo068/hmm
 plasgenomicsutils build_ibd_matrix --blocks blocks.hmm.txt --snps snps.bed \
     --snp-format bed --output ibd_matrix
 
-# 2. per-pair / per-SNP / per-region / per-chromosome summaries
+# 2. per-pair / per-SNP / per-group / per-chromosome summaries
+#    (--group-col names the metadata column to group samples by; it need not be geographic)
 plasgenomicsutils analyze_ibd_matrix --matrix ibd_matrix --meta meta.csv \
-    --region-col region --pairwise-region-snp --output ibd_analysis
+    --group-col region --pairwise-group-snp --output ibd_analysis
 
-# 3. global + per-region allele frequencies (single pass over the BCF)
+# 3. global + per-group allele frequencies (single pass over the BCF)
 plasgenomicsutils compute_allele_freqs --bcf clean.bcf --meta meta.tsv \
-    --region-col region --zero-based --output afs/
+    --group-col region --output afs/
 
-# 4. IBD-based selection statistic (XiR,s), genome-wide and per-region
+# 4. IBD-based selection statistic (XiR,s), genome-wide and per-group
+#    reports Bonferroni AND Benjamini-Hochberg FDR, plus the genomic inflation factor;
+#    add --permute 200 when that factor is far from 1: it replaces the assumed chi2(1)
+#    with a null drawn from the data, giving a family-wise threshold plus calibrated
+#    per-SNP p-values and an FDR over them
 plasgenomicsutils ibd_selection_statistic --matrix ibd_matrix \
-    --af afs/allele_freqs.tsv.gz --af-region afs/region_allele_freqs.tsv.gz \
-    --meta meta.csv --region-col region --output ibd_selection
+    --af afs/allele_freqs.tsv.gz --af-group afs/group_allele_freqs.tsv.gz \
+    --meta meta.csv --group-col region --output ibd_selection
 
 # per-pair IBD fraction (callable-genome denominator) + SNP density
 plasgenomicsutils ibd_fraction_and_snp_density --blocks blocks.hmm.txt \
     --snps snps.bed --snp-format bed --reference pf3d7 --output ibd_frac
+
+# 5. per-gene IBD-block overlap between groups (fraction of pairs whose IBD block
+#    overlaps each gene) -> feeds the R gene triangles
+plasgenomicsutils ibd_gene_overlap --blocks blocks.hmm.txt --genes genes.tsv \
+    --meta meta.csv --group-col region --output gene_overlap.tsv.gz
+
+# 6. which sample PAIRS are IBD over each gene, and how much of the gene they share
+plasgenomicsutils ibd_gene_pairs --blocks blocks.hmm.txt --genes genes.tsv \
+    --output gene_pairs.tsv.gz
 ```
 
-SNP-panel label coordinates must be consistent between the matrix and the allele
-frequencies: build the matrix from a BED (0-based) and run `compute_allele_freqs`
-with `--zero-based`, or build from a VCF (1-based labels) and omit `--zero-based`.
+**Short IBD segments are dropped by default.** Every tool that reads hmm blocks discards
+segments with fewer than 15 SNPs or shorter than 15 kb (`--min-block-snp` /
+`--min-block-kb`, `0` to disable), matching R's
+`ibd_results(min_block_snp = 15, min_block_kb = 15)`. Small blocks are commonly spurious,
+and the filter applies to the IBD *evidence* only — the set of pairs that were compared,
+the denominator in every fraction, still comes from every row of the blocks file.
+
+**Coordinates are 0-based throughout.** Intervals are half-open `[start, end)` (BED), and
+SNP ids are `chr:pos0`, built in exactly one place from `(chrom, pos0)`. An id already
+present in an input — a BED name column, or a VCF `ID` set by `bcftools annotate --set-id`
+— is never adopted as a key, since whether it used `%POS` or `%POS0` is unknowable from the
+file; it is carried alongside as `source_id`. VCF `POS` and `hmmibd-rs` block ends are
+converted at the boundary and their numbering never propagates inward. Pass
+`--with-pos-vcf` to `compute_allele_freqs` if you also want the 1-based position for
+looking variants up by eye.
+
+Outputs carrying SNP labels record the convention (`#snp_coord_system=0-based`) and the
+readers verify it, so a table written by an older version is rejected rather than silently
+mixed — regenerate the matrix and allele frequencies together.
 
 ### VCF/BCF filtering & harmonization
 
@@ -93,12 +123,44 @@ accepts a plain path or a bundled Pf3D7 asset via `builtin:<name>` (`pf3d7_core_
 so a site that merely *looked* multiallelic is trimmed back to a genuine biallelic SNP and kept,
 rather than being discarded by a naive `-m2 -M2`.
 
+**Stale genotype-linked fields.** If an upstream caller wrote a genotype ploidy that disagrees with a
+`Number=G` FORMAT field — e.g. a diploid `GT` forced over hexaploid calls leaves a `PL` of the wrong
+length — `bcftools view --trim-alt-alleles` aborts ("Unexpected number of values in FORMAT/PL …").
+`strip_stale_format` fixes it: by default (`--mode mismatch`) it nulls such a field **only on the
+records where its length is inconsistent** with the genotypes, keeping valid likelihoods elsewhere
+(`--mode always` drops the field entirely; default field is `PL`, override with `--fields`).
+`filter_ad_regenotype` also does this automatically — it re-genotypes to a fresh `GT`, so it blanks
+the now-stale `PL`/`GL` to a consistent length as it writes — and `biallelic_snp_filter` applies the
+same surgical fix before trimming, so the default chain never chokes on these fields.
+
+`filter_ad_regenotype` keeps the conventional diploid coding (`0/1` = mixed infection) by default;
+`--ploidy {1,2}` sets it explicitly and is validated against the input ploidy per record (greater than
+the input errors — genotypes can't be promoted; less warns and trims). Use `--ploidy 1` for haploid
+calls.
+
+```bash
+plasgenomicsutils strip_stale_format --input calls.bcf --output clean.bcf          # null inconsistent PL
+plasgenomicsutils strip_stale_format --input calls.bcf --output clean.bcf --mode always --fields PL GL
+```
+
 Or run the whole chain from a JSON config, with a per-step count tally:
 
 ```bash
 plasgenomicsutils filter_pipeline --emit-default-config pipeline.json   # write a template
 plasgenomicsutils filter_pipeline --input in.bcf --config pipeline.json --outdir filtered/
 ```
+
+Steps write indexed BCFs plus a `variant_counts.tsv`, and the final callset's **SNP-panel
+BED** (`filtered/NN_<last>.snps.bed`) is written automatically — it drops straight into
+`build_ibd_matrix --snps … --snp-format bed` for the IBD analysis (`--no-snp-bed` to skip).
+
+`maf_filter` can also filter **per group**: pass `--meta samples.tsv --group-col country`
+(or set them in the step's `params`) to keep a site if its minor-allele frequency is ≥
+`--maf-min` in *any* group. It picks the sites on the combined VCF and applies the union
+back to the original, so a variant polymorphic in one country but rare/absent in another is
+kept with **all genotypes preserved** — a carrier below the threshold within its own country
+keeps its real `0/1`/`1/1` call, with no split-and-merge that would blank it. (A variant
+rare in *every* group is dropped.)
 
 **Step order depends on your input.** The chain is config-driven, so you pick the
 order; two regimes are common:
@@ -208,6 +270,20 @@ plasgenomicsutils strand_read_check --bam sample.bam --pos Pf3D7_12_v3:975431 \
 The theory, detection signature, and exclusion rules are in
 [docs/strand_bias_artifact_exclusion.md](docs/strand_bias_artifact_exclusion.md).
 
+## Auto completion
+
+To enable bash tab-completion for `plasgenomicsutils` (command names and each command's
+options), append the generated script to your `~/.bash_completion` and source it:
+
+```bash
+plasgenomicsutils --bash-completion >> ~/.bash_completion
+source ~/.bash_completion
+```
+
+The same script is also committed at [`etc/bash_completion`](etc/bash_completion) if you
+prefer to source a file directly. Completions are queried live from the installed CLI, so
+they stay in sync as commands and options change.
+
 ## Fws (within-host diversity)
 
 `calculate_fws` computes the per-sample Fws statistic (Manske 2012) — a monoclonal
@@ -235,6 +311,113 @@ the VCF reader does too — pass a SNP-filtered callset (or `--snps-only`) if yo
 SNPs only. `--population-name` tags every row for later cross-cohort merging;
 `--exclude-call-regions` drops CNV windows whose within-sample heterozygosity would
 otherwise depress Fws.
+
+## Coverage QC (from BAMs)
+
+`coverage_depth_stats` summarises sequencing depth per sample straight from indexed
+BAM/CRAM — mean, median, SD, quartiles and the *breadth* at a set of thresholds, per
+chromosome and genome-wide. Restrict it to a BED (the core genome is bundled) so
+subtelomeric and hypervariable regions do not drag every statistic down:
+
+```bash
+plasgenomicsutils coverage_depth_stats \
+  --bam-list bams.txt --regions builtin:pf3d7_core_regions \
+  --thresholds 1,5,10,20 --window 1000 \
+  --output coverage_by_sample.tsv.gz --windows-output coverage_windows.tsv.gz
+```
+
+Depth comes from **pysam** by default and from **mosdepth** when it is on `PATH` (it is in
+`environment.yml`), which is far faster on whole-genome BAMs — roughly a minute a sample
+against four. **The two do not define depth identically**, so the engine used is written
+into every output row and should be held fixed across a cohort:
+
+| engine | counts | agrees with |
+| --- | --- | --- |
+| `pysam` | reads — overlapping mates counted twice | `samtools depth`, base for base |
+| `mosdepth` | **fragments** — an overlapping mate pair counts once | runs 2–3% below `pysam` on real Pf WGS |
+
+Fragment depth is the better measure of independent evidence — two mates of one molecule
+are one observation, not two — which is the usual reason to prefer mosdepth over
+`samtools depth` in the first place. Read depth is what most tools report. Neither is
+wrong; mixing them across a cohort is, so the engine used is written into every row.
+
+```bash
+# pin fragment depth explicitly rather than depending on what is installed
+plasgenomicsutils coverage_depth_stats --bam-list bams.txt --engine mosdepth \
+  --regions builtin:pf3d7_core_regions --jobs 8 --output coverage.tsv.gz
+
+# read-level depth, comparable with samtools depth (and the only engine that can
+# apply a base-quality floor)
+plasgenomicsutils coverage_depth_stats --bam-list bams.txt --engine pysam \
+  --min-baseq 13 --jobs 8 --output coverage.reads.tsv.gz
+```
+
+`--jobs N` spreads samples across cores. Name your samples in the second column of
+`--bam-list` when the BAM filename is not the sample id:
+
+```
+/path/4089106922.sorted.bam	IMH07_4089106922
+```
+
+`coverage_dropout_regions` then answers the cross-sample question. Selective whole-genome
+amplification does not amplify uniformly, and a region that no sample amplifies reads as
+*invariant* rather than as missing. This finds the windows below depth in nearly every
+sample and merges them into regions:
+
+```bash
+plasgenomicsutils coverage_dropout_regions \
+  --windows coverage_windows.tsv.gz --regions builtin:pf3d7_core_regions \
+  --min-depth 5 --min-frac-samples 0.9 --merge-gap 1000 \
+  --genes genes.tsv --output dropouts.tsv.gz --bed-output dropouts.bed
+```
+
+Restricting to the core matters here: subtelomeric dropout is expected and would bury the
+regions worth acting on. The BED can be fed straight back in as a mask.
+
+Plot both with the R package — `coverage_qc()`, `plot_coverage_summary()`,
+`plot_coverage_by_chrom()`, `plot_coverage_dropout()`.
+
+## Sample QC: singleton counts
+
+`singleton_counts` counts, per sample, the variants where it is the only non-reference
+carrier. A sample far above the cohort's rate is usually contaminated, mixed-species or
+mis-aligned rather than interesting — MalariaGEN drop samples on this criterion when
+assembling the Pf analysis sets. Outliers are called by median absolute deviation, so the
+outliers being looked for cannot inflate the spread they are measured against:
+
+```bash
+plasgenomicsutils singleton_counts --vcf cohort.snps.bcf \
+  --min-depth 5 --max-missing-frac 0.2 --mad-cutoff 5 --output singletons.tsv.gz
+```
+
+The flag is two-sided, because the tails mean different things:
+
+- **Excess** private variants — contamination, a mixed-species infection, mis-alignment.
+- **Deficit** — another sample is absorbing them. The same scan records which partner each
+  sample shares its *doubletons* with, and names pairs above `--duplicate-frac` (0.9) as
+  near-identical. It deliberately does not call them duplicates: the same parasite
+  sequenced twice and one clone infecting two hosts look identical here, and in a
+  low-transmission setting the second is the common answer. Check IBD — a clone pair sits
+  near IBD 1 — and the collection records before dropping anything.
+
+`--min-depth` (default 5) matters on gVCF-derived callsets, which emit `0/0` at sites with
+**no reads at all** rather than `./.`; without it those count as confident reference calls.
+Singleton status is judged **within the samples analysed**, so `--samples` changes what
+counts as private.
+
+This runs inside `filter_pipeline` too, as a *report* step — it writes a table and passes
+the callset through untouched. Position is not arbitrary: `singleton_filter_add_ads` drops
+exactly the variants being counted, so the default config puts the report before it (and
+warns if a custom config puts it after, where every sample scores zero):
+
+```json
+{"steps": [
+  {"name": "hard_qc_filter"},
+  {"name": "singleton_counts", "report": true, "ext": "tsv",
+   "params": {"min_depth": 5, "max_missing_frac": 0.2}},
+  {"name": "singleton_filter_add_ads"}
+]}
+```
 
 ## Development
 

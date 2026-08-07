@@ -24,16 +24,27 @@ from .scripts.ibd.compute_allele_freqs import compute_allele_freqs
 from .scripts.ibd.analyze_matrix import analyze_matrix
 from .scripts.ibd.selection_statistic import selection_statistic
 from .scripts.ibd.fraction_and_snp_density import fraction_and_snp_density
+from .scripts.ibd.gene_overlap import gene_overlap
+from .scripts.ibd.gene_pairs import gene_pairs
 
 # -- Fws leaves ---------------------------------------------------------------
 from .scripts.fws.calculate_fws import calculate_fws
+
+# -- LD leaves ----------------------------------------------------------------
+from .scripts.ld.decay import ld_decay
+
+# -- Coverage leaves ----------------------------------------------------------
+from .scripts.cov.depth_stats import depth_stats
+from .scripts.cov.dropout_regions import dropout_regions
 
 # -- VCF leaves ---------------------------------------------------------------
 from .scripts.vcf.filter_ad_regenotype import filter_ad_regenotype
 from .scripts.vcf.harmonize_bcf import harmonize_bcf
 from .scripts.vcf.hard_qc_filter import hard_qc_filter
 from .scripts.vcf.singleton_filter_add_ads import singleton_filter_add_ads
+from .scripts.vcf.singleton_counts import singleton_counts
 from .scripts.vcf.biallelic_snp_filter import biallelic_snp_filter
+from .scripts.vcf.strip_stale_format import strip_stale_format
 from .scripts.vcf.tandem_repeat_mask import tandem_repeat_mask
 from .scripts.vcf.core_region_filter import core_region_filter
 from .scripts.vcf.paralog_mask import paralog_mask
@@ -68,6 +79,20 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "IBD-based selection statistic (XiR,s), genome-wide and per-region"),
         "ibd_fraction_and_snp_density": Command(fraction_and_snp_density,
             "Per-pair IBD fraction (callable denominator) and SNP density"),
+        "ibd_gene_overlap": Command(gene_overlap,
+            "Fraction of pairs whose IBD block overlaps each gene, per group pair"),
+        "ibd_gene_pairs": Command(gene_pairs,
+            "Sample pairs IBD over each gene, with how much of the gene is covered"),
+    },
+    "ld": {
+        "ld_decay": Command(ld_decay,
+            "Mean r-squared vs SNP-pair distance per group: how fast LD decays"),
+    },
+    "coverage": {
+        "coverage_depth_stats": Command(depth_stats,
+            "Per-sample depth: mean/median/SD and breadth at thresholds, per chromosome"),
+        "coverage_dropout_regions": Command(dropout_regions,
+            "Regions below depth in nearly every sample (sWGA amplification dropouts)"),
     },
     "vcf": {
         "filter_ad_regenotype": Command(filter_ad_regenotype,
@@ -80,6 +105,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Drop near-private variants and add the FORMAT/ADS summed-depth tag"),
         "biallelic_snp_filter": Command(biallelic_snp_filter,
             "Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping"),
+        "strip_stale_format": Command(strip_stale_format,
+            "Strip stale genotype-linked FORMAT fields (e.g. PL) that no longer match the genotypes"),
         "tandem_repeat_mask": Command(tandem_repeat_mask,
             "Remove variants overlapping a tandem-repeat BED"),
         "core_region_filter": Command(core_region_filter,
@@ -94,6 +121,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Keep variants within a minor-allele-frequency window"),
         "filter_pipeline": Command(filter_pipeline,
             "Run an ordered, config-driven chain of filtering steps, tallying counts"),
+        "singleton_counts": Command(singleton_counts,
+            "Per-sample count of variants where it is the only non-reference carrier"),
         "strand_bias_scan": Command(strand_bias_scan,
             "Flag strand-bias (SSE) fake-het artifacts from FORMAT/ADF+ADR; emit a blacklist BED"),
         "strand_read_check": Command(strand_read_check,
@@ -125,12 +154,79 @@ def _print_catalog() -> None:
         print()
 
 
+def _print_catalog_plain() -> None:
+    """Machine-friendly '<command>\t<group>\t<help>' (one per line), for bash completion."""
+    for group, commands in REGISTRY.items():
+        for name, cmd in commands.items():
+            print(f"{name}\t{group}\t{cmd.help}")
+
+
+# Canonical bash-completion script. `plasgenomicsutils --bash-completion` prints this, and
+# etc/bash_completion in the repo is a copy for people who'd rather source a file directly.
+_BASH_COMPLETION = r"""# bash completion for plasgenomicsutils
+# enable with:
+#   plasgenomicsutils --bash-completion >> ~/.bash_completion && source ~/.bash_completion
+
+_plasgenomicsutils_complete()
+{
+    # keep '_' and '=' out of the word breaks so --group-col / --bcf=path stay one token
+    local _OLD_WB="${COMP_WORDBREAKS-}"
+    COMP_WORDBREAKS="${COMP_WORDBREAKS//_/}"
+    COMP_WORDBREAKS="${COMP_WORDBREAKS//=}"
+
+    local cur
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    # 1) first token: the command name (queried live from the CLI)
+    if [[ ${COMP_CWORD} -eq 1 ]]; then
+        local cmds
+        cmds="$("${COMP_WORDS[0]}" --list-plain 2>/dev/null | awk -F'\t' '{print $1}')"
+        COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
+        COMP_WORDBREAKS="$_OLD_WB"
+        return 0
+    fi
+
+    # 2) an option for a leaf command: scrape its -h output for -x / --long flags.
+    # Keep only the flag portion of each option line (strip the indent, then cut at the
+    # 2+ spaces before the help text) so words like "hmmibd-rs" in a description can't
+    # masquerade as flags.
+    if [[ "${cur}" == -* ]]; then
+        local opts
+        opts="$("${COMP_WORDS[0]}" "${COMP_WORDS[1]}" -h 2>/dev/null \
+            | awk '/^[[:space:]]+-/ { sub(/^[[:space:]]+/, ""); sub(/  .*/, ""); print }' \
+            | grep -oE -- '-{1,2}[A-Za-z0-9][-A-Za-z0-9_]*' | sort -u)"
+        COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+        COMP_WORDBREAKS="$_OLD_WB"
+        return 0
+    fi
+
+    # 3) otherwise, filename completion for positional args
+    COMPREPLY=( $(compgen -f -- "${cur}") )
+    COMP_WORDBREAKS="$_OLD_WB"
+    return 0
+}
+
+complete -F _plasgenomicsutils_complete plasgenomicsutils
+"""
+
+
+def _print_bash_completion() -> None:
+    sys.stdout.write(_BASH_COMPLETION)
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     index = _flatten()
 
     if not argv or argv[0] in ("-h", "--help", "--list"):
         _print_catalog()
+        return
+    if argv[0] == "--list-plain":
+        _print_catalog_plain()
+        return
+    if argv[0] == "--bash-completion":
+        _print_bash_completion()
         return
     if argv[0] in ("-V", "--version"):
         print(f"plasgenomicsutils {__version__}")

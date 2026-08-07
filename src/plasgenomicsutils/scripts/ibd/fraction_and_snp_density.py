@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ...lib import ibd_fraction as F
 from ...lib.reference import DEFAULT_REFERENCE, available_references, get_reference
+from ...lib.ibd_matrix import IBD_MIN_BLOCK_KB, IBD_MIN_BLOCK_SNP
 from ...lib.vcf_io import positions_frame
 from ...utils.small_utils import Utils
 
@@ -30,6 +31,12 @@ def get_parser_fraction_and_snp_density() -> argparse.ArgumentParser:
     p.add_argument("--min-snp", type=int, default=15, help="SNP-per-1cM-window floor to report")
     p.add_argument("--sep", default="\t")
     p.add_argument("--output", default="ibd_frac", help="Output prefix")
+    p.add_argument("--min-block-snp", type=int, default=IBD_MIN_BLOCK_SNP,
+                   help="Drop IBD segments with fewer than this many SNPs; short, SNP-poor "
+                        "segments are commonly spurious (default: %(default)s, 0 disables)")
+    p.add_argument("--min-block-kb", type=float, default=IBD_MIN_BLOCK_KB,
+                   help="Drop IBD segments shorter than this many kb "
+                        "(default: %(default)s, 0 disables)")
     return p
 
 
@@ -55,7 +62,9 @@ def fraction_and_snp_density():
           f"   ({100*callable_bp/full_bp:.1f}% of full {full_bp:,} bp)")
 
     print("\n--- Per-pair IBD fraction (callable denominator) ---")
-    pair_df = F.per_pair_fraction(args.blocks, args.sep, bp_per_cm, callable_cm)
+    pair_df = F.per_pair_fraction(args.blocks, args.sep, bp_per_cm, callable_cm,
+                                  min_block_snp=args.min_block_snp,
+                                  min_block_kb=args.min_block_kb)
     pair_df["f_full_genome"] = pair_df["total_ibd_cm"] / full_cm
     n_with = int((pair_df["total_ibd_bp"] > 0).sum())
     print(f"  {len(pair_df):,} total pairs;  {n_with:,} with IBD;  "

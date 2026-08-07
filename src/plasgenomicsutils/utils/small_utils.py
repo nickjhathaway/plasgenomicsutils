@@ -45,6 +45,19 @@ class Utils:
         return delim
 
     @staticmethod
+    def read_table(path: str, sep=None):
+        """Read a delimited metadata table into a DataFrame. When ``sep`` is ``None``,
+        the delimiter is auto-detected from the header (tab if any tab is present, else
+        comma), so a ``.tsv`` metadata file works without a separator flag."""
+        import pandas as pd
+
+        if sep is None:
+            with Utils.smart_open_read(path) as fh:
+                header = fh.readline()
+            sep = "\t" if "\t" in header else ","
+        return pd.read_csv(path, sep=sep)
+
+    @staticmethod
     def output_file_check(path: str, overwrite: bool) -> None:
         """Raise unless ``path`` is writable (missing, or overwrite allowed)."""
         if path in ("STDOUT", "-"):
@@ -62,7 +75,13 @@ class Utils:
         return p
 
     @staticmethod
-    def write_tsv_gz(df, path: str) -> None:
-        """Write a pandas DataFrame as a tab-delimited, gzip-compressed file."""
+    def write_tsv_gz(df, path: str, header_comment: str | None = None) -> None:
+        """Write a pandas DataFrame as a tab-delimited, gzip-compressed file.
+
+        ``header_comment`` is written as a leading ``#`` line, for stamping metadata a
+        reader should verify rather than infer (read it back with ``comment='#'``).
+        """
         with gzip.open(path, "wt") as fh:
+            if header_comment:
+                fh.write(f"#{header_comment}\n")
             df.to_csv(fh, sep="\t", index=False)

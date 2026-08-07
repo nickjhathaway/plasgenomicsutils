@@ -1,16 +1,25 @@
 """Thin, checked wrappers around bcftools / bedtools for the filtering commands.
 
-External tools (``bcftools``, ``bedtools``, ``bgzip``) must be on ``PATH``. Each
-helper validates that the tools it needs are present, runs the command, and
-raises a clear error on failure.
+External tools (``bcftools``, ``bedtools``) must be on ``PATH``. Each helper validates
+that the tools it needs are present, runs the command, and raises a clear error on
+failure. Compression goes through ``bcftools -Oz``, so ``bgzip`` itself is not required.
 """
 
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+
+
+def format_tags(path: str) -> set[str]:
+    """The FORMAT tag IDs defined in a VCF/BCF header (e.g. ``{"GT", "AD", "PL"}``)."""
+    require("bcftools")
+    proc = subprocess.run(["bcftools", "view", "-h", str(path)],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return set(re.findall(r"^##FORMAT=<ID=([^,>]+)", proc.stdout, flags=re.M))
 
 
 def require(*tools: str) -> None:
@@ -47,6 +56,22 @@ def out_flag(path: str) -> str:
     if p.endswith(".vcf.gz"):
         return "z"
     return "v"
+
+
+def index_vcf(path: str) -> None:
+    """Create a CSI index for a coordinate-sorted ``.bcf`` / ``.vcf.gz`` (best-effort).
+
+    Indexing intermediate outputs keeps tools that probe for an index (e.g. pysam) quiet
+    and lets downstream steps do region queries. Non-fatal: a failure (e.g. an unsorted
+    file) is ignored so it never breaks a pipeline.
+    """
+    p = str(path)
+    if not p.endswith((".bcf", ".vcf.gz")):
+        return
+    try:
+        sh(f"bcftools index -f {q(path)}", tools=("bcftools",))
+    except SystemExit:
+        pass
 
 
 def count_variants(path: str) -> int:

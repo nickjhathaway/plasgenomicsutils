@@ -16,6 +16,16 @@ def _write(path, text):
     return str(path)
 
 
+def test_load_matrix_accepts_prefix_or_npz(tmp_path):
+    from scipy.sparse import csr_matrix
+    prefix = str(tmp_path / "ibd_matrix")
+    ibd_matrix.save_matrix(csr_matrix(np.array([[1, 0], [1, 1]])),
+                           ["p1__p2", "p3__p4"], ["c:1", "c:2"], prefix)
+    a = ibd_matrix.load_matrix(prefix)              # the prefix, as documented
+    b = ibd_matrix.load_matrix(prefix + ".npz")     # the full .npz path
+    assert (a[0] != b[0]).nnz == 0 and a[1] == b[1] == ["p1__p2", "p3__p4"]
+
+
 def test_build_matrix_known_answer(tmp_path):
     # 4 SNPs on chr1 at 1-based POS 100,200,300,400 -> pos0 99,199,299,399
     vcf = _write(tmp_path / "s.vcf",
@@ -33,14 +43,16 @@ def test_build_matrix_known_answer(tmp_path):
         "B\tC\tchr1\t0\t1000\t1\t9\n")       # different==1 -> excluded, but pair exists
 
     panel = SnpPanel.load(vcf, "vcf")
-    assert panel.labels == ["chr1:100", "chr1:200", "chr1:300", "chr1:400"]
+    assert panel.labels == ["chr1:99", "chr1:199", "chr1:299", "chr1:399"]
 
     blocks_df = ibd_matrix.read_blocks(blocks)
     pair_to_row, pair_labels = ibd_matrix.build_pair_index(blocks_df)
     # pairs come from ALL blocks (incl. different==1): A__B and B__C
     assert pair_labels == ["A__B", "B__C"]
 
-    mat = ibd_matrix.build_matrix(blocks_df, panel, pair_to_row).toarray()
+    # tiny hand-checkable blocks, so the short-segment filter is switched off here
+    mat = ibd_matrix.build_matrix(blocks_df, panel, pair_to_row,
+                                  min_block_snp=0, min_block_kb=0).toarray()
     # A__B row: cols 1,2 set (from the different==0 blocks), binary despite overlap
     assert mat[pair_to_row[("A", "B")]].tolist() == [0, 1, 1, 0]
     # B__C only had a different==1 block -> excluded -> all zeros, but row exists
@@ -52,10 +64,12 @@ def test_snps_in_block_binary_search(tmp_path):
     bed = _write(tmp_path / "s.bed",
         "chr1\t10\t11\nchr1\t20\t21\nchr1\t30\t31\nchr2\t10\t11\n")
     panel = SnpPanel.load(bed, "bed")
-    # inclusive [20,30] on chr1 -> the two SNPs at 20 and 30
+    # half-open [20, 30) on chr1 -> only the SNP at 20; 30 is the excluded end
     hits = sorted(panel.snps_in_block("chr1", 20, 30).tolist())
-    got = sorted(panel.df.loc[hits, "pos0"].tolist())
-    assert got == [20, 30]
+    assert sorted(panel.df.loc[hits, "pos0"].tolist()) == [20]
+    # extending the end past 30 takes it in
+    hits = sorted(panel.snps_in_block("chr1", 20, 31).tolist())
+    assert sorted(panel.df.loc[hits, "pos0"].tolist()) == [20, 30]
     # chromosome not present -> empty
     assert panel.snps_in_block("chrX", 0, 100).size == 0
 
