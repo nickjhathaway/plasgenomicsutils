@@ -26,11 +26,10 @@ _VCF = (
 )
 
 
-def _bgzip(tmp_path):
+def _write_vcf_gz(tmp_path, bgzip):
     p = tmp_path / "in.vcf"
     p.write_text(_VCF)
-    subprocess.run(["bgzip", "-f", str(p)], check=True)
-    return str(p) + ".gz"
+    return bgzip(p)
 
 
 def _pl(path):
@@ -47,8 +46,8 @@ def _trims_ok(path):
 
 
 @needs
-def test_mismatch_mode_is_surgical(tmp_path):
-    inp = _bgzip(tmp_path)
+def test_mismatch_mode_is_surgical(tmp_path, bgzip):
+    inp = _write_vcf_gz(tmp_path, bgzip)
     out = str(tmp_path / "out.bcf")
     n = strip_stale_format(inp, out, fields=("PL",), mode="mismatch")
     assert n == 1                                   # only the one inconsistent record touched
@@ -59,8 +58,8 @@ def test_mismatch_mode_is_surgical(tmp_path):
 
 
 @needs
-def test_always_mode_drops_the_field(tmp_path):
-    inp = _bgzip(tmp_path)
+def test_always_mode_drops_the_field(tmp_path, bgzip):
+    inp = _write_vcf_gz(tmp_path, bgzip)
     out = str(tmp_path / "out.bcf")
     strip_stale_format(inp, out, fields=("PL",), mode="always")
     hdr = subprocess.run(["bcftools", "view", "-h", out], stdout=subprocess.PIPE, text=True).stdout
@@ -69,7 +68,7 @@ def test_always_mode_drops_the_field(tmp_path):
 
 
 @needs
-def test_clean_file_is_untouched(tmp_path):
+def test_clean_file_is_untouched(tmp_path, bgzip):
     # a file with no PL: mismatch mode is a no-op passthrough and stays trimmable
     p = tmp_path / "clean.vcf"
     p.write_text(
@@ -77,9 +76,9 @@ def test_clean_file_is_untouched(tmp_path):
         '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
         "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"
         "chr1\t10\t.\tA\tT\t.\t.\t.\tGT\t0/1\n")
-    subprocess.run(["bgzip", "-f", str(p)], check=True)
+    p = bgzip(p)
     out = str(tmp_path / "out.bcf")
-    assert strip_stale_format(str(p) + ".gz", out, mode="mismatch") == 0
+    assert strip_stale_format(p, out, mode="mismatch") == 0
     assert _positions_ok(out)
 
 
@@ -89,7 +88,7 @@ def _positions_ok(path):
     return out.split() == ["10"]
 
 
-def _regen_input(tmp_path, body, header_extra=""):
+def _regen_input(tmp_path, bgzip, body, header_extra=""):
     inp = tmp_path / "in.vcf"
     inp.write_text(
         "##fileformat=VCFv4.2\n##contig=<ID=chr1,length=100000>\n"
@@ -98,16 +97,15 @@ def _regen_input(tmp_path, body, header_extra=""):
         '##FORMAT=<ID=ADS,Number=1,Type=Integer,Description="sum">\n'
         + header_extra +
         "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n" + body)
-    subprocess.run(["bgzip", "-f", str(inp)], check=True)
-    return str(inp) + ".gz"
+    return bgzip(inp)
 
 
 @needs
-def test_ploidy_reduce_to_haploid_warns_and_trims(tmp_path):
+def test_ploidy_reduce_to_haploid_warns_and_trims(tmp_path, bgzip):
     pytest.importorskip("cyvcf2")
     from plasgenomicsutils.lib.regenotype import filter_ad_regenotype
     inp = _regen_input(
-        tmp_path,
+        tmp_path, bgzip,
         "chr1\t100\t.\tA\tT,G\t.\t.\t.\tGT:AD:ADS:PL"
         "\t0/1:5,5,0:10:0,10,20,30,40,50\t0/0:9,0,0:9:0,10,20,30,40,50,60\n",
         '##FORMAT=<ID=PL,Number=G,Type=Integer,Description="GL">\n')
@@ -122,19 +120,19 @@ def test_ploidy_reduce_to_haploid_warns_and_trims(tmp_path):
 
 
 @needs
-def test_ploidy_promotion_errors(tmp_path):
+def test_ploidy_promotion_errors(tmp_path, bgzip):
     pytest.importorskip("cyvcf2")
     from plasgenomicsutils.lib.regenotype import filter_ad_regenotype
-    inp = _regen_input(tmp_path, "chr1\t100\t.\tA\tT\t.\t.\t.\tGT:AD:ADS\t0:9,0:9\t1:0,9:9\n")
+    inp = _regen_input(tmp_path, bgzip, "chr1\t100\t.\tA\tT\t.\t.\t.\tGT:AD:ADS\t0:9,0:9\t1:0,9:9\n")
     with pytest.raises(SystemExit):
         filter_ad_regenotype(inp, str(tmp_path / "out.bcf"), ploidy=2)  # 2 > haploid input
 
 
 @needs
-def test_default_keeps_diploid_coding_on_haploid_input(tmp_path):
+def test_default_keeps_diploid_coding_on_haploid_input(tmp_path, bgzip):
     pytest.importorskip("cyvcf2")
     from plasgenomicsutils.lib.regenotype import filter_ad_regenotype
-    inp = _regen_input(tmp_path, "chr1\t100\t.\tA\tT\t.\t.\t.\tGT:AD:ADS\t0:9,0:9\t1:0,9:9\n")
+    inp = _regen_input(tmp_path, bgzip, "chr1\t100\t.\tA\tT\t.\t.\t.\tGT:AD:ADS\t0:9,0:9\t1:0,9:9\n")
     out = str(tmp_path / "out.bcf")
     filter_ad_regenotype(inp, out)   # no ploidy -> conventional diploid coding, no error
     gt = subprocess.run(["bcftools", "query", "-f", "[%GT ]\n", out],
@@ -143,7 +141,7 @@ def test_default_keeps_diploid_coding_on_haploid_input(tmp_path):
 
 
 @needs
-def test_regenotype_self_cleans_stale_likelihoods(tmp_path):
+def test_regenotype_self_cleans_stale_likelihoods(tmp_path, bgzip):
     pytest.importorskip("cyvcf2")
     from plasgenomicsutils.lib.regenotype import filter_ad_regenotype
     # AD/ADS present so the record is re-genotyped (to diploid); the 7-wide PL on S2 must be
@@ -158,9 +156,9 @@ def test_regenotype_self_cleans_stale_likelihoods(tmp_path):
         "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n"
         "chr1\t100\t.\tA\tT,G\t.\t.\t.\tGT:AD:ADS:PL"
         "\t0/1:5,5,0:10:0,10,20,30,40,50\t0/0:9,0,0:9:0,10,20,30,40,50,60\n")
-    subprocess.run(["bgzip", "-f", str(inp)], check=True)
+    inp = bgzip(inp)
     out = str(tmp_path / "out.bcf")
-    filter_ad_regenotype(str(inp) + ".gz", out)
+    filter_ad_regenotype(inp, out)
     # PL blanked (all missing) and the record now trims cleanly
     pl = _pl(out)["100"]
     assert all(set(v) <= {".", ","} for v in pl)

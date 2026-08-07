@@ -102,7 +102,7 @@ _GRP_HEADER = (
 
 
 @needs_bcftools
-def test_maf_filter_grouped_keeps_union_and_preserves_genotypes(tmp_path):
+def test_maf_filter_grouped_keeps_union_and_preserves_genotypes(tmp_path, bgzip):
     # groups A = {s1,s2}, B = {s3,s4}
     # 100: monomorphic in A (0/0) but polymorphic in B -> kept, A's genotypes preserved
     # 200: monomorphic everywhere -> dropped
@@ -112,8 +112,7 @@ def test_maf_filter_grouped_keeps_union_and_preserves_genotypes(tmp_path):
         "chr1\t100\t.\tA\tT\t.\t.\t.\tGT\t0/0\t0/0\t0/1\t0/1\n"
         "chr1\t200\t.\tA\tT\t.\t.\t.\tGT\t0/0\t0/0\t0/0\t0/0\n"
         "chr1\t300\t.\tA\tT\t.\t.\t.\tGT\t0/1\t0/0\t0/0\t0/0\n")
-    subprocess.run(["bgzip", "-f", str(p)], check=True)
-    inp = str(p) + ".gz"
+    inp = bgzip(p)
     meta = tmp_path / "meta.tsv"
     meta.write_text("sample\tgroup\ns1\tA\ns2\tA\ns3\tB\ns4\tB\n")
 
@@ -131,7 +130,7 @@ def test_maf_filter_grouped_keeps_union_and_preserves_genotypes(tmp_path):
 
 
 @needs_bcftools
-def test_maf_filter_grouped_preserves_subthreshold_carrier_genotypes(tmp_path):
+def test_maf_filter_grouped_preserves_subthreshold_carrier_genotypes(tmp_path, bgzip):
     # 60 samples in group A + 4 in group B. a01 carries the alt but its frequency is < 2%
     # WITHIN group A; the site is rescued by group B, and a01's real 0/1 / 1/1 calls survive.
     A = [f"a{i:02d}" for i in range(1, 61)]
@@ -149,12 +148,12 @@ def test_maf_filter_grouped_preserves_subthreshold_carrier_genotypes(tmp_path):
             + row(300, {"a01": "0/1"}))                            # rare in EVERY group -> dropped
     p = tmp_path / "in.vcf"
     p.write_text(hdr + body)
-    subprocess.run(["bgzip", "-f", str(p)], check=True)
+    p = bgzip(p)
     meta = tmp_path / "meta.tsv"
     meta.write_text("sample\tcountry\n"
                     + "".join(f"{s}\tA\n" for s in A) + "".join(f"{s}\tB\n" for s in B))
     out = str(tmp_path / "out.bcf")
-    F.maf_filter(str(p) + ".gz", out, maf_min=0.02, meta=str(meta), group_col="country")
+    F.maf_filter(p, out, maf_min=0.02, meta=str(meta), group_col="country")
     assert _positions(out) == [100, 200]                          # 300 (rare everywhere) dropped
     gt = dict(r.split() for r in subprocess.run(
         ["bcftools", "query", "-s", "a01", "-f", "%POS [%GT]\n", out],

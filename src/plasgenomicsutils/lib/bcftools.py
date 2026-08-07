@@ -1,8 +1,8 @@
 """Thin, checked wrappers around bcftools / bedtools for the filtering commands.
 
-External tools (``bcftools``, ``bedtools``, ``bgzip``) must be on ``PATH``. Each
-helper validates that the tools it needs are present, runs the command, and
-raises a clear error on failure.
+External tools (``bcftools``, ``bedtools``) must be on ``PATH``. Each helper validates
+that the tools it needs are present, runs the command, and raises a clear error on
+failure. Compression goes through ``bcftools -Oz``, so ``bgzip`` itself is not required.
 """
 
 from __future__ import annotations
