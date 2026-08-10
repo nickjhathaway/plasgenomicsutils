@@ -37,3 +37,21 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+  # The docs site is only built on a tag, so a page missing from `nav` or a broken internal
+  # link would first surface during a release. A strict build catches both (see the
+  # `validation:` block in mkdocs.yml) and needs neither the package nor its dependencies.
+  docs:
+    runs-on: ubuntu-latest
+    name: docs (mkdocs --strict)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r docs/requirements.txt
+
+      - name: Build the docs site strictly
+        run: mkdocs build --strict

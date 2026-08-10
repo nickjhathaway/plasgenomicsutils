@@ -280,7 +280,15 @@ plasgenomicsutils ibd_gene_pairs --blocks final_set_filtered/10_maf_filter_hmm.h
 Output columns: `sample1`, `sample2` (order-normalised), `chr`, `block_start`/`block_end`
 (the IBD segment), `gene`, `gene_id`, `gene_start`/`gene_end`, `coverage`
 (`complete`/`partial`), `covered_start`/`covered_end` (the gene's own bounds when
-complete), `covered_bp` and `percent_covered`. All coordinates are 0-based half-open.
+complete), `covered_bp`, `percent_covered`, and `gene_cluster_id`/`gene_cluster_size`.
+All coordinates are 0-based half-open.
+
+`gene_cluster_id` is the single-linkage cluster of samples sharing at that gene: a sample
+joins a cluster if it shares with **any** member, so a chain of pairs forms one cluster even
+where its ends never share directly. That is the same grouping R's `plot_ibd_network()`
+draws as a connected component, so the column is how you name the blobs on that plot. Ids
+run largest cluster first and are assigned per gene — cluster 1 at `pfcrt` and cluster 1 at
+`pfdhps` are unrelated groups.
 
 The R equivalent returns a tibble instead of writing a file, and the two agree row for row:
 

@@ -101,3 +101,37 @@ def test_no_overlap_returns_an_empty_frame_with_the_columns():
     b = _blocks([("a", "b", "Pf3D7_08_v3", 500, 2500, 0)])    # different chromosome
     out = gene_ibd_pairs(b, GENES)
     assert out.empty and list(out.columns) == COLUMNS
+
+
+def test_single_linkage_joins_a_chain_and_ranks_by_size():
+    from plasgenomicsutils.lib.ibd_gene_pairs import single_linkage
+
+    # a-b-c is one chain (a and c never share directly), d-e and f-g are separate
+    ids, sizes = single_linkage(["a", "b", "d", "f"], ["b", "c", "e", "g"])
+    assert ids["a"] == ids["b"] == ids["c"]
+    assert ids["a"] not in (ids["d"], ids["f"])
+    assert len(set(ids.values())) == 3
+    assert ids["a"] == 1 and sizes["a"] == 3          # largest cluster first
+    assert sizes["d"] == sizes["f"] == 2
+
+    # bridging the chain to d-e merges them
+    ids2, sizes2 = single_linkage(["a", "b", "d", "f", "c"], ["b", "c", "e", "g", "d"])
+    assert len(set(ids2.values())) == 2
+    assert max(sizes2.values()) == 5
+
+
+def test_gene_ibd_pairs_carries_the_cluster_columns():
+    import pandas as pd
+
+    from plasgenomicsutils.lib.ibd_gene_pairs import COLUMNS, gene_ibd_pairs
+
+    blocks = pd.DataFrame({
+        "sample1": ["a", "b", "d"], "sample2": ["b", "c", "e"],
+        "chr": "Pf3D7_07_v3", "start": 400000, "end": 460000, "different": 0})
+    genes = pd.DataFrame({"name": ["g1"], "chr": ["Pf3D7_07_v3"],
+                          "start": [403000], "end": [406000]})
+    out = gene_ibd_pairs(blocks, genes)
+    assert "gene_cluster_id" in COLUMNS and "gene_cluster_size" in COLUMNS
+    by_pair = dict(zip(zip(out.sample1, out.sample2), out.gene_cluster_id))
+    assert by_pair[("a", "b")] == by_pair[("b", "c")] != by_pair[("d", "e")]
+    assert out.loc[out.sample1 == "a", "gene_cluster_size"].iloc[0] == 3

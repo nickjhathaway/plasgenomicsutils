@@ -22,7 +22,42 @@ COLUMNS = [
     "sample1", "sample2", "chr", "block_start", "block_end",
     "gene", "gene_id", "gene_start", "gene_end",
     "coverage", "covered_start", "covered_end", "covered_bp", "percent_covered",
+    "gene_cluster_id", "gene_cluster_size",
 ]
+
+
+def single_linkage(a, b):
+    """Connected components over an edge list, as ``(id, size)`` maps keyed by sample.
+
+    Single-linkage clustering: a sample joins a cluster if it shares IBD with **any**
+    member, so a chain of pairs is one cluster even where its ends never share directly.
+    Ids run largest cluster first, so ``1`` is the biggest group at that gene and the
+    numbering means the same thing from one gene to the next. Ties break on the first
+    member's name, which keeps the ids stable between runs.
+    """
+    nodes = sorted(set(a) | set(b))
+    index = {n: i for i, n in enumerate(nodes)}
+    parent = list(range(len(nodes)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]      # path compression
+            i = parent[i]
+        return i
+
+    for x, y in zip(a, b):
+        rx, ry = find(index[x]), find(index[y])
+        if rx != ry:
+            parent[rx] = ry
+
+    members: dict[int, list[str]] = {}
+    for n in nodes:
+        members.setdefault(find(index[n]), []).append(n)
+    order = sorted(members, key=lambda r: (-len(members[r]), members[r][0]))
+    cid = {r: i + 1 for i, r in enumerate(order)}
+    ids = {n: cid[find(index[n])] for n in nodes}
+    sizes = {n: len(members[find(index[n])]) for n in nodes}
+    return ids, sizes
 
 
 def gene_ibd_pairs(
@@ -84,6 +119,9 @@ def gene_ibd_pairs(
             "covered_bp": covered,
             "percent_covered": 100.0 * covered / (ge - gs) if ge > gs else np.nan,
         }))
+        ids, sizes = single_linkage(s1, s2)
+        frames[-1]["gene_cluster_id"] = [ids[v] for v in s1]
+        frames[-1]["gene_cluster_size"] = [sizes[v] for v in s1]
 
     if not frames:
         return pd.DataFrame(columns=COLUMNS)

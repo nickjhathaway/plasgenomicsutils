@@ -5,7 +5,7 @@
 [![tests](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml/badge.svg)](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml)
 <!-- badges: end -->
 
-> **Version 0.2.0** — early development; APIs, defaults, and outputs may change
+> **Version 0.2.1** — early development; APIs, defaults, and outputs may change
 > between versions.
 
 A collection of utilities for **post processing Plasmodium genomics data** —
@@ -73,7 +73,8 @@ plasgenomicsutils ibd_fraction_and_snp_density --blocks blocks.hmm.txt \
 plasgenomicsutils ibd_gene_overlap --blocks blocks.hmm.txt --genes genes.tsv \
     --meta meta.csv --group-col region --output gene_overlap.tsv.gz
 
-# 6. which sample PAIRS are IBD over each gene, and how much of the gene they share
+# 6. which sample PAIRS are IBD over each gene, how much of it they share, and the
+#    single-linkage cluster each pair belongs to at that gene (gene_cluster_id)
 plasgenomicsutils ibd_gene_pairs --blocks blocks.hmm.txt --genes genes.tsv \
     --output gene_pairs.tsv.gz
 ```

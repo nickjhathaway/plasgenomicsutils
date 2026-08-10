@@ -40,6 +40,17 @@ markdown_extensions:
   - toc:
       permalink: true
 
+# Promote the two silent-by-default cases to warnings, so `mkdocs build --strict` fails on
+# them in CI rather than the site quietly shipping with a page nobody can reach. A page not
+# listed in `nav` is logged at INFO by default and would otherwise only be noticed by its
+# absence from the built site.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    unrecognized_links: warn
+
 nav:
   - Home: index.md
   - Installation: install.md
