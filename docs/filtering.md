@@ -8,7 +8,7 @@ plasgenomicsutils hard_qc_filter --input in.bcf --output 01.bcf            # QD/
 plasgenomicsutils singleton_filter_add_ads --input 01.bcf --output 02.bcf  # drop singletons, add FORMAT/ADS
 plasgenomicsutils tandem_repeat_mask --input 02.bcf --output 03.bcf        # --bed defaults to builtin:pf3d7_tandem_repeats
 plasgenomicsutils core_region_filter  --input 03.bcf --output 04.bcf       # keep core genome
-plasgenomicsutils paralog_mask        --input 04.bcf --output 05.bcf       # drop paralog/multigene families
+plasgenomicsutils paralog_mask        --input 04.bcf --output 05.bcf       # drop paralog/multigene families (optional, see Pipeline)
 plasgenomicsutils filter_ad_regenotype --input-vcf 05.bcf --output-vcf 06.bcf  # clean low AD, re-genotype
 plasgenomicsutils biallelic_snp_filter --input 06.bcf --output 07.bcf      # keep biallelic SNPs
 plasgenomicsutils sample_coverage_filter --input 07.bcf --output 08.bcf
@@ -83,8 +83,29 @@ plasgenomicsutils filter_pipeline --emit-default-config pipeline.json
 plasgenomicsutils filter_pipeline --input in.bcf --config pipeline.json --outdir filtered/
 ```
 
-Each step writes `filtered/NN_<name>.bcf` (indexed) plus a `variant_counts.tsv` tally. The
-final callset's **SNP panel BED** is written automatically next to the last step
+Each step writes `filtered/NN_<name>.bcf` (indexed) plus a `variant_counts.tsv` tally
+(`step`, `kind`, `count`, `path` — `kind` separates a filter's variant count from a report's
+row count and from a step that was switched off).
+
+### Turning steps on and off
+
+A step with `"enabled": false` stays in the config and out of the run. JSON has no comments,
+so that is how an optional step stays discoverable instead of being something you have to
+know exists:
+
+```json
+{ "name": "paralog_mask", "enabled": false,
+  "params": { "bed": "builtin:pf3d7_paralog_genes" } }
+```
+
+**`paralog_mask` ships off.** `core_region_filter` has already removed the subtelomeric
+multigene families that mismap worst; most of what `paralog_mask` would take next sits in the
+core and is single-copy. Some of that genuinely misbehaves, but a lot of it is fine, and
+dropping all of it costs real signal — paralogy is not by itself evidence a locus is
+unusable. Set `"enabled": true` when mismapping is specifically what you are controlling for,
+or run the step standalone on the region you doubt.
+
+The final callset's **SNP panel BED** is written automatically next to the last step
 (`filtered/NN_<last>.snps.bed`) — this is the panel the IBD tools read, so it feeds straight
 into `build_ibd_matrix`:
 

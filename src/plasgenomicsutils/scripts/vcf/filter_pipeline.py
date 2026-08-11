@@ -29,6 +29,19 @@ def parse_args_filter_pipeline():
     return get_parser_filter_pipeline().parse_args()
 
 
+def _tally_fields(row: dict) -> tuple[str, "int | str", str]:
+    """``(kind, count, path)`` for one ``run_pipeline()`` tally row.
+
+    The rows are not all one shape: a filter step records ``variants``, a report records
+    ``rows``, and a step switched off with ``"enabled": false`` records neither.
+    """
+    if row.get("skipped"):
+        return "skipped", "", ""
+    if row.get("report"):
+        return "report", row["rows"], row.get("path", "")
+    return "variants", row["variants"], row.get("path", "")
+
+
 def filter_pipeline():
     args = parse_args_filter_pipeline()
 
@@ -45,11 +58,15 @@ def filter_pipeline():
 
     print("\n=== variant counts per step ===")
     for row in tally:
-        print(f"  {row['step']:<28} {row['variants']:>12,}")
-    Path(args.outdir, "variant_counts.tsv").write_text(
-        "step\tvariants\tpath\n"
-        + "".join(f"{r['step']}\t{r['variants']}\t{r['path']}\n" for r in tally)
-    )
+        kind, count, _ = _tally_fields(row)
+        shown = "skipped" if kind == "skipped" else f"{count:,}"
+        print(f"  {row['step']:<28} {shown:>12}{' rows' if kind == 'report' else ''}")
+
+    lines = ["step\tkind\tcount\tpath\n"]
+    for row in tally:
+        kind, count, path = _tally_fields(row)
+        lines.append(f"{row['step']}\t{kind}\t{count}\t{path}\n")
+    Path(args.outdir, "variant_counts.tsv").write_text("".join(lines))
     print(f"\n  -> {Path(args.outdir, 'variant_counts.tsv')}")
 
 

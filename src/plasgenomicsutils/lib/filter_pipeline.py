@@ -95,7 +95,13 @@ DEFAULT_CONFIG = {
         {"name": "singleton_filter_add_ads"},
         {"name": "tandem_repeat_mask", "params": {"bed": "builtin:pf3d7_tandem_repeats"}},
         {"name": "core_region_filter", "params": {"bed": "builtin:pf3d7_core_regions"}},
-        {"name": "paralog_mask", "params": {"bed": "builtin:pf3d7_paralog_genes"}},
+        # Off by default. core_region_filter has already dropped the subtelomeric multigene
+        # families that mismap worst; most of what this removes next sits in the core and is
+        # single-copy, so some of it genuinely misbehaves but a lot of it is fine. Losing all
+        # of it costs real signal, and paralogy is not by itself evidence a locus is unusable.
+        # Set "enabled": true when mismapping is the thing being controlled for.
+        {"name": "paralog_mask", "enabled": False,
+         "params": {"bed": "builtin:pf3d7_paralog_genes"}},
         {"name": "filter_ad_regenotype"},
         {"name": "biallelic_snp_filter"},
         {"name": "sample_coverage_filter"},
@@ -129,6 +135,14 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
         ext = step.get("ext", "bcf")
         params = step.get("params", {})
         out_path = str(out / f"{i:02d}_{name}.{ext}")
+
+        # `"enabled": false` keeps a step in the config, and out of the run. That is how an
+        # optional step stays discoverable -- JSON has no comments, so a step you would
+        # otherwise have to know about is written down with the switch off.
+        if step.get("enabled", True) is False:
+            print(f"[{i:02d}] {name} -- skipped (\"enabled\": false)")
+            tally.append({"step": name, "skipped": True})
+            continue
 
         if step.get("report"):
             if name not in REPORTS:
