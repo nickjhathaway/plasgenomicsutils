@@ -214,26 +214,37 @@ def accumulate_union(files: list[str], min_ad: int, min_af: float, het_min_af: f
     overlapping no-ALT/indel record does not clobber the real SNP. Across files
     the surviving real ALTs are unioned.
 
-    Returns ``(union, dup_positions, ambiguous)``:
+    Returns ``(union, dup_positions, ambiguous, stats)``:
       * ``union``        — ``(chrom, pos) -> [ref, alt1, ...]`` for sites with a real ALT
       * ``dup_positions``— ``(file, chrom, pos)`` collapsed (SNP kept over no-ALT record)
       * ``ambiguous``    — ``(file, chrom, pos)`` where >1 record carried real ALTs
                            (genuinely un-normalized; needs `bcftools norm`)
+      * ``stats``        — per-file cleaning counts plus the union tally, for the report:
+        what cleaning actually did is the difference between a threshold that is doing
+        useful work and one that is quietly discarding real alleles.
     """
     ref_of: dict = {}
     alts_of: dict = {}
     dup_positions: set = set()
     ambiguous: set = set()
+    per_file_stats: dict = {}
     import pysam
 
     for fpath in files:
         per_file: dict = {}  # key -> (ref, {alts}, n_real)
+        st = {"processed": 0, "indel_context": 0, "alts_removed": 0, "reduced_to_ref_only": 0}
         with pysam.VariantFile(fpath) as vcf:
             for rec in vcf:
+                st["processed"] += 1
                 if drop_indels and is_indel_context(rec):
+                    st["indel_context"] += 1
                     continue
                 # Pass 1 only needs the surviving-ALT set, so skip re-genotyping.
                 ref, real = surviving_alleles(rec, min_ad, min_af)
+                before = n_real_alts(rec)
+                st["alts_removed"] += max(0, before - len(real))
+                if before > 0 and not real:
+                    st["reduced_to_ref_only"] += 1
                 key = (rec.chrom, rec.pos)
                 cand = (ref, real, len(real))
                 if key in per_file:
@@ -244,23 +255,31 @@ def accumulate_union(files: list[str], min_ad: int, min_af: float, het_min_af: f
                         per_file[key] = cand
                 else:
                     per_file[key] = cand
+        st["sites"] = len(per_file)
+        per_file_stats[fpath] = st
         for key, (ref, alts, _n) in per_file.items():
             ref_of.setdefault(key, ref)
             alts_of.setdefault(key, set()).update(alts)
 
     union = {k: [ref_of[k]] + sorted(alts) for k, alts in alts_of.items() if alts}
-    return union, dup_positions, ambiguous
+    stats = {"per_file": per_file_stats, "union_sites": len(alts_of),
+             "union_with_alts": len(union), "union_dropped": len(alts_of) - len(union)}
+    return union, dup_positions, ambiguous, stats
 
 
-def harmonize_record_to_union(rec, union_alleles, het_min_af, out) -> None:
-    """Rewrite one cleaned record to the union allele set and write it."""
+def harmonize_record_to_union(rec, union_alleles, het_min_af, out) -> bool:
+    """Rewrite one cleaned record to the union allele set and write it.
+
+    Returns whether the record gained ALT alleles it did not carry, which is the
+    interesting half of the tally: those are the records whose genotypes were recomputed.
+    """
     union_alts = union_alleles[1:]
     current_alts = [a for a in rec.alleles[1:] if a != "."]
 
     if current_alts == union_alts:
         strip_stale_info(rec)
         out.write(rec)
-        return
+        return False
 
     current_alt_to_idx = {a: i + 1 for i, a in enumerate(current_alts)}
     union_to_current = [0 if i == 0 else current_alt_to_idx.get(a)
@@ -291,6 +310,7 @@ def harmonize_record_to_union(rec, union_alleles, het_min_af, out) -> None:
             sample["GT"] = gt if gt is not None else (None, None)
     strip_stale_info(rec)
     out.write(rec)
+    return alleles_added
 
 
 #: output-format code -> file extension
@@ -299,7 +319,7 @@ OUTPUT_EXT = {"v": ".vcf", "z": ".vcf.gz", "b": ".bcf"}
 
 def harmonize_file(fpath: str, out_path: str, union: dict,
                    min_ad: int, min_af: float, het_min_af: float,
-                   drop_indels: bool = True) -> None:
+                   drop_indels: bool = True) -> dict:
     """Pass 2: stream a file, clean each record, and write it harmonized to union.
 
     Exactly one record is written per ``(chrom, pos)`` — the one with the most
@@ -312,9 +332,16 @@ def harmonize_file(fpath: str, out_path: str, union: dict,
     must not be written straight to BCF: pysam does not shrink the ``Number=R``
     AD array to match, leaving a binary AD/allele mismatch that breaks downstream
     tools. Converting the VCF to BCF (e.g. via bcftools) regenerates AD cleanly.
+
+    Returns ``{"written", "alts_added", "dropped_ref_only", "absent"}``. ``absent`` counts
+    union sites this file holds no record for: harmonizing makes the files agree on *alleles*,
+    not on which sites they contain, so those become whole-cohort missing genotypes after
+    ``bcftools merge`` — see the note the command prints.
     """
     import pysam
 
+    st = {"written": 0, "alts_added": 0, "dropped_ref_only": 0}
+    seen: set = set()
     with pysam.VariantFile(fpath) as vcf:
         out = pysam.VariantFile(out_path, "w", header=vcf.header)
         held = None
@@ -326,18 +353,24 @@ def harmonize_file(fpath: str, out_path: str, union: dict,
             clean_record(rec, min_ad, min_af, het_min_af)
             key = (rec.chrom, rec.pos)
             if held is not None and key != held_key:
-                _emit(held, held_key, union, het_min_af, out)
+                _emit(held, held_key, union, het_min_af, out, st, seen)
                 held, held_n = None, -1
             cand_n = n_real_alts(rec)
             if held is None or _prefer(cand_n, held_n):
                 held, held_key, held_n = rec, key, cand_n
         if held is not None:
-            _emit(held, held_key, union, het_min_af, out)
+            _emit(held, held_key, union, het_min_af, out, st, seen)
         out.close()
+    st["absent"] = len(union) - len(seen)
+    return st
 
 
-def _emit(rec, key, union, het_min_af, out) -> None:
+def _emit(rec, key, union, het_min_af, out, st: dict, seen: set) -> None:
     union_alleles = union.get(key)
     if union_alleles is None:
+        st["dropped_ref_only"] += 1
         return  # site dropped (ref-only across all files)
-    harmonize_record_to_union(rec, union_alleles, het_min_af, out)
+    if harmonize_record_to_union(rec, union_alleles, het_min_af, out):
+        st["alts_added"] += 1
+    st["written"] += 1
+    seen.add(key)

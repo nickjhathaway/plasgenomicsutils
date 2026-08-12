@@ -90,46 +90,153 @@ def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True) -> None:
            f"| bcftools view -m2 -M2 -v snps - -O{fmt} -o {q(out)}", tools=("bcftools",))
 
 
-def region_filter(inp: str, out: str, *, bed: str, exclude: bool) -> None:
+def _sorted_bed(bed: str) -> str:
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".bed", delete=False).name
+    sh(f"sort -k1,1 -k2,2n {q(bed)} > {q(tmp)}")
+    return tmp
+
+
+def _whitelisted_record_spans(inp: str, keep_bed: str) -> str:
+    """BED of the full span of every input record the whitelist touches, one line per record.
+
+    Record spans, not the whitelist's own intervals, because bedtools sizes a VCF record as
+    ``[POS-1, POS-1 + len(REF))``. A multi-base REF therefore reaches past a one-base whitelist
+    entry, and carving only that base out of a mask would leave the record still overlapping
+    what remained -- it would be dropped despite being whitelisted. Widening to the record's
+    own span makes the whitelist mean "keep this variant", which is the useful reading: name a
+    position and the variant there survives, whatever its REF length.
+    """
+    out = tempfile.NamedTemporaryFile("w", suffix=".bed", delete=False).name
+    # the header has to reach bedtools, which needs it to recognise VCF on stdin
+    sh(f"bcftools view {q(inp)} "
+       f"| bedtools intersect -a stdin -b {q(keep_bed)} "
+       f"| awk -F'\\t' '!/^#/{{print $1\"\\t\"($2-1)\"\\t\"($2-1+length($4))}}' "
+       f"| sort -k1,1 -k2,2n > {q(out)}", tools=("bcftools", "bedtools"))
+    return out
+
+
+def _effective_region_bed(inp: str, bed: str, keep_bed: str,
+                          exclude: bool) -> tuple[str, int]:
+    """Fold a whitelist into a region BED: (effective_bed, n_variants_rescued).
+
+    Applied to the regions rather than by splitting and re-merging the VCF, so the filter stays
+    a single bedtools pass:
+
+    * a drop mask has the whitelisted records' spans carved out (``bedtools subtract``), so a
+      variant in a whitelisted stretch of a tandem repeat no longer overlaps the mask at all;
+    * a keep mask gains them (union), so a variant outside the core survives if whitelisted.
+
+    The count is of records the plain rule would have dropped, which is what tells a caller
+    whether the whitelist did anything.
+    """
+    a, b = _sorted_bed(bed), _whitelisted_record_spans(inp, keep_bed)
+    eff = tempfile.NamedTemporaryFile("w", suffix=".bed", delete=False).name
+    try:
+        if exclude:
+            sh(f"bedtools subtract -a {q(a)} -b {q(b)} > {q(eff)}", tools=("bedtools",))
+            # rescued: whitelisted records that do overlap the mask
+            n = _count_bed_lines(f"bedtools intersect -u -a {q(b)} -b {q(a)}")
+        else:
+            sh(f"cat {q(a)} {q(b)} | sort -k1,1 -k2,2n | bedtools merge > {q(eff)}",
+               tools=("bedtools",))
+            # rescued: whitelisted records outside the keep regions
+            n = _count_bed_lines(f"bedtools intersect -v -a {q(b)} -b {q(a)}")
+    finally:
+        for f in (a, b):
+            if os.path.exists(f):
+                os.unlink(f)
+    return eff, n
+
+
+def _count_bed_lines(cmd: str) -> int:
+    p = subprocess.run(f"{cmd} | wc -l", shell=True, executable="/bin/bash",
+                       stdout=subprocess.PIPE, text=True)
+    return int(p.stdout.strip() or 0)
+
+
+def region_filter(inp: str, out: str, *, bed: str, exclude: bool,
+                  keep_bed: str | None = None, label: str = "region_filter") -> int:
     """Keep (``exclude=False``) or drop (``exclude=True``) variants overlapping ``bed``.
 
-    Backs the core-genome (keep), tandem-repeat and paralog (drop) masks. bedtools
-    emits VCF text which is piped back through bcftools so any output format works.
+    Backs the core-genome (keep), tandem-repeat and paralog (drop) masks. bedtools emits VCF
+    text which is piped back through bcftools so any output format works.
+
+    ``keep_bed`` is a whitelist of regions to keep whatever this filter says -- a handful of
+    positions inside a tandem repeat that are known to be real, say. A variant overlapping the
+    whitelist survives *this* region rule and nothing else: it still faces every other filter
+    in the chain.
+
+    Returns the number of variants the whitelist rescued, and says so, since a whitelist that
+    matches nothing (wrong contig name, or 1-based positions written into a 0-based BED) is
+    otherwise indistinguishable from one that worked.
     """
     fmt = out_flag(out)
     v = "-v " if exclude else ""
-    sh(f"bcftools view {q(inp)} "
-       f"| bedtools intersect {v}-header -a stdin -b {q(bed)} "
-       f"| bcftools view -O{fmt} -o {q(out)}", tools=("bcftools", "bedtools"))
+    eff_bed, rescued = bed, 0
+    try:
+        if keep_bed:
+            eff_bed, rescued = _effective_region_bed(inp, bed, keep_bed, exclude)
+            if rescued:
+                print(f"     {label}: {rescued:,} variant(s) kept by the whitelist that the "
+                      f"region rule would have dropped")
+            else:
+                print(f"     {label}: WARNING the whitelist {keep_bed} rescued nothing -- "
+                      f"no variant it covers would have been dropped here. Check the contig "
+                      f"names, and that its positions are 0-based half-open like any BED.")
+        sh(f"bcftools view {q(inp)} "
+           f"| bedtools intersect {v}-header -a stdin -b {q(eff_bed)} "
+           f"| bcftools view -O{fmt} -o {q(out)}", tools=("bcftools", "bedtools"))
+    finally:
+        if keep_bed and os.path.exists(eff_bed):
+            os.unlink(eff_bed)
+    return rescued
 
 
-def tandem_repeat_mask(inp: str, out: str, *, bed: str) -> None:
+def tandem_repeat_mask(inp: str, out: str, *, bed: str, keep_bed: str | None = None) -> int:
     """Remove variants overlapping a tandem-repeat BED (artifact-prone regions)."""
-    region_filter(inp, out, bed=bed, exclude=True)
+    return region_filter(inp, out, bed=bed, exclude=True, keep_bed=keep_bed,
+                         label="tandem_repeat_mask")
 
 
-def paralog_mask(inp: str, out: str, *, bed: str) -> None:
+def paralog_mask(inp: str, out: str, *, bed: str, keep_bed: str | None = None) -> int:
     """Remove variants overlapping paralogous / multigene-family genes (mismapping-prone)."""
-    region_filter(inp, out, bed=bed, exclude=True)
+    return region_filter(inp, out, bed=bed, exclude=True, keep_bed=keep_bed,
+                         label="paralog_mask")
 
 
-def core_region_filter(inp: str, out: str, *, bed: str) -> None:
+def core_region_filter(inp: str, out: str, *, bed: str, keep_bed: str | None = None) -> int:
     """Keep only variants inside the core-genome BED (drop subtelomeric/hypervariable)."""
-    region_filter(inp, out, bed=bed, exclude=False)
+    return region_filter(inp, out, bed=bed, exclude=False, keep_bed=keep_bed,
+                         label="core_region_filter")
 
 
 def sample_coverage_filter(inp: str, out: str, *, ads_min: int = 10,
-                           frac_min: float = 0.85,
-                           dropped_samples_path: str | None = None) -> list[str]:
+                           frac_min: float = 0.80,
+                           dropped_samples_path: str | None = None,
+                           cov_table_path: str | None = None) -> list[str]:
     """Drop samples covered (ADS >= ads_min) at < frac_min of loci; refresh AC/AN/AF.
+
+    ``cov_table_path`` writes the per-sample coverage table this decision is made from --
+    see :func:`sample_coverage_table`. Worth keeping: a dropped sample is otherwise just a
+    name in a log, with no way to tell a genuinely thin sample from one that missed the
+    threshold by a hair.
 
     Returns the list of dropped sample names.
     """
     require("bcftools")
-    total = _count(inp)
-    counts = _per_sample_covered(inp, ads_min)
-    all_samples = _samples(inp)
-    dropped = sorted(s for s in all_samples if (counts.get(s, 0) / total if total else 0) < frac_min)
+    rows = sample_coverage_table(inp, ads_min=ads_min, frac_min=frac_min)
+    dropped = sorted(r["sample"] for r in rows if r["dropped"])
+
+    if cov_table_path:
+        write_sample_coverage_table(rows, cov_table_path)
+
+    # the borderline cases, said out loud -- an unexpected drop is usually one of these
+    for r in rows:
+        if r["dropped"] or abs(r["margin"]) <= 0.05:
+            print(f"       {r['sample']}\t{r['n_covered']:,}/{r['n_loci']:,} loci"
+                  f"\t{r['frac_covered']:.3f}\tmean ADS {r['mean_ads']:g}"
+                  f"\t{'DROPPED' if r['dropped'] else 'kept'}"
+                  f" ({r['margin']:+.3f} vs {frac_min:g})")
 
     if dropped_samples_path:
         with open(dropped_samples_path, "w") as fh:
@@ -274,20 +381,95 @@ def _samples(path: str) -> list[str]:
     return [s for s in p.stdout.splitlines() if s]
 
 
-def _per_sample_covered(path: str, ads_min: int) -> dict[str, int]:
-    """Per-sample count of loci with FMT/ADS >= ads_min."""
-    cmd = (f"bcftools query -f '[%SAMPLE\\t%ADS\\n]' -i 'FMT/ADS>={ads_min}' {q(path)} "
-           "| cut -f1 | sort | uniq -c")
+def _has_format_tag(path: str, tag: str) -> bool:
+    p = subprocess.run(f"bcftools view -h {q(path)}", shell=True, executable="/bin/bash",
+                       stdout=subprocess.PIPE, text=True)
+    return f"##FORMAT=<ID={tag}," in p.stdout
+
+
+def _per_sample_coverage(path: str, ads_min: int) -> dict[str, dict[str, int]]:
+    """Per-sample ADS summary in one pass: loci seen, loci covered, missing, total depth.
+
+    ADS is a scalar (``int(smpl_sum(FORMAT/AD))``), so testing ``>= ads_min`` here selects
+    exactly what ``bcftools view -i 'FMT/ADS>=n'`` selects. That matters: the coverage table
+    and the keep/drop decision are both read off this one result, so the table always accounts
+    for the decision rather than being a second measurement that could disagree with it.
+
+    Aggregated in awk, since a cohort-sized callset is millions of sample-by-site lines.
+    """
+    prog = (
+        'BEGIN{FS="\\t"} '
+        '{n[$1]++; if($2=="."||$2==""){miss[$1]++} '
+        'else{s[$1]+=$2; if($2+0>=MIN){cov[$1]++}}} '
+        'END{for(k in n) printf "%s\\t%d\\t%d\\t%d\\t%d\\n", k, n[k], cov[k]+0, miss[k]+0,'
+        ' s[k]+0}'
+    )
+    cmd = (f"bcftools query -f '[%SAMPLE\\t%ADS\\n]' {q(path)} "
+           f"| awk -v MIN={int(ads_min)} {q(prog)}")
     p = subprocess.run(cmd, shell=True, executable="/bin/bash",
                        stdout=subprocess.PIPE, text=True)
-    counts: dict[str, int] = {}
+    out: dict[str, dict[str, int]] = {}
     for line in p.stdout.splitlines():
-        line = line.strip()
-        if not line:
+        if not line.strip():
             continue
-        n, name = line.split(None, 1)
-        counts[name] = int(n)
-    return counts
+        # sample names can contain tabs in no sane file, but split from the right anyway
+        name, n_seen, n_cov, n_miss, ads_sum = line.rsplit("\t", 4)
+        out[name] = {"n_loci": int(n_seen), "n_covered": int(n_cov),
+                     "n_missing_ads": int(n_miss), "ads_sum": int(ads_sum)}
+    return out
+
+
+def sample_coverage_table(path: str, *, ads_min: int = 10,
+                          frac_min: float = 0.80) -> list[dict]:
+    """Per-sample coverage, and whether :func:`sample_coverage_filter` drops each sample.
+
+    One row per sample, worst-covered first, so a surprising drop is the first thing read.
+    ``margin`` is ``frac_covered - frac_min``: negative means dropped, and a value near zero
+    means the sample sat on the threshold rather than being obviously bad. ``mean_ads`` and
+    ``n_missing_ads`` say *why* -- thin coverage everywhere reads differently from a sample
+    that is simply absent at many sites.
+    """
+    # Without FORMAT/ADS every sample scores zero covered loci and the filter quietly drops
+    # the entire cohort. bcftools does say so on stderr, but the counts come back empty rather
+    # than failing, so refuse instead -- silently emptying a callset is the worst outcome here.
+    if not _has_format_tag(path, "ADS"):
+        raise SystemExit(
+            f"ERROR: {path} has no FORMAT/ADS, which is what sample coverage is measured on. "
+            "Run singleton_filter_add_ads first (it adds ADS as int(smpl_sum(FORMAT/AD))), or "
+            "add the tag with: bcftools +fill-tags -- -t "
+            "'FORMAT/ADS=int(smpl_sum(FORMAT/AD))'.")
+    stats = _per_sample_coverage(path, ads_min)
+    total = _count(path)
+    rows = []
+    for name in _samples(path):
+        st = stats.get(name, {"n_loci": 0, "n_covered": 0, "n_missing_ads": 0, "ads_sum": 0})
+        n_loci = st["n_loci"] or total
+        frac = (st["n_covered"] / n_loci) if n_loci else 0.0
+        with_ads = n_loci - st["n_missing_ads"]
+        rows.append({
+            "sample": name,
+            "n_loci": n_loci,
+            "n_covered": st["n_covered"],
+            "frac_covered": round(frac, 6),
+            "n_missing_ads": st["n_missing_ads"],
+            "mean_ads": round(st["ads_sum"] / with_ads, 2) if with_ads else 0.0,
+            "ads_min": ads_min,
+            "frac_min": frac_min,
+            "margin": round(frac - frac_min, 6),
+            "dropped": frac < frac_min,
+        })
+    return sorted(rows, key=lambda r: r["frac_covered"])
+
+
+COVERAGE_TABLE_COLUMNS = ["sample", "n_loci", "n_covered", "frac_covered", "n_missing_ads",
+                          "mean_ads", "ads_min", "frac_min", "margin", "dropped"]
+
+
+def write_sample_coverage_table(rows: list[dict], path: str) -> None:
+    with open(path, "w") as fh:
+        fh.write("\t".join(COVERAGE_TABLE_COLUMNS) + "\n")
+        for r in rows:
+            fh.write("\t".join(str(r[c]) for c in COVERAGE_TABLE_COLUMNS) + "\n")
 
 
 def _write_tmp_list(names: list[str]) -> str:
