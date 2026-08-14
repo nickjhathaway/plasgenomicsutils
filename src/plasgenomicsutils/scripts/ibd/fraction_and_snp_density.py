@@ -65,11 +65,14 @@ def fraction_and_snp_density():
     pair_df = F.per_pair_fraction(args.blocks, args.sep, bp_per_cm, callable_cm,
                                   min_block_snp=args.min_block_snp,
                                   min_block_kb=args.min_block_kb)
-    pair_df["f_full_genome"] = pair_df["total_ibd_cm"] / full_cm
+    pair_df["ibd_fraction_full_genome"] = pair_df["total_ibd_cm"] / full_cm
+    # sample1/sample2 first: the table is an edge list before it is anything else
+    lead = ["pair", "sample1", "sample2"]
+    pair_df = pair_df[lead + [c for c in pair_df.columns if c not in lead]]
     n_with = int((pair_df["total_ibd_bp"] > 0).sum())
     print(f"  {len(pair_df):,} total pairs;  {n_with:,} with IBD;  "
           f"{len(pair_df) - n_with:,} zero-IBD")
-    print(pair_df["f"].describe().to_string())
+    print(pair_df["ibd_fraction_accessible"].describe().to_string())
     out_pairs = f"{args.output}.pair_ibd_fraction.tsv.gz"
     Utils.write_tsv_gz(pair_df, out_pairs)
     print(f"  -> {out_pairs}")

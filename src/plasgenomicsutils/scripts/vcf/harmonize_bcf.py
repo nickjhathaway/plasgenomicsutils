@@ -68,14 +68,35 @@ def harmonize_bcf():
         print(f"  stripping allele-dependent FORMAT field(s) invalidated by harmonizing: "
               f"{', '.join(stale_fmt)}", file=sys.stderr)
 
-    print("=== Pass 1: cleaning + building ALT union ===", file=sys.stderr)
+    print("=== harmonize_bcf ===", file=sys.stderr)
+    print("  Input files:", file=sys.stderr)
+    for fpath, out_path in zip(args.files, out_paths):
+        print(f"    {fpath}  ->  {out_path}", file=sys.stderr)
+    print(f"  min_ad={args.min_ad} (non-inclusive)  min_af={args.min_af} (non-inclusive)  "
+          f"het_min_af={args.het_min_af}", file=sys.stderr)
+
+    print("\n=== Step 1: cleaning spurious low-level ALTs, building the ALT union ===",
+          file=sys.stderr)
     if drop_indels:
         print("  dropping indel-context records from all inputs (--keep-indels to disable)",
               file=sys.stderr)
-    union, dup_positions, ambiguous = H.accumulate_union(
+    union, dup_positions, ambiguous, p1 = H.accumulate_union(
         args.files, args.min_ad, args.min_af, args.het_min_af, drop_indels=drop_indels)
-    n_with_alts = sum(1 for v in union.values() if len(v) > 1)
-    print(f"  union sites with >= 1 ALT: {n_with_alts:,}", file=sys.stderr)
+    for fpath in args.files:
+        st = p1["per_file"][fpath]
+        print(f"\n  [{os.path.basename(fpath)}]", file=sys.stderr)
+        print(f"    Records read:                     {st['processed']:,}", file=sys.stderr)
+        if drop_indels and st["indel_context"]:
+            print(f"    Indel-context records dropped:    {st['indel_context']:,}",
+                  file=sys.stderr)
+        print(f"    Sites kept:                       {st['sites']:,}", file=sys.stderr)
+        print(f"    ALT alleles zeroed and removed:   {st['alts_removed']:,}", file=sys.stderr)
+        print(f"    Records reduced to ref-only:      {st['reduced_to_ref_only']:,} "
+              f"(kept for the union)", file=sys.stderr)
+
+    print(f"\n  Total union sites:                  {p1['union_sites']:,}", file=sys.stderr)
+    print(f"  Sites with at least one ALT:        {p1['union_with_alts']:,}", file=sys.stderr)
+    print(f"  Sites dropped (ref-only everywhere):{p1['union_dropped']:,}", file=sys.stderr)
     if dup_positions:
         print(f"  NOTE: {len(dup_positions)} duplicate (chrom,pos) record(s) collapsed; kept the "
               f"record with the most real ALT alleles (drops overlapping no-ALT/indel records).",
@@ -91,22 +112,44 @@ def harmonize_bcf():
 
     strip_arg = ("-x " + q("FORMAT/" + ",FORMAT/".join(stale_fmt))) if stale_fmt else ""
 
-    print("=== Pass 2: harmonizing each file to the union ===", file=sys.stderr)
+    print("\n=== Step 2: harmonizing each file to the union ===", file=sys.stderr)
+    absent = {}
     for fpath, out_path in zip(args.files, out_paths):
-        print(f"  {fpath} -> {out_path}", file=sys.stderr)
+        print(f"\n  [{os.path.basename(fpath)}] -> [{os.path.basename(out_path)}]",
+              file=sys.stderr)
         if not need_bcftools:
-            H.harmonize_file(fpath, out_path, union, args.min_ad, args.min_af,
-                             args.het_min_af, drop_indels=drop_indels)
+            st = H.harmonize_file(fpath, out_path, union, args.min_ad, args.min_af,
+                                  args.het_min_af, drop_indels=drop_indels)
         else:
             tmp_vcf = out_path + ".tmp.vcf"
-            H.harmonize_file(fpath, tmp_vcf, union, args.min_ad, args.min_af,
-                             args.het_min_af, drop_indels=drop_indels)
+            st = H.harmonize_file(fpath, tmp_vcf, union, args.min_ad, args.min_af,
+                                  args.het_min_af, drop_indels=drop_indels)
             # annotate strips stale FORMAT and writes the requested output format
             sh(f"bcftools annotate {strip_arg} -O{args.output_format} -o {q(out_path)} {q(tmp_vcf)}",
                tools=("bcftools",))
             os.remove(tmp_vcf)
+        absent[fpath] = st["absent"]
+        print(f"    Records written:                  {st['written']:,}", file=sys.stderr)
+        print(f"    Records harmonized (ALTs added):  {st['alts_added']:,}", file=sys.stderr)
+        print(f"    Records dropped (ref-only):       {st['dropped_ref_only']:,}",
+              file=sys.stderr)
+        print(f"    Union sites absent from the file: {st['absent']:,}", file=sys.stderr)
 
-    print("=== Done ===", file=sys.stderr)
+    # The number above is the one that bites later, so spell out what it means rather than
+    # leaving it as a statistic: harmonizing settles the ALT sets, not which sites each file
+    # holds, so bcftools merge fills the gaps with missing genotypes AND missing FORMAT/AD.
+    # hmmibd-rs reads AD as an integer and stops at the first missing one
+    # ("NumericaValueEmptyInt"), so this is worth acting on before the merge, not after.
+    if any(absent.values()):
+        worst = max(absent.values())
+        print(f"\n  NOTE: up to {worst:,} union site(s) are absent from an input, so those "
+              f"samples get\n        missing GT *and* missing FORMAT/AD after `bcftools merge`. "
+              f"Tools that read AD as\n        an integer (hmmibd-rs) fail on that. To keep only "
+              f"sites every cohort called:\n"
+              f"          bcftools view -e 'FMT/AD=\".\"' merged.bcf -Ob -o merged.nomiss.bcf",
+              file=sys.stderr)
+
+    print("\n=== Done ===", file=sys.stderr)
 
 
 if __name__ == "__main__":

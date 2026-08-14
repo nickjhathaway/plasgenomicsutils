@@ -27,6 +27,10 @@ plasgenomicsutils ibd_selection_statistic --matrix ibd_matrix \
 # per-pair IBD fraction (callable-length denominator) and SNP density
 plasgenomicsutils ibd_fraction_and_snp_density --blocks blocks.tsv.gz --snps panel.vcf.gz \
   --snp-format vcf --reference pf3d7 --output ibd_fraction
+# -> ibd_fraction.pair_ibd_fraction.tsv.gz, an edge list: one row per compared pair with
+#    pair, sample1, sample2, total/max IBD in bp and cM, ibd_fraction_accessible,
+#    ibd_fraction_full_genome and gen_to_mrca_approx. The two fractions differ only in the
+#    denominator (the callable map, or the whole genome). Feeds R's plot_ibd_pair_network().
 
 # per-gene IBD-block overlap between groups (for the R gene triangles): the fraction of
 # pairs whose IBD block overlaps each gene, NOT pairs that are IBD at a SNP inside it

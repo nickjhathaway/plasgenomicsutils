@@ -19,6 +19,11 @@ def get_parser_core_region_filter() -> argparse.ArgumentParser:
     p.add_argument("--output", required=True)
     p.add_argument("--bed", default="builtin:pf3d7_core_regions",
                    help="Core-genome BED, or builtin:pf3d7_core_regions (default).")
+    p.add_argument("--keep-bed", default=None,
+                   help="Whitelist BED of regions to keep whatever this filter says "
+                        "(0-based half-open, like any BED). Whitelisted variants still "
+                        "face every other filter -- this only exempts them from this "
+                        "region rule.")
     return p
 
 
@@ -28,7 +33,8 @@ def parse_args_core_region_filter():
 
 def core_region_filter():
     args = parse_args_core_region_filter()
-    F.core_region_filter(args.input, args.output, bed=resolve_bed(args.bed))
+    F.core_region_filter(args.input, args.output, bed=resolve_bed(args.bed),
+                 keep_bed=resolve_bed(args.keep_bed) if args.keep_bed else None)
     report_counts(args.input, args.output, "core_region_filter")
 
 

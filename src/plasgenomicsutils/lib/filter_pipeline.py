@@ -34,10 +34,45 @@ from .strip_format import strip_stale_format
 
 
 def _region(func):
-    """Wrap a region filter so a ``builtin:`` bed value resolves to a shipped asset."""
-    def run(inp, out, *, bed, **kw):
-        return func(inp, out, bed=resolve_bed(bed), **kw)
+    """Wrap a region filter so a ``builtin:`` bed value resolves to a shipped asset.
+
+    ``keep_bed`` (the whitelist) resolves the same way, though in practice it is a path to
+    something dataset-specific rather than a shipped asset.
+    """
+    def run(inp, out, *, bed, keep_bed=None, **kw):
+        return func(inp, out, bed=resolve_bed(bed),
+                    keep_bed=resolve_bed(keep_bed) if keep_bed else None, **kw)
     return run
+
+
+def _sidecar(out: str, name: str) -> str:
+    """``09_sample_coverage_filter.bcf`` -> ``09_sample_coverage_filter_<name>``.
+
+    A step's extra outputs sit next to its callset with the same numbered prefix, so the run
+    directory reads in order and it is obvious which step produced what.
+    """
+    p = Path(out)
+    stem = p.name
+    for ext in (".vcf.gz", ".bcf.gz", ".vcf", ".bcf"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    return str(p.with_name(f"{stem}_{name}"))
+
+
+def _sample_coverage(inp, out, **kw):
+    """Drop low-coverage samples, leaving the coverage table that explains each drop.
+
+    The table is written by default rather than on request: a sample vanishing from a cohort
+    is exactly the kind of thing noticed weeks later, when re-running the step to find out why
+    is expensive.
+    """
+    kw.setdefault("cov_table_path", _sidecar(out, "cov_info.tsv"))
+    dropped = F.sample_coverage_filter(inp, out, **kw)
+    print(f"     dropped {len(dropped)} low-coverage sample(s)"
+          + (f": {', '.join(dropped)}" if dropped else "")
+          + f"\n     coverage table -> {kw['cov_table_path']}")
+    return dropped
 
 
 # name -> callable(input_path, output_path, **params)
@@ -50,7 +85,7 @@ STEPS = {
     "filter_ad_regenotype": lambda inp, out, **kw: filter_ad_regenotype(inp, out, **kw),
     "strip_stale_format": lambda inp, out, **kw: strip_stale_format(inp, out, **kw),
     "biallelic_snp_filter": F.biallelic_snp_filter,
-    "sample_coverage_filter": F.sample_coverage_filter,
+    "sample_coverage_filter": lambda inp, out, **kw: _sample_coverage(inp, out, **kw),
     "locus_missingness_filter": F.locus_missingness_filter,
     "maf_filter": F.maf_filter,
 }
@@ -95,7 +130,13 @@ DEFAULT_CONFIG = {
         {"name": "singleton_filter_add_ads"},
         {"name": "tandem_repeat_mask", "params": {"bed": "builtin:pf3d7_tandem_repeats"}},
         {"name": "core_region_filter", "params": {"bed": "builtin:pf3d7_core_regions"}},
-        {"name": "paralog_mask", "params": {"bed": "builtin:pf3d7_paralog_genes"}},
+        # Off by default. core_region_filter has already dropped the subtelomeric multigene
+        # families that mismap worst; most of what this removes next sits in the core and is
+        # single-copy, so some of it genuinely misbehaves but a lot of it is fine. Losing all
+        # of it costs real signal, and paralogy is not by itself evidence a locus is unusable.
+        # Set "enabled": true when mismapping is the thing being controlled for.
+        {"name": "paralog_mask", "enabled": False,
+         "params": {"bed": "builtin:pf3d7_paralog_genes"}},
         {"name": "filter_ad_regenotype"},
         {"name": "biallelic_snp_filter"},
         {"name": "sample_coverage_filter"},
@@ -129,6 +170,14 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
         ext = step.get("ext", "bcf")
         params = step.get("params", {})
         out_path = str(out / f"{i:02d}_{name}.{ext}")
+
+        # `"enabled": false` keeps a step in the config, and out of the run. That is how an
+        # optional step stays discoverable -- JSON has no comments, so a step you would
+        # otherwise have to know about is written down with the switch off.
+        if step.get("enabled", True) is False:
+            print(f"[{i:02d}] {name} -- skipped (\"enabled\": false)")
+            tally.append({"step": name, "skipped": True})
+            continue
 
         if step.get("report"):
             if name not in REPORTS:
