@@ -33,12 +33,20 @@ def callable_spans(pos_df: pd.DataFrame, ref: Reference) -> pd.DataFrame:
 def per_pair_fraction(blocks_path, sep, bp_per_cm, callable_cm,
                       min_block_snp=IBD_MIN_BLOCK_SNP,
                       min_block_kb=IBD_MIN_BLOCK_KB) -> pd.DataFrame:
-    """Per-pair total/max IBD and callable-denominator f. Every pair emitted."""
+    """Per-pair total/max IBD and the callable-denominator fraction. Every pair emitted.
+
+    ``sample1``/``sample2`` are carried alongside the joined ``pair`` key: splitting the key
+    back apart downstream is guesswork as soon as a sample name contains the separator, and
+    anything drawing a network needs the two endpoints as columns anyway.
+    """
     df = read_blocks(blocks_path, sep=sep)          # blocks come back half-open
     s1, s2 = df["sample1"].astype(str), df["sample2"].astype(str)
-    df["pair"] = np.where(s1 < s2, s1 + "__" + s2, s2 + "__" + s1)
+    # order the pair so a pair has one key whichever way round the blocks list it
+    lo, hi = np.where(s1 < s2, s1, s2), np.where(s1 < s2, s2, s1)
+    df["sample1"], df["sample2"] = lo, hi
+    df["pair"] = lo + "__" + hi
 
-    all_pairs = df[["pair"]].drop_duplicates()
+    all_pairs = df[["pair", "sample1", "sample2"]].drop_duplicates()
 
     ibd = df[df["different"] == 0] if "different" in df.columns else df
     # every compared pair is already in `all_pairs`, so filtering here removes spurious
@@ -53,11 +61,13 @@ def per_pair_fraction(blocks_path, sep, bp_per_cm, callable_cm,
                     .fillna({"total_ibd_bp": 0, "max_ibd_bp": 0}))
     out["total_ibd_cm"] = out["total_ibd_bp"] / bp_per_cm
     out["max_ibd_cm"] = out["max_ibd_bp"] / bp_per_cm
-    out["f"] = out["total_ibd_cm"] / callable_cm
-    f_clip = out["f"].clip(lower=1e-6, upper=1.0)
+    # named for its denominator: the callable (accessible) map length, not the whole genome
+    out["ibd_fraction_accessible"] = out["total_ibd_cm"] / callable_cm
+    f_clip = out["ibd_fraction_accessible"].clip(lower=1e-6, upper=1.0)
     out["gen_to_mrca_approx"] = np.where(
         out["total_ibd_bp"] > 0, np.log2(1.0 / f_clip).clip(lower=0.0), np.nan)
-    return out.sort_values("f", ascending=False).reset_index(drop=True)
+    return (out.sort_values("ibd_fraction_accessible", ascending=False)
+               .reset_index(drop=True))
 
 
 def snp_density(pos_df, ref: Reference, bp_per_cm, callable_cm, full_cm, min_snp):
