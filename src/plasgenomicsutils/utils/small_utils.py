@@ -58,6 +58,62 @@ class Utils:
         return pd.read_csv(path, sep=sep)
 
     @staticmethod
+    def resolve_column(columns, want: str, *, source: str = "table",
+                       required: bool = True):
+        """The column in ``columns`` that means ``want``, matching case-insensitively.
+
+        Metadata comes from whoever assembled it, and ``Sample`` / ``sample`` /
+        ``SAMPLE`` are the same column to everyone except a string comparison. An exact
+        match always wins; otherwise a single case-insensitive match is used. Two columns
+        differing only in case is an error rather than a coin toss, since which one holds
+        the ids is not ours to guess.
+        """
+        cols = list(columns)
+        if want in cols:
+            return want
+        hits = [c for c in cols if str(c).lower() == want.lower()]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            raise SystemExit(
+                f"ERROR: {source} has {len(hits)} columns differing only in case for "
+                f"'{want}': {', '.join(map(str, hits))}. Rename all but one."
+            )
+        if not required:
+            return None
+        raise SystemExit(
+            f"ERROR: column '{want}' not in {source} "
+            f"(has: {', '.join(map(str, cols))})"
+        )
+
+    @staticmethod
+    def normalise_columns(df, wants=("sample",), *, source: str = "metadata",
+                          quiet: bool = False):
+        """Rename whichever case-variant of each name in ``wants`` the table uses.
+
+        Applied when a metadata table is read, so everything downstream can name the
+        column one way. The rename is announced -- a table read differently from how it
+        is written is worth one line of output.
+        """
+        renames = {}
+        for want in wants:
+            found = Utils.resolve_column(df.columns, want, source=source, required=False)
+            if found is not None and found != want:
+                renames[found] = want
+        if renames:
+            if not quiet:
+                for old, new in renames.items():
+                    print(f"  note: {source} column '{old}' read as '{new}'")
+            df = df.rename(columns=renames)
+        return df
+
+    @staticmethod
+    def read_meta(path: str, sep=None, wants=("sample",), quiet: bool = False):
+        """Read a metadata table and normalise the case of its key columns."""
+        return Utils.normalise_columns(Utils.read_table(path, sep), wants,
+                                       source=f"metadata ({path})", quiet=quiet)
+
+    @staticmethod
     def output_file_check(path: str, overwrite: bool) -> None:
         """Raise unless ``path`` is writable (missing, or overwrite allowed)."""
         if path in ("STDOUT", "-"):

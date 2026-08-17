@@ -197,7 +197,8 @@ def selection_statistic():
         return
 
     print(f"\n--- Per-group selection statistic (group_col='{args.group_col}') ---")
-    meta = Utils.read_table(args.meta)   # auto-detect tab / comma
+    # auto-detect tab / comma, and accept Sample / SAMPLE for sample
+    meta = Utils.read_meta(args.meta, wants=("sample", args.group_col))
     groups = sorted(meta[args.group_col].dropna().unique())
     print(f"Found {len(groups)} groups: {', '.join(groups)}")
 

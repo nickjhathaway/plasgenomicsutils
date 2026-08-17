@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 from collections import defaultdict
 
+from ..utils.small_utils import Utils
 from .bcftools import (count_variants, format_tags, index_vcf, out_flag, q, require,
                        sh)
 from .strip_format import GENOTYPE_LINKED_FORMAT, strip_stale_format
@@ -419,12 +420,15 @@ def _maf_filter_grouped(inp: str, out: str, *, meta: str, group_col: str,
     groups: dict[str, list[str]] = defaultdict(list)
     with open(meta) as fh:
         reader = csv.DictReader(fh, delimiter="\t")
-        for col in (sample_col, group_col):
-            if col not in (reader.fieldnames or []):
-                raise SystemExit(f"ERROR: column '{col}' not in {meta} "
-                                 f"(has: {', '.join(reader.fieldnames or [])})")
+        fields = reader.fieldnames or []
+        # `Sample` and `sample` are the same column to everyone but a string comparison
+        s_col = Utils.resolve_column(fields, sample_col, source=f"metadata ({meta})")
+        g_col = Utils.resolve_column(fields, group_col, source=f"metadata ({meta})")
+        for got, want in ((s_col, sample_col), (g_col, group_col)):
+            if got != want:
+                print(f"  note: metadata column '{got}' read as '{want}'")
         for row in reader:
-            s, g = row[sample_col], row[group_col]
+            s, g = row[s_col], row[g_col]
             if s in present and g:
                 groups[g].append(s)
     if not groups:

@@ -64,7 +64,8 @@ def analyze_matrix():
         return
 
     print(f"\n--- Group-level IBD (group_col='{args.group_col}') ---")
-    meta = Utils.read_table(args.meta)   # auto-detect tab / comma
+    # auto-detect tab / comma, and accept Sample / SAMPLE for sample
+    meta = Utils.read_meta(args.meta, wants=("sample", args.group_col))
     annotated = A.annotate_pairs_with_groups(pair_sum, meta, args.group_col)
     _save(annotated, f"{args.output}.per_pair_annotated.tsv.gz")
 

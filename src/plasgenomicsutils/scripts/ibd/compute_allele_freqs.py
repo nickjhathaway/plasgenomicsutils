@@ -64,11 +64,11 @@ def compute_allele_freqs():
     sample_to_group = None
     if args.meta:
         sep = Utils.resolve_delim(args.meta_file_separator)
-        meta = pd.read_csv(args.meta, sep=sep)
+        meta = Utils.normalise_columns(pd.read_csv(args.meta, sep=sep),
+                                       ("sample", args.group_col),
+                                       source=f"metadata ({args.meta})")
         for col in ("sample", args.group_col):
-            if col not in meta.columns:
-                raise SystemExit(f"ERROR: column '{col}' not in {args.meta} "
-                                 f"(has: {', '.join(map(str, meta.columns))})")
+            Utils.resolve_column(meta.columns, col, source=f"metadata ({args.meta})")
         sample_to_group = (
             meta.dropna(subset=[args.group_col])
                 .set_index("sample")[args.group_col]

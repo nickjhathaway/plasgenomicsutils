@@ -70,7 +70,7 @@ def ld_decay():
 
     samples = groups = None
     if args.meta:
-        meta = Utils.read_table(args.meta)
+        meta = Utils.read_meta(args.meta, wants=("sample", args.group_col))
         if args.group_col not in meta.columns:
             raise SystemExit(f"--meta has no '{args.group_col}' column")
         meta = meta.dropna(subset=["sample", args.group_col])
