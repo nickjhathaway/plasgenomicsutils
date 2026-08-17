@@ -19,6 +19,11 @@ def get_parser_singleton_filter_add_ads() -> argparse.ArgumentParser:
     p.add_argument("--min-samples", type=int, default=1,
                    help="Keep variants with more than this many non-ref, non-missing "
                         "genotype calls (default: 1, i.e. drop singletons)")
+    p.add_argument("--keep-bed", default=None,
+                   help="Whitelist BED of regions to keep whatever this filter says "
+                        "(0-based half-open, like any BED). Whitelisted variants still "
+                        "face every other filter -- this only exempts them from this "
+                        "one.")
     return p
 
 
@@ -28,7 +33,8 @@ def parse_args_singleton_filter_add_ads():
 
 def singleton_filter_add_ads():
     args = parse_args_singleton_filter_add_ads()
-    F.singleton_add_ads(args.input, args.output, min_samples=args.min_samples)
+    F.singleton_add_ads(args.input, args.output, min_samples=args.min_samples,
+                 keep_bed=args.keep_bed)
     report_counts(args.input, args.output, "singleton_filter_add_ads")
 
 

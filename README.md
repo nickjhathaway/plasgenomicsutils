@@ -5,7 +5,7 @@
 [![tests](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml/badge.svg)](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml)
 <!-- badges: end -->
 
-> **Version 0.2.2** — early development; APIs, defaults, and outputs may change
+> **Version 0.2.3** — early development; APIs, defaults, and outputs may change
 > between versions.
 
 A collection of utilities for **post processing Plasmodium genomics data** —

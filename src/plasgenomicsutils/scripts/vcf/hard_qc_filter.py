@@ -23,6 +23,11 @@ def get_parser_hard_qc_filter() -> argparse.ArgumentParser:
     p.add_argument("--readposranksum", type=float, default=-5.0,
                    help="Drop ReadPosRankSum < this (default: -5)")
     p.add_argument("--fs", type=float, default=None, help="Optional: drop FS > this")
+    p.add_argument("--keep-bed", default=None,
+                   help="Whitelist BED of regions to keep whatever this filter says "
+                        "(0-based half-open, like any BED). Whitelisted variants still "
+                        "face every other filter -- this only exempts them from this "
+                        "one.")
     return p
 
 
@@ -33,7 +38,8 @@ def parse_args_hard_qc_filter():
 def hard_qc_filter():
     args = parse_args_hard_qc_filter()
     F.hard_qc_filter(args.input, args.output, qd=args.qd, mq=args.mq, sor=args.sor,
-                     mqranksum=args.mqranksum, readposranksum=args.readposranksum, fs=args.fs)
+                     mqranksum=args.mqranksum, readposranksum=args.readposranksum, fs=args.fs,
+                 keep_bed=args.keep_bed)
     report_counts(args.input, args.output, "hard_qc_filter")
 
 

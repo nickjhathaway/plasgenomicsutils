@@ -27,6 +27,11 @@ def get_parser_maf_filter() -> argparse.ArgumentParser:
                    help="Metadata column with the group label (e.g. country); enables grouped MAF.")
     p.add_argument("--sample-col", default="sample",
                    help="Metadata column with the sample id (default: sample).")
+    p.add_argument("--keep-bed", default=None,
+                   help="Whitelist BED of regions to keep whatever this filter says "
+                        "(0-based half-open, like any BED). Whitelisted variants still "
+                        "face every other filter -- this only exempts them from this "
+                        "one.")
     return p
 
 
@@ -37,7 +42,8 @@ def parse_args_maf_filter():
 def maf_filter():
     args = parse_args_maf_filter()
     F.maf_filter(args.input, args.output, maf_min=args.maf_min, maf_max=args.maf_max,
-                 meta=args.meta, group_col=args.group_col, sample_col=args.sample_col)
+                 meta=args.meta, group_col=args.group_col, sample_col=args.sample_col,
+                 keep_bed=args.keep_bed)
     report_counts(args.input, args.output, "maf_filter")
 
 
