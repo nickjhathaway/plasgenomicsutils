@@ -147,9 +147,10 @@ def compute_allele_freqs(
     Returns
     -------
     (global_df, group_df). Columns: ``snp_id`` (and ``group`` on the group table),
-    ``af``, ``maf``, ``ac``, ``an``, ``af_weighted``, ``n_samples_ad``, ``prevalence``,
-    ``n_samples_alt``, ``n_samples``, ``prevalence_ad``, ``n_samples_alt_ad``; plus
-    ``alt``/``alt_index`` when ``per_alt``.
+    ``n_alts`` (how many ALT alleles the record declares -- the one column that says a
+    collapsed row is hiding a multiallelic site), ``af``, ``maf``, ``ac``, ``an``,
+    ``af_weighted``, ``n_samples_ad``, ``prevalence``, ``n_samples_alt``, ``n_samples``,
+    ``prevalence_ad``, ``n_samples_alt_ad``; plus ``alt``/``alt_index`` when ``per_alt``.
     ``ac``/``an`` are allele counts, ``n_samples_*`` are sample counts -- at ploidy 2
     they differ by a factor of two, which is why both are reported.
     group_df is empty if no mapping is given.
@@ -200,9 +201,14 @@ def compute_allele_freqs(
         else:
             targets = [(None, None)]
 
+        n_alts = len(v.ALT)
         for k, alt in targets:
             hit = alleles == k if k is not None else alleles > 0
-            extra = {} if k is None else {"alt": alt, "alt_index": k}
+            # n_alts is the site's, so it is on every row: without --per-alt it is the only
+            # thing saying a collapsed row is hiding more than one ALT
+            extra = {"n_alts": n_alts}
+            if k is not None:
+                extra.update(alt=alt, alt_index=k)
             grow = _freq_row(hit, called, sample_called, frac, k,
                              np.ones(len(samples), bool), ad_min_reads, ad_min_freq)
             grow = {"snp_id": snp_id, **extra, **grow}
@@ -221,7 +227,7 @@ def compute_allele_freqs(
     if groups:
         group_df = pd.concat([pd.DataFrame(group_rows[r]) for r in groups], ignore_index=True)
     else:
-        cols = ["group", "snp_id"] + (["alt", "alt_index"] if per_alt else []) + [
+        cols = ["group", "snp_id", "n_alts"] + (["alt", "alt_index"] if per_alt else []) + [
             "af", "maf", "ac", "an", "af_weighted", "n_samples_ad",
             "prevalence", "n_samples_alt", "n_samples",
             "prevalence_ad", "n_samples_alt_ad"]

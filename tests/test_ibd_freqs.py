@@ -71,7 +71,7 @@ def test_without_a_grouping_only_the_whole_file_table_is_produced(tmp_path):
     assert _af(g, "chr1:19") == pytest.approx(0.75)
     # the group table is empty but still shaped, so a caller can concat it either way
     assert len(r) == 0
-    assert list(r.columns) == ["group", "snp_id", "af", "maf", "ac", "an",
+    assert list(r.columns) == ["group", "snp_id", "n_alts", "af", "maf", "ac", "an",
                                "af_weighted", "n_samples_ad", "prevalence",
                                "n_samples_alt", "n_samples",
                                "prevalence_ad", "n_samples_alt_ad"]
@@ -284,3 +284,54 @@ def test_ad_prevalence_is_per_alt_when_asked(tmp_path):
     assert multi.n_samples_alt_ad.tolist() == [3, 3]
     # but the genotypes name only one or two of them
     assert multi.n_samples_alt.tolist() == [2, 1]
+
+
+# ---- n_alts ----------------------------------------------------------------------
+
+_MULTI3 = (
+    "##fileformat=VCFv4.2\n"
+    "##contig=<ID=chr1,length=1000>\n"
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
+    '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">\n'
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2\ts3\ts4\n"
+    "chr1\t10\t.\tA\tT\t.\t.\t.\tGT:AD\t1/1:5,95\t1/1:95,5\t0/1:50,50\t0/0:100,0\n"
+    "chr1\t20\t.\tA\tT,C\t.\t.\t.\tGT:AD\t1/1:10,80,10\t2/2:10,10,80\t0/1:34,33,33\t0/0:100,0,0\n"
+    "chr1\t30\t.\tA\tT,C,G\t.\t.\t.\tGT:AD\t1/1:10,70,10,10\t2/2:10,10,70,10\t3/3:10,10,10,70\t0/0:100,0,0,0\n"
+)
+
+
+def test_n_alts_flags_a_multiallelic_site_in_the_collapsed_table(tmp_path):
+    vcf = tmp_path / "multi3.vcf"
+    vcf.write_text(_MULTI3)
+    g, _ = compute_allele_freqs(vcf.as_posix())
+
+    assert g.set_index("snp_id")["n_alts"].to_dict() == {
+        "chr1:9": 1, "chr1:19": 2, "chr1:29": 3}
+    # without it these sites are hard to tell apart: every one is a 0.75 prevalence
+    assert g.prevalence.nunique() == 1
+
+
+def test_n_alts_is_the_site_total_on_every_per_alt_row(tmp_path):
+    vcf = tmp_path / "multi3.vcf"
+    vcf.write_text(_MULTI3)
+    per, _ = compute_allele_freqs(vcf.as_posix(), per_alt=True)
+
+    # it names how many rows the site has, so "1 of 3" is readable from one row
+    assert (per.groupby("snp_id").size() == per.groupby("snp_id").n_alts.first()).all()
+    assert per[per.snp_id == "chr1:29"].alt.tolist() == ["T", "C", "G"]
+    assert per[per.snp_id == "chr1:29"].alt_index.tolist() == [1, 2, 3]
+
+    # the split still partitions the collapsed counts at three ALTs
+    coll, _ = compute_allele_freqs(vcf.as_posix())
+    assert (per.groupby("snp_id").ac.sum().sort_index()
+            == coll.set_index("snp_id").ac.sort_index()).all()
+
+
+def test_n_alts_is_carried_by_the_group_table_too(tmp_path):
+    vcf = tmp_path / "multi3.vcf"
+    vcf.write_text(_MULTI3)
+    _, r = compute_allele_freqs(vcf.as_posix(),
+                                {"s1": "A", "s2": "A", "s3": "B", "s4": "B"})
+    assert "n_alts" in r.columns
+    # a site-level property, so it does not vary by group
+    assert (r.groupby("snp_id").n_alts.nunique() == 1).all()
