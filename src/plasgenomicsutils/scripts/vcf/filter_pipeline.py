@@ -60,12 +60,18 @@ def filter_pipeline():
     for row in tally:
         kind, count, _ = _tally_fields(row)
         shown = "skipped" if kind == "skipped" else f"{count:,}"
-        print(f"  {row['step']:<28} {shown:>12}{' rows' if kind == 'report' else ''}")
+        note = " rows" if kind == "report" else ""
+        if row.get("rescued"):
+            note += f"   (+{row['rescued']:,} whitelisted)"
+        print(f"  {row['step']:<28} {shown:>12}{note}")
 
-    lines = ["step\tkind\tcount\tpath\n"]
+    # `rescued` records how many of a step's kept variants only survived because the
+    # whitelist covered them -- a run artifact rather than something to re-derive from the
+    # console, since it is the number that says whether the whitelist did anything
+    lines = ["step\tkind\tcount\trescued\tpath\n"]
     for row in tally:
         kind, count, path = _tally_fields(row)
-        lines.append(f"{row['step']}\t{kind}\t{count}\t{path}\n")
+        lines.append(f"{row['step']}\t{kind}\t{count}\t{row.get('rescued', '')}\t{path}\n")
     Path(args.outdir, "variant_counts.tsv").write_text("".join(lines))
     print(f"\n  -> {Path(args.outdir, 'variant_counts.tsv')}")
 

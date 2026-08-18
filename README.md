@@ -5,7 +5,7 @@
 [![tests](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml/badge.svg)](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml)
 <!-- badges: end -->
 
-> **Version 0.2.2** — early development; APIs, defaults, and outputs may change
+> **Version 0.2.3** — early development; APIs, defaults, and outputs may change
 > between versions.
 
 A collection of utilities for **post processing Plasmodium genomics data** —
@@ -313,6 +313,25 @@ SNPs only. `--population-name` tags every row for later cross-cohort merging;
 `--exclude-call-regions` drops CNV windows whose within-sample heterozygosity would
 otherwise depress Fws.
 
+### Which polyclonal samples can still be used
+
+Fws says how clonal a sample is, not whether one that fails the gate can still be used. An
+infection whose dominant clone holds most of the parasitaemia can be re-genotyped to that
+clone and treated as monoclonal; two strains of comparable size cannot. `wsaf_profile` reads
+that off the per-sample allele fractions and reports, for each sample, the
+`filter_ad_regenotype --min-freq` that would reduce it to one clone:
+
+```bash
+plasgenomicsutils wsaf_profile --input-vcf cohort.bcf --out wsaf.tsv \
+  --sites-out wsaf_sites.tsv.gz --fws fws.tsv
+```
+
+`--min-dominant 0.70` and `--min-freq 0.30` are the same choice written two ways, so the
+threshold states what composition you are willing to call one clone. See
+[docs/within-host-mixtures.md](docs/within-host-mixtures.md); `--sites-out` feeds
+`plasgenomicsutilsR::plot_wsaf()`.
+
+
 ## Coverage QC (from BAMs)
 
 `coverage_depth_stats` summarises sequencing depth per sample straight from indexed
@@ -378,6 +397,22 @@ regions worth acting on. The BED can be fed straight back in as a mask.
 Plot both with the R package — `coverage_qc()`, `plot_coverage_summary()`,
 `plot_coverage_by_chrom()`, `plot_coverage_dropout()`.
 
+## Linkage disequilibrium
+
+`ld_decay` reports mean r-squared between SNP pairs, binned by the distance between them,
+per metadata group. How fast it falls says how freely the population recombines — a
+near-clonal cohort keeps r-squared high for tens of kilobases, an outbred one decays within
+a few.
+
+```bash
+plasgenomicsutils ld_decay --vcf cohort.bcf --meta samples.tsv --group-col region \
+  --max-dist 50000 --bins 50 --output ld_decay.tsv --half-decay-output ld_half_decay.tsv
+```
+
+`--half-decay-output` writes the distance at which r-squared falls to half its value in the
+first bin, which is the single number usually quoted. `plot_ld_decay()` in
+`plasgenomicsutilsR` draws the curves and marks it.
+
 ## Sample QC: singleton counts
 
 `singleton_counts` counts, per sample, the variants where it is the only non-reference
@@ -428,6 +463,21 @@ cd plasgenomicsutils
 pip install -e ".[dev]"
 pytest
 ```
+
+`scripts/check.sh` runs everything CI runs — `pytest` and `mkdocs build --strict` — so a
+pull request does not have to be the thing that tells you a docs page is unreachable or a
+documented flag no longer exists:
+
+```bash
+scripts/check.sh          # the full set, about the time pytest takes
+scripts/check.sh --fast   # docs + contract checks only, a couple of seconds
+```
+
+`--fast` is the loop between edits: it runs the contract tests (every command in
+`docs/commands.md`, every documented flag real, every docs page in the mkdocs nav) and the
+strict site build, which is where most CI failures come from. The strict build needs
+`pip install -r docs/requirements.txt`; without it that step says so and is skipped rather
+than silently passing.
 
 ## License
 

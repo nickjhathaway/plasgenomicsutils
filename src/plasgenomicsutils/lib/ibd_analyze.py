@@ -12,6 +12,7 @@ from .ibd_selection import parse_snp_labels
 
 
 def parse_pair_labels(pair_labels: list) -> pd.DataFrame:
+    """Split ``sample1__sample2`` pair labels into a frame of ``pair, sample1, sample2``."""
     rows = []
     for label in pair_labels:
         s1, s2 = label.split("__", 1)
@@ -20,6 +21,13 @@ def parse_pair_labels(pair_labels: list) -> pd.DataFrame:
 
 
 def per_pair_summary(mat, pair_labels: list) -> pd.DataFrame:
+    """One row per sample pair: how many SNPs it is IBD at, and what fraction of the panel.
+
+    ``frac_ibd`` divides by the number of SNPs in the matrix, so it is a property of the
+    panel as much as of the pair -- comparable within a run, not between panels. For a
+    length-based fraction use ``ibd_fraction_and_snp_density`` instead, which divides by
+    callable cM.
+    """
     n_snps = mat.shape[1]
     counts = np.asarray(mat.sum(axis=1)).ravel()
     pair_df = parse_pair_labels(pair_labels)
@@ -29,6 +37,7 @@ def per_pair_summary(mat, pair_labels: list) -> pd.DataFrame:
 
 
 def per_snp_summary(mat, snp_labels: list) -> pd.DataFrame:
+    """One row per SNP: how many pairs are IBD there, over every pair in the matrix."""
     n_pairs = mat.shape[0]
     counts = np.asarray(mat.sum(axis=0)).ravel()
     snp_df = parse_snp_labels(snp_labels)
@@ -38,6 +47,11 @@ def per_snp_summary(mat, snp_labels: list) -> pd.DataFrame:
 
 
 def per_snp_summary_for_group(mat, annotated_pairs, snp_labels, group) -> pd.DataFrame:
+    """Per-SNP IBD within one group: only pairs whose members are both in ``group``.
+
+    Returns an empty frame when the group has no within-group pair, which is the honest
+    answer for a group of one rather than a row of zeros.
+    """
     mask = (annotated_pairs["group1"] == group) & (annotated_pairs["group2"] == group)
     row_idx = annotated_pairs.index[mask].values
     n_within = len(row_idx)
@@ -53,6 +67,11 @@ def per_snp_summary_for_group(mat, annotated_pairs, snp_labels, group) -> pd.Dat
 
 
 def per_snp_summary_between_groups(mat, annotated_pairs, snp_labels, group_a, group_b) -> pd.DataFrame:
+    """Per-SNP IBD for one pair of groups, in either order.
+
+    ``group_a == group_b`` gives that group's within-group pairs, so the same function
+    fills the diagonal and the off-diagonal of a group x group panel.
+    """
     if group_a == group_b:
         mask = (annotated_pairs["group1"] == group_a) & (annotated_pairs["group2"] == group_a)
     else:
@@ -75,6 +94,12 @@ def per_snp_summary_between_groups(mat, annotated_pairs, snp_labels, group_a, gr
 
 
 def annotate_pairs_with_groups(pair_summary, meta, group_col="group") -> pd.DataFrame:
+    """Attach each pair's two group labels, and whether they match.
+
+    Samples absent from ``meta`` are labelled ``"unknown"`` rather than dropped: a pair
+    silently disappearing would shrink the denominator of every fraction computed from
+    this frame.
+    """
     meta_idx = meta.set_index("sample")[group_col].to_dict()
     pair_summary = pair_summary.copy()
     pair_summary["group1"] = pair_summary["sample1"].map(meta_idx).fillna("unknown")
@@ -84,6 +109,7 @@ def annotate_pairs_with_groups(pair_summary, meta, group_col="group") -> pd.Data
 
 
 def within_between_group_ibd(annotated_pairs) -> pd.DataFrame:
+    """Mean / median / sd of pair sharing, split into within-group and between-group."""
     return (
         annotated_pairs.groupby("same_group")["frac_ibd"]
         .agg(["mean", "median", "std", "count"])
@@ -94,6 +120,11 @@ def within_between_group_ibd(annotated_pairs) -> pd.DataFrame:
 
 
 def pairwise_group_ibd(annotated_pairs) -> pd.DataFrame:
+    """Pair sharing summarised for every group pair, each unordered pair once.
+
+    The two group labels are sorted per row before grouping, so A-vs-B and B-vs-A land on
+    the same row instead of being counted as two.
+    """
     df = annotated_pairs.copy()
     df["reg_a"] = np.where(df["group1"] <= df["group2"], df["group1"], df["group2"])
     df["reg_b"] = np.where(df["group1"] <= df["group2"], df["group2"], df["group1"])
@@ -105,6 +136,11 @@ def pairwise_group_ibd(annotated_pairs) -> pd.DataFrame:
 
 
 def per_chr_ibd(mat, snp_labels: list) -> pd.DataFrame:
+    """Pair sharing summarised per chromosome, with the SNP count behind each row.
+
+    ``n_snps`` matters here: chromosomes carry very different numbers of SNPs, so a
+    chromosome's mean is estimated far more precisely on some than on others.
+    """
     snp_df = parse_snp_labels(snp_labels)
     records = []
     for chrom, grp in snp_df.groupby("chr"):

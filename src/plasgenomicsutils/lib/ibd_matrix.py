@@ -133,6 +133,7 @@ def build_matrix(
 
 
 def save_matrix(mat: csr_matrix, pair_labels: list, snp_labels: list, out_prefix: str) -> None:
+    """Write the sparse pairs x SNPs matrix plus its row and column labels to ``path``."""
     save_npz(f"{out_prefix}.npz", mat)
     Path(f"{out_prefix}.pair_labels.txt").write_text("\n".join(pair_labels) + "\n")
     # The coordinate system is recorded rather than left to be inferred from the numbers:
@@ -143,6 +144,7 @@ def save_matrix(mat: csr_matrix, pair_labels: list, snp_labels: list, out_prefix
 
 
 def load_matrix(out_prefix: str) -> tuple[csr_matrix, list, list]:
+    """Read back what :func:`save_matrix` wrote: ``(matrix, pair_labels, snp_labels)``."""
     # accept the prefix (as build_ibd_matrix writes) or the full "<prefix>.npz" path
     if out_prefix.endswith(".npz"):
         out_prefix = out_prefix[: -len(".npz")]

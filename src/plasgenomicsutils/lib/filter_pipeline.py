@@ -45,6 +45,13 @@ def _region(func):
     return run
 
 
+def _whitelisted(func, name):
+    """Wrap a non-region step so its ``keep_bed`` resolves a ``builtin:`` value too."""
+    def run(inp, out, *, keep_bed=None, **kw):
+        return func(inp, out, keep_bed=resolve_bed(keep_bed) if keep_bed else None, **kw)
+    return run
+
+
 def _sidecar(out: str, name: str) -> str:
     """``09_sample_coverage_filter.bcf`` -> ``09_sample_coverage_filter_<name>``.
 
@@ -77,8 +84,8 @@ def _sample_coverage(inp, out, **kw):
 
 # name -> callable(input_path, output_path, **params)
 STEPS = {
-    "hard_qc_filter": F.hard_qc_filter,
-    "singleton_filter_add_ads": F.singleton_add_ads,
+    "hard_qc_filter": _whitelisted(F.hard_qc_filter, "hard_qc_filter"),
+    "singleton_filter_add_ads": _whitelisted(F.singleton_add_ads, "singleton_filter_add_ads"),
     "tandem_repeat_mask": _region(F.tandem_repeat_mask),
     "core_region_filter": _region(F.core_region_filter),
     "paralog_mask": _region(F.paralog_mask),
@@ -86,8 +93,9 @@ STEPS = {
     "strip_stale_format": lambda inp, out, **kw: strip_stale_format(inp, out, **kw),
     "biallelic_snp_filter": F.biallelic_snp_filter,
     "sample_coverage_filter": lambda inp, out, **kw: _sample_coverage(inp, out, **kw),
-    "locus_missingness_filter": F.locus_missingness_filter,
-    "maf_filter": F.maf_filter,
+    "locus_missingness_filter": _whitelisted(F.locus_missingness_filter,
+                                             "locus_missingness_filter"),
+    "maf_filter": _whitelisted(F.maf_filter, "maf_filter"),
 }
 
 def _singleton_report(inp, out, **kw):
@@ -110,6 +118,16 @@ def _singleton_report(inp, out, **kw):
     return len(df)
 
 
+#: Steps that take a ``keep_bed`` whitelist. The rest either judge samples rather than
+#: variants (``sample_coverage_filter``), transform genotypes without dropping records
+#: (``filter_ad_regenotype``, ``strip_stale_format``), or define what the callset *is*
+#: rather than filtering it on quality (``biallelic_snp_filter`` -- letting a whitelisted
+#: multiallelic record through would break every downstream reader's assumption).
+WHITELISTABLE = {
+    "hard_qc_filter", "singleton_filter_add_ads", "tandem_repeat_mask",
+    "core_region_filter", "paralog_mask", "locus_missingness_filter", "maf_filter",
+}
+
 #: name -> callable(input_path, output_path, **params). A report reads the callset and
 #: writes a table; it never changes the data.
 #:
@@ -122,6 +140,11 @@ REPORTS = {
 }
 
 DEFAULT_CONFIG = {
+    # A whitelist BED applied to every step in WHITELISTABLE: the variants it covers survive
+    # those filters. Written out set to null so the key is discoverable -- JSON has no
+    # comments, and a resistance locus that a MAF floor or a coverage rule would otherwise
+    # remove is exactly the thing worth keeping. A step's own params.keep_bed overrides it.
+    "keep_bed": None,
     "steps": [
         {"name": "hard_qc_filter"},
         # before singleton_filter_add_ads, which removes what this counts
@@ -147,6 +170,7 @@ DEFAULT_CONFIG = {
 
 
 def load_config(path: str) -> dict:
+    """Read a pipeline config from JSON."""
     with open(path) as fh:
         return json.load(fh)
 
@@ -158,6 +182,11 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
     When ``emit_snp_bed`` (default), a BED of the final callset's SNPs is written next to
     the last step's output — the SNP panel the IBD tools read
     (``build_ibd_matrix --snp-format bed``).
+
+    A top-level ``"keep_bed"`` in the config is a whitelist for the whole chain: every step
+    in :data:`WHITELISTABLE` keeps the variants it covers, so a resistance locus survives the
+    run without being written into each step. A step's own ``params.keep_bed`` overrides it,
+    and ``"keep_bed": null`` in a step's params opts that step out.
     """
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -168,7 +197,10 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
     for i, step in enumerate(config["steps"], start=1):
         name = step["name"]
         ext = step.get("ext", "bcf")
-        params = step.get("params", {})
+        params = dict(step.get("params", {}))
+        if (config.get("keep_bed") and name in WHITELISTABLE
+                and "keep_bed" not in params):
+            params["keep_bed"] = config["keep_bed"]
         out_path = str(out / f"{i:02d}_{name}.{ext}")
 
         # `"enabled": false` keeps a step in the config, and out of the run. That is how an
@@ -197,11 +229,14 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
             raise SystemExit(f"ERROR: unknown pipeline step '{name}'. "
                              f"Known: {', '.join(STEPS)}")
         print(f"[{i:02d}] {name} -> {out_path}")
-        STEPS[name](prev, out_path, **params)
+        rescued = STEPS[name](prev, out_path, **params)
         seen.append(name)
         index_vcf(out_path)   # keep intermediates indexed (quiets pysam, enables region queries)
         n = count_variants(out_path)
-        tally.append({"step": name, "path": out_path, "variants": n})
+        row = {"step": name, "path": out_path, "variants": n}
+        if isinstance(rescued, int) and rescued > 0:
+            row["rescued"] = rescued
+        tally.append(row)
         print(f"     variants: {n:,}")
         prev = out_path
 

@@ -48,7 +48,7 @@ def gene_overlap():
     if missing:
         raise SystemExit(f"--genes is missing column(s): {', '.join(sorted(missing))}")
 
-    meta = Utils.read_table(args.meta)
+    meta = Utils.read_meta(args.meta, wants=("sample", args.group_col))
     if args.group_col not in meta.columns:
         raise SystemExit(f"--meta has no column '{args.group_col}'")
     sample_to_group = (

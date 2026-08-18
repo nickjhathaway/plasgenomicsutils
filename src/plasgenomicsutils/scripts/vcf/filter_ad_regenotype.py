@@ -32,6 +32,12 @@ def get_parser_filter_ad_regenotype() -> argparse.ArgumentParser:
                         "input ploidy per record: greater than the input errors (cannot "
                         "promote), less than warns and trims genotype-linked fields (PL/GL) "
                         "to match. 1 = haploid (single best allele), 2 = diploid.")
+    p.add_argument("--no-add-ads", action="store_true",
+                   help="Do not derive FORMAT/ADS from AD when the callset lacks it. "
+                        "Without ADS every record is passed through unfiltered, which "
+                        "looks exactly like a filter that had nothing to do -- so by "
+                        "default it is derived (the sum of AD, as singleton_filter_add_ads "
+                        "computes it).")
     return p
 
 
@@ -43,7 +49,8 @@ def filter_ad_regenotype():
     args = parse_args_filter_ad_regenotype()
     _run(args.input_vcf, args.output_vcf,
          min_reads=args.min_reads, min_freq=args.min_freq, het_min_af=args.het_min_af,
-         restrict_to_called=args.restrict_to_called_alleles, ploidy=args.ploidy)
+         restrict_to_called=args.restrict_to_called_alleles, ploidy=args.ploidy,
+         add_ads=not args.no_add_ads)
     print("Done.")
 
 

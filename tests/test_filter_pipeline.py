@@ -157,7 +157,9 @@ def test_the_default_pipeline_writes_a_summary_for_every_row(tmp_path):
         sys.argv = argv
 
     rows = (outdir / "variant_counts.tsv").read_text().splitlines()
-    assert rows[0] == "step\tkind\tcount\tpath"
+    assert rows[0] == "step\tkind\tcount\trescued\tpath"
+    # nothing is whitelisted in this config, so `rescued` is blank on every row
+    assert all(r.split("\t")[3] == "" for r in rows[1:])
     kinds = {r.split("\t")[0]: r.split("\t")[1] for r in rows[1:]}
     assert kinds["singleton_counts"] == "report"
     assert kinds["paralog_mask"] == "skipped"

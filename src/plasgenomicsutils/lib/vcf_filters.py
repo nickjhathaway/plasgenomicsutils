@@ -8,18 +8,26 @@ from __future__ import annotations
 
 import csv
 import os
+import shutil
 import subprocess
 import tempfile
 from collections import defaultdict
 
-from .bcftools import format_tags, out_flag, q, require, sh
+from ..utils.small_utils import Utils
+from .bcftools import (count_variants, format_tags, index_vcf, out_flag, q, require,
+                       sh)
 from .strip_format import GENOTYPE_LINKED_FORMAT, strip_stale_format
 
 
 def hard_qc_filter(inp: str, out: str, *, qd: float = 20, mq: float = 55,
                    sor: float = 3, mqranksum: float = -5.0,
-                   readposranksum: float = -5.0, fs: float | None = None) -> None:
-    """GATK-style hard filter on INFO metrics; keep records still flagged PASS."""
+                   readposranksum: float = -5.0, fs: float | None = None,
+                   keep_bed: str | None = None) -> int:
+    """GATK-style hard filter on INFO metrics; keep records still flagged PASS.
+
+    ``keep_bed`` whitelists regions from this rule; a rescued record keeps its ``FAIL``
+    FILTER, so a variant kept despite failing QC still says that it failed.
+    """
     parts = [
         f"QD < {qd}",
         f"MQ < {mq}",
@@ -31,11 +39,24 @@ def hard_qc_filter(inp: str, out: str, *, qd: float = 20, mq: float = 55,
         parts.append(f"FS > {fs}")
     expr = " || ".join(parts)
     fmt = out_flag(out)
-    sh(f"bcftools filter -m + -s FAIL -e {q(expr)} {q(inp)} -Ou "
-       f"| bcftools view -f PASS -O{fmt} -o {q(out)}", tools=("bcftools",))
+    if not keep_bed:
+        sh(f"bcftools filter -m + -s FAIL -e {q(expr)} {q(inp)} -Ou "
+           f"| bcftools view -f PASS -O{fmt} -o {q(out)}", tools=("bcftools",))
+        return 0
+    # flagged first, selected second, so the whitelist has a header-compatible source
+    prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    try:
+        sh(f"bcftools filter -m + -s FAIL -e {q(expr)} {q(inp)} -Ob -o {q(prep)}",
+           tools=("bcftools",))
+        sh(f"bcftools view -f PASS {q(prep)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        return _rescue_whitelisted(prep, out, keep_bed, "hard_qc_filter")
+    finally:
+        if os.path.exists(prep):
+            os.unlink(prep)
 
 
-def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1) -> None:
+def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
+                     keep_bed: str | None = None) -> int:
     """Drop variants seen as ALT in <= min_samples samples; add FORMAT/ADS.
 
     ADS (summed allelic depth, the reads actually used to genotype) is a more
@@ -50,8 +71,21 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1) -> None:
     # across the whole record and match every site.
     keep = f'COUNT(GT!="RR" & GT!="mis") > {min_samples}'
     ads = "FORMAT/ADS=int(smpl_sum(FORMAT/AD))"
-    sh(f"bcftools view -i {q(keep)} {q(inp)} -Ou "
-       f"| bcftools +fill-tags -O{fmt} -o {q(out)} -- -t {q(ads)}", tools=("bcftools",))
+    if not keep_bed:
+        sh(f"bcftools view -i {q(keep)} {q(inp)} -Ou "
+           f"| bcftools +fill-tags -O{fmt} -o {q(out)} -- -t {q(ads)}", tools=("bcftools",))
+        return 0
+    # ADS is per-sample and does not depend on which records survive, so tagging everything
+    # first and selecting second gives the same output and leaves a source to rescue from
+    prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    try:
+        sh(f"bcftools +fill-tags {q(inp)} -Ob -o {q(prep)} -- -t {q(ads)}",
+           tools=("bcftools",))
+        sh(f"bcftools view -i {q(keep)} {q(prep)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        return _rescue_whitelisted(prep, out, keep_bed, "singleton_filter_add_ads")
+    finally:
+        if os.path.exists(prep):
+            os.unlink(prep)
 
 
 def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True) -> None:
@@ -89,6 +123,55 @@ def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True) -> None:
         sh(f"bcftools view --trim-alt-alleles {q(inp)} -Ou "
            f"| bcftools view -m2 -M2 -v snps - -O{fmt} -o {q(out)}", tools=("bcftools",))
 
+
+
+def _rescue_whitelisted(prepared: str, out: str, keep_bed: str | None, label: str) -> int:
+    """Add back the whitelisted records a just-run filter dropped. Returns how many.
+
+    The region filters fold a whitelist into their BED, but a filter that judges a record on
+    its own numbers -- a QC metric, an allele count, a missingness rate, an allele frequency --
+    has no region to carve out. So the whitelist is applied by difference: whatever this step
+    dropped that the whitelist covers goes back. The comparison is on position and alleles
+    (``bcftools isec``), not on overlap, so a rescued record is that record and not a neighbour.
+
+    ``prepared`` is the input *after* any header-changing part of the step (the FILTER
+    annotation, the added FORMAT/ADS, the filled INFO tags) and before its selection. Rescuing
+    from the raw input instead would produce records whose header disagrees with the output's,
+    which ``bcftools concat`` refuses.
+
+    A rescued record is exempt from this one rule and nothing else: it still faces every later
+    step, and it keeps whatever FILTER and INFO the step gave it, so a variant kept despite
+    failing QC still says so.
+    """
+    if not keep_bed:
+        return 0
+    fmt = out_flag(out)
+    tmp = tempfile.mkdtemp()
+    wl = os.path.join(tmp, "whitelisted.bcf")
+    kept = os.path.join(tmp, "kept.bcf")
+    resc = os.path.join(tmp, "rescued.bcf")
+    try:
+        sh(f"bcftools view {q(prepared)} "
+           f"| bedtools intersect -header -a stdin -b {q(keep_bed)} "
+           f"| bcftools view -Ob -o {q(wl)}", tools=("bcftools", "bedtools"))
+        sh(f"bcftools view {q(out)} -Ob -o {q(kept)}", tools=("bcftools",))
+        index_vcf(wl)
+        index_vcf(kept)
+        sh(f"bcftools isec -C {q(wl)} {q(kept)} -w1 -Ob -o {q(resc)}", tools=("bcftools",))
+        n = count_variants(resc)
+        if n:
+            index_vcf(resc)
+            sh(f"bcftools concat -a {q(kept)} {q(resc)} -Ou "
+               f"| bcftools sort -O{fmt} -o {q(out)}", tools=("bcftools",))
+            print(f"     {label}: {n:,} variant(s) kept by the whitelist that this filter "
+                  f"would have dropped")
+        else:
+            print(f"     {label}: WARNING the whitelist {keep_bed} rescued nothing -- no "
+                  f"variant it covers would have been dropped here. Check the contig names, "
+                  f"and that its positions are 0-based half-open like any BED.")
+        return n
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 def _sorted_bed(bed: str) -> str:
     tmp = tempfile.NamedTemporaryFile("w", suffix=".bed", delete=False).name
@@ -256,19 +339,34 @@ def sample_coverage_filter(inp: str, out: str, *, ads_min: int = 10,
 
 
 def locus_missingness_filter(inp: str, out: str, *, f_missing_max: float = 0.05,
-                             ads_min: int = 10, sample_frac_min: float = 0.95) -> None:
-    """Keep loci with < f_missing_max missing AND >= sample_frac_min at ADS >= ads_min."""
+                             ads_min: int = 10, sample_frac_min: float = 0.95,
+                             keep_bed: str | None = None) -> int:
+    """Keep loci with < f_missing_max missing AND >= sample_frac_min at ADS >= ads_min.
+
+    ``keep_bed`` whitelists regions from this rule, for a locus worth keeping even where it
+    is thinly covered.
+    """
     fmt = out_flag(out)
     expr = (f"F_MISSING < {f_missing_max} & "
             f"COUNT(FMT/ADS>={ads_min})/N_SAMPLES >= {sample_frac_min}")
-    sh(f"bcftools annotate -x INFO/F_MISSING {q(inp)} -Ou "
-       f"| bcftools +fill-tags -Ou -- -t AC,AN,AF,F_MISSING "
-       f"| bcftools view -i {q(expr)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+    tags = f"bcftools annotate -x INFO/F_MISSING {q(inp)} -Ou | bcftools +fill-tags"
+    if not keep_bed:
+        sh(f"{tags} -Ou -- -t AC,AN,AF,F_MISSING "
+           f"| bcftools view -i {q(expr)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        return 0
+    prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    try:
+        sh(f"{tags} -Ob -o {q(prep)} -- -t AC,AN,AF,F_MISSING", tools=("bcftools",))
+        sh(f"bcftools view -i {q(expr)} {q(prep)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        return _rescue_whitelisted(prep, out, keep_bed, "locus_missingness_filter")
+    finally:
+        if os.path.exists(prep):
+            os.unlink(prep)
 
 
 def maf_filter(inp: str, out: str, *, maf_min: float = 0.01, maf_max: float | None = None,
                meta: str | None = None, group_col: str | None = None,
-               sample_col: str = "sample") -> None:
+               sample_col: str = "sample", keep_bed: str | None = None) -> int:
     """Drop rare and near-fixed alleles by an allele-frequency window ``[maf_min, maf_max]``.
 
     The two bounds are usually symmetric (a 0.02 floor pairs with a 0.98 ceiling), so
@@ -281,16 +379,31 @@ def maf_filter(inp: str, out: str, *, maf_min: float = 0.01, maf_max: float | No
     (never split-and-merged), so every sample's genotypes are preserved even at a site that
     is monomorphic in its own group but polymorphic elsewhere. ``maf_max`` is not used in
     grouped mode (the criterion is a per-group minor-allele-frequency floor).
+
+    ``keep_bed`` whitelists regions from the frequency window. This is the one most worth
+    reaching for: a resistance allele can sit at a few percent in one cohort and still be the
+    thing being looked for, and a MAF floor is exactly what removes it.
     """
     if meta and group_col:
-        _maf_filter_grouped(inp, out, meta=meta, group_col=group_col,
-                            sample_col=sample_col, maf_min=maf_min)
-        return
+        return _maf_filter_grouped(inp, out, meta=meta, group_col=group_col,
+                                   sample_col=sample_col, maf_min=maf_min, keep_bed=keep_bed)
     if maf_max is None:
         maf_max = 1 - maf_min
     fmt = out_flag(out)
-    sh(f"bcftools +fill-tags {q(inp)} -Ou -- -t AC,AN,AF "
-       f"| bcftools view -q {maf_min} -Q {maf_max} -O{fmt} -o {q(out)}", tools=("bcftools",))
+    if not keep_bed:
+        sh(f"bcftools +fill-tags {q(inp)} -Ou -- -t AC,AN,AF "
+           f"| bcftools view -q {maf_min} -Q {maf_max} -O{fmt} -o {q(out)}",
+           tools=("bcftools",))
+        return 0
+    prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    try:
+        sh(f"bcftools +fill-tags {q(inp)} -Ob -o {q(prep)} -- -t AC,AN,AF", tools=("bcftools",))
+        sh(f"bcftools view -q {maf_min} -Q {maf_max} {q(prep)} -O{fmt} -o {q(out)}",
+           tools=("bcftools",))
+        return _rescue_whitelisted(prep, out, keep_bed, "maf_filter")
+    finally:
+        if os.path.exists(prep):
+            os.unlink(prep)
 
 
 def _vcf_samples(path: str) -> set[str]:
@@ -300,18 +413,22 @@ def _vcf_samples(path: str) -> set[str]:
 
 
 def _maf_filter_grouped(inp: str, out: str, *, meta: str, group_col: str,
-                        sample_col: str, maf_min: float) -> None:
+                        sample_col: str, maf_min: float,
+                        keep_bed: str | None = None) -> int:
     require("bcftools")
     present = _vcf_samples(inp)
     groups: dict[str, list[str]] = defaultdict(list)
     with open(meta) as fh:
         reader = csv.DictReader(fh, delimiter="\t")
-        for col in (sample_col, group_col):
-            if col not in (reader.fieldnames or []):
-                raise SystemExit(f"ERROR: column '{col}' not in {meta} "
-                                 f"(has: {', '.join(reader.fieldnames or [])})")
+        fields = reader.fieldnames or []
+        # `Sample` and `sample` are the same column to everyone but a string comparison
+        s_col = Utils.resolve_column(fields, sample_col, source=f"metadata ({meta})")
+        g_col = Utils.resolve_column(fields, group_col, source=f"metadata ({meta})")
+        for got, want in ((s_col, sample_col), (g_col, group_col)):
+            if got != want:
+                print(f"  note: metadata column '{got}' read as '{want}'")
         for row in reader:
-            s, g = row[sample_col], row[group_col]
+            s, g = row[s_col], row[g_col]
             if s in present and g:
                 groups[g].append(s)
     if not groups:
@@ -340,6 +457,9 @@ def _maf_filter_grouped(inp: str, out: str, *, meta: str, group_col: str,
         fmt = out_flag(out)
         # apply the union of passing sites to the ORIGINAL combined VCF (all samples kept)
         sh(f"bcftools view -T {q(sorted_pos)} {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        # selection is by position list off the untouched input, so its header already
+        # matches and the whitelist can be rescued straight from it
+        rescued = _rescue_whitelisted(inp, out, keep_bed, "maf_filter")
     finally:
         for f in os.listdir(tmp):
             try:
@@ -350,6 +470,7 @@ def _maf_filter_grouped(inp: str, out: str, *, meta: str, group_col: str,
             os.rmdir(tmp)
         except OSError:
             pass
+    return rescued
 
 
 def snp_bed(inp: str, bed: str) -> None:
@@ -466,6 +587,7 @@ COVERAGE_TABLE_COLUMNS = ["sample", "n_loci", "n_covered", "frac_covered", "n_mi
 
 
 def write_sample_coverage_table(rows: list[dict], path: str) -> None:
+    """Write the per-sample coverage table that explains each keep/drop decision."""
     with open(path, "w") as fh:
         fh.write("\t".join(COVERAGE_TABLE_COLUMNS) + "\n")
         for r in rows:

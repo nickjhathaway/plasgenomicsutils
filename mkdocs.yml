@@ -56,7 +56,10 @@ nav:
   - Installation: install.md
   - VCF filtering & harmonization: filtering.md
   - Fws (within-host diversity): fws.md
+  - Within-host mixtures: within-host-mixtures.md
   - IBD post-analysis: ibd.md
+  - Allele frequencies: allele-frequencies.md
+  - Coverage QC: coverage.md
   - Command reference: commands.md
   - Methods:
       - Strand-bias artifacts: strand_bias_artifact_exclusion.md

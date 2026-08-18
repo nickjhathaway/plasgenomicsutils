@@ -58,3 +58,4 @@ plasgenomicsutils <command> -h     # options for one command
 | `filter_pipeline` | Run an ordered, config-driven chain of filtering steps, tallying counts |
 | `strand_bias_scan` | Flag strand-bias (SSE) fake-het artifacts from `FORMAT/ADF+ADR`; emit a blacklist BED |
 | `strand_read_check` | Read-level strand-bias diagnostic at one site (+ optional ALT-read extraction) |
+| `wsaf_profile` | Per-sample: is there a dominant clone, and what `--min-freq` reduces the sample to it |

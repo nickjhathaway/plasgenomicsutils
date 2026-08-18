@@ -104,13 +104,34 @@ def _read_af_table(af_path: str, usecols: list) -> pd.DataFrame:
         first = fh.readline().strip()
     stamped = first.split("=", 1)[1] if first.startswith("#snp_coord_system=") else None
     check_snp_coord_system(stamped, af_path)
-    return pd.read_csv(af_path, sep="\t", usecols=usecols, comment="#")
+    try:
+        return pd.read_csv(af_path, sep="\t", usecols=usecols, comment="#")
+    except ValueError as e:
+        have = pd.read_csv(af_path, sep="\t", nrows=0, comment="#").columns.tolist()
+        missing = [c for c in usecols if c not in have]
+        if not missing:
+            raise
+        raise SystemExit(
+            f"ERROR: {af_path} has no column(s): {', '.join(missing)}.\n"
+            f"  columns present: {', '.join(have)}\n"
+            "  Tables written before this version hold only snp_id and af; re-run "
+            "compute_allele_freqs to get the others."
+        ) from e
 
 
-def load_global_af(af_path: str, snp_labels: list) -> np.ndarray:
-    """Global AFs aligned to ``snp_labels``; any missing SNP is a hard error."""
-    af_df = _read_af_table(af_path, ["snp_id", "af"])
-    af_map = af_df.set_index("snp_id")["af"].to_dict()
+def load_global_af(af_path: str, snp_labels: list, af_col: str = "af") -> np.ndarray:
+    """Global AFs aligned to ``snp_labels``; any missing SNP is a hard error.
+
+    ``af_col`` names the column to read. The default is the allele-count frequency, which
+    is the one that matches how the IBD matrix was built: hmmibd-rs reduces each sample to
+    a single dominant allele, so the frequency of those same hard calls is what the
+    expected-sharing model is about. ``af_weighted`` describes the within-host composition
+    instead -- it counts minor clones the IBD analysis never saw -- so it answers a
+    different question, and on the monoclonal cohorts this is usually run on the two agree
+    anyway. Exposed so that can be checked rather than assumed.
+    """
+    af_df = _read_af_table(af_path, ["snp_id", af_col])
+    af_map = af_df.set_index("snp_id")[af_col].to_dict()
     af = np.array([af_map.get(s, np.nan) for s in snp_labels])
     missing = int(np.isnan(af).sum())
     if missing > 0:
@@ -125,8 +146,15 @@ def load_global_af(af_path: str, snp_labels: list) -> np.ndarray:
     return af
 
 
-def load_group_af_table(af_group_path: str) -> pd.DataFrame:
-    df = _read_af_table(af_group_path, ["group", "snp_id", "af"])
+def load_group_af_table(af_group_path: str, af_col: str = "af") -> pd.DataFrame:
+    """Read the per-group allele-frequency table, verifying its coordinate stamp.
+
+    ``af_col`` chooses which frequency column to use and arrives renamed to ``af``, so
+    everything downstream joins on one name whichever was asked for.
+    """
+    df = _read_af_table(af_group_path, ["group", "snp_id", af_col])
+    if af_col != "af":
+        df = df.rename(columns={af_col: "af"})     # downstream joins on `af`
     print(f"  Loaded group AF table: {len(df):,} rows, "
           f"{df['group'].nunique()} groups, {df['snp_id'].nunique():,} SNPs")
     return df
@@ -345,9 +373,10 @@ def permutation_null(mat, af, n_perm=200, n_bins=100, alpha=0.05, seed=0,
     its segment lengths exactly as observed -- so relatedness, block structure and the
     resulting autocorrelation all survive -- and destroys only the thing being tested:
     whether pairs share *the same* locus. The statistic is then recomputed from scratch,
-    MAF binning and all. Expect the result to be far stricter than the parametric lines:
-    on real data every replicate's genome-wide maximum can clear the Bonferroni line, in
-    which case that line's true family-wise error rate is 100%, not 5%.
+    MAF binning and all. Expect the result to be stricter than the parametric lines, and
+    possibly far stricter: where the replicates' genome-wide maxima sit above the Bonferroni
+    line, that line's true family-wise error rate is not the nominal 5%. Compare the two
+    rather than assuming a margin.
 
     Four summaries come out of the one pass, trading resolution against assumptions:
 

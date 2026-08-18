@@ -1,0 +1,58 @@
+# GitHub Actions has no built-in job retry, and re-running everything on any failure would
+# double the feedback time on a genuinely broken commit. So this re-runs a failed run once,
+# but only when the failure was in *standing the runner up* -- installing R, Python, pandoc,
+# or the dependency cache -- rather than in our own tests or checks. Those hangs are the
+# ones a fresh runner fixes; a real failure would re-run to the same answer more slowly.
+#
+# Two things to know:
+#   * `workflow_run` fires only for workflows on the default branch, so this has to be
+#     merged there before it does anything. It then covers runs from any branch.
+#   * re-running needs `actions: write` on the GITHUB_TOKEN. If the repo's default
+#     workflow permissions are read-only the call is refused, and the step says so.
+
+name: retry setup failures
+
+on:
+  workflow_run:
+    workflows: ["tests"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  retry:
+    # attempt 1 only, so a re-run that fails again is final and this cannot loop
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'failure' &&
+          github.event.workflow_run.run_attempt < 2 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Re-run once, if the failure was in setting the runner up
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          failed=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure") | .steps[]?
+                  | select(.conclusion == "failure" or .conclusion == "cancelled") | .name')
+          printf 'failed steps:\n%s\n' "${failed:-  (none reported)}"
+
+          # Counted rather than tested with `grep -q -v`, whose exit status differs between
+          # grep implementations. A failed step that is not part of the setup is our code.
+          ours=$(grep -vcE 'setup-r|setup-pandoc|setup-python|checkout|Set up job|dependencies' \
+                   <<< "$failed" || true)
+          if [ -n "$failed" ] && [ "${ours:-0}" -gt 0 ]; then
+            echo "-> $ours failed step(s) are ours; leaving this run alone"
+            exit 0
+          fi
+
+          echo "-> looks like runner setup; re-running the failed jobs once"
+          if ! gh run rerun "$RUN_ID" --failed; then
+            echo "::error::Could not re-run. This needs actions:write on the GITHUB_TOKEN -- \
+            set Settings -> Actions -> General -> Workflow permissions to 'Read and write permissions'."
+            exit 1
+          fi

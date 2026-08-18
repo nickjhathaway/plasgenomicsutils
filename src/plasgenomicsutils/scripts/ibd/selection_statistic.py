@@ -24,6 +24,13 @@ def get_parser_selection_statistic() -> argparse.ArgumentParser:
     p.add_argument("--af", required=True,
                    help="TSV (snp_id, af): global allele frequencies (required; generate "
                         "with compute_allele_freqs). AFs are not estimated from the matrix.")
+    p.add_argument("--af-col", default="af",
+                   help="Column of the AF table(s) to use (default: af, the allele-count "
+                        "frequency). This is the one that matches the matrix -- hmmibd-rs "
+                        "reduces each sample to one dominant allele, so the hard-call "
+                        "frequency is what the expected-sharing model is about. Pass "
+                        "af_weighted to score against within-host composition instead; on "
+                        "monoclonal cohorts the two barely differ.")
     p.add_argument("--af-group", default=None,
                    help="TSV (group, snp_id, af): per-group AFs; falls back to --af.")
     p.add_argument("--meta", default=None,
@@ -164,8 +171,9 @@ def selection_statistic():
     snp_df = S.parse_snp_labels(snp_labels)
 
     print("\n--- Allele frequencies ---")
-    global_af = S.load_global_af(args.af, snp_labels)
-    group_af_table = S.load_group_af_table(args.af_group) if args.af_group else None
+    global_af = S.load_global_af(args.af, snp_labels, af_col=args.af_col)
+    group_af_table = (S.load_group_af_table(args.af_group, af_col=args.af_col)
+                      if args.af_group else None)
 
     print("\n--- Global selection statistic ---")
     stats, bin_df = S.compute_selection_statistic(mat, global_af, n_bins=args.n_bins,
@@ -189,7 +197,8 @@ def selection_statistic():
         return
 
     print(f"\n--- Per-group selection statistic (group_col='{args.group_col}') ---")
-    meta = Utils.read_table(args.meta)   # auto-detect tab / comma
+    # auto-detect tab / comma, and accept Sample / SAMPLE for sample
+    meta = Utils.read_meta(args.meta, wants=("sample", args.group_col))
     groups = sorted(meta[args.group_col].dropna().unique())
     print(f"Found {len(groups)} groups: {', '.join(groups)}")
 
