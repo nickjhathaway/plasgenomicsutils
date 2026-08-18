@@ -147,6 +147,11 @@ def load_global_af(af_path: str, snp_labels: list, af_col: str = "af") -> np.nda
 
 
 def load_group_af_table(af_group_path: str, af_col: str = "af") -> pd.DataFrame:
+    """Read the per-group allele-frequency table, verifying its coordinate stamp.
+
+    ``af_col`` chooses which frequency column to use and arrives renamed to ``af``, so
+    everything downstream joins on one name whichever was asked for.
+    """
     df = _read_af_table(af_group_path, ["group", "snp_id", af_col])
     if af_col != "af":
         df = df.rename(columns={af_col: "af"})     # downstream joins on `af`
@@ -368,9 +373,10 @@ def permutation_null(mat, af, n_perm=200, n_bins=100, alpha=0.05, seed=0,
     its segment lengths exactly as observed -- so relatedness, block structure and the
     resulting autocorrelation all survive -- and destroys only the thing being tested:
     whether pairs share *the same* locus. The statistic is then recomputed from scratch,
-    MAF binning and all. Expect the result to be far stricter than the parametric lines:
-    on real data every replicate's genome-wide maximum can clear the Bonferroni line, in
-    which case that line's true family-wise error rate is 100%, not 5%.
+    MAF binning and all. Expect the result to be stricter than the parametric lines, and
+    possibly far stricter: where the replicates' genome-wide maxima sit above the Bonferroni
+    line, that line's true family-wise error rate is not the nominal 5%. Compare the two
+    rather than assuming a margin.
 
     Four summaries come out of the one pass, trading resolution against assumptions:
 

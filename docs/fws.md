@@ -23,6 +23,14 @@ plasgenomicsutils calculate_fws --ad-table ad.tsv --samples samples.txt --out fw
 The two are not interchangeable — don't mix a threshold tuned on one with the other's
 values. moimix parity uses the defaults (`--min-depth 0 --min-alt-samples 0`).
 
+## When Fws is not enough
+
+Fws says how clonal a sample is, not whether one that fails the gate can still be used. An
+infection whose dominant clone holds most of the parasitaemia can be re-genotyped to that clone
+and treated as monoclonal; two strains of comparable size cannot. `wsaf_profile` reads that off
+the allele fractions and reports, per sample, the `filter_ad_regenotype --min-freq` that would
+reduce it to one clone — see [Within-host mixtures](within-host-mixtures.md).
+
 ## Notes
 
 - `moimix::getFws` uses every biallelic record's `AD` regardless of allele string, so

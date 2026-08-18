@@ -43,7 +43,10 @@ BAMs → bcftools mpileup/call → per-group BCF   (or a public/GATK core-SNP VC
 
 - [VCF filtering & harmonization](filtering.md)
 - [Fws](fws.md)
+- [Within-host mixtures](within-host-mixtures.md)
 - [IBD post-analysis](ibd.md)
+- [Allele frequencies](allele-frequencies.md)
+- [Coverage QC](coverage.md)
 
 ## Methods notes
 

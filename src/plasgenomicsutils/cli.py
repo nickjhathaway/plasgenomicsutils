@@ -43,6 +43,7 @@ from .scripts.vcf.harmonize_bcf import harmonize_bcf
 from .scripts.vcf.hard_qc_filter import hard_qc_filter
 from .scripts.vcf.singleton_filter_add_ads import singleton_filter_add_ads
 from .scripts.vcf.singleton_counts import singleton_counts
+from .scripts.vcf.wsaf_profile import wsaf_profile
 from .scripts.vcf.biallelic_snp_filter import biallelic_snp_filter
 from .scripts.vcf.strip_stale_format import strip_stale_format
 from .scripts.vcf.tandem_repeat_mask import tandem_repeat_mask
@@ -127,6 +128,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Flag strand-bias (SSE) fake-het artifacts from FORMAT/ADF+ADR; emit a blacklist BED"),
         "strand_read_check": Command(strand_read_check,
             "Read-level strand-bias diagnostic at one site (+ optional ALT-read extraction)"),
+        "wsaf_profile": Command(wsaf_profile,
+            "Per-sample: is there a dominant clone, and what --min-freq reduces the sample to it"),
     },
 }
 
@@ -216,6 +219,7 @@ def _print_bash_completion() -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Dispatch one subcommand, or print the grouped catalog for ``--list``."""
     argv = list(sys.argv[1:] if argv is None else argv)
     index = _flatten()
 

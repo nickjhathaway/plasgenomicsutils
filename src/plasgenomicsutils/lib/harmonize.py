@@ -31,6 +31,13 @@ STALE_INFO_FIELDS = [
 
 
 def strip_stale_info(rec) -> None:
+    """Drop INFO fields whose length is tied to the allele count.
+
+    ``Number=A/R`` fields (AC, AF, DP4 and friends) are sized by how many alleles the
+    record has, so once the ALT set changes they are both wrong and a merge hazard:
+    ``bcftools merge`` aborts on an allele-count mismatch. ``MQ`` is kept -- it is a single
+    value that does not depend on the alleles.
+    """
     for field in STALE_INFO_FIELDS:
         try:
             del rec.info[field]

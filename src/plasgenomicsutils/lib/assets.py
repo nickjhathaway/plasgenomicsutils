@@ -17,6 +17,7 @@ _ASSET_FILES = {
 
 
 def available_assets() -> list[str]:
+    """The ``builtin:`` BED assets that ship with the package, as name -> path."""
     return sorted(_ASSET_FILES)
 
 

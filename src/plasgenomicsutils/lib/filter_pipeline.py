@@ -170,6 +170,7 @@ DEFAULT_CONFIG = {
 
 
 def load_config(path: str) -> dict:
+    """Read a pipeline config from JSON."""
     with open(path) as fh:
         return json.load(fh)
 

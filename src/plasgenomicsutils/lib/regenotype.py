@@ -14,6 +14,7 @@ per-sample access on large cohorts. The re-genotyping matches
 
 from __future__ import annotations
 
+import re
 import sys
 from math import comb
 
@@ -42,17 +43,28 @@ def _present_likelihood_tags(vcf) -> list[str]:
     return present
 
 
+def _format_ids(vcf) -> set:
+    """The FORMAT tag IDs a cyvcf2 VCF's header declares."""
+    return set(re.findall(r"^##FORMAT=<ID=([^,>]+)", vcf.raw_header, flags=re.M))
+
+
 def filter_ad_regenotype(input_vcf: str, output_vcf: str, *, min_reads: int = 2,
                          min_freq: float = 0.01, het_min_af: float = 0.2,
                          restrict_to_called: bool = False,
                          drop_stale_likelihoods: bool = True,
-                         ploidy: int | None = None) -> None:
-    """Clean AD and re-genotype every record; records lacking AD/ADS pass through.
+                         ploidy: int | None = None,
+                         add_ads: bool = True) -> None:
+    """Clean AD and re-genotype every record; records lacking AD pass through.
 
     The frequency denominator is the ``ADS`` FORMAT field (summed genotyping
     depth). ADS is recomputed from the cleaned AD before writing. A record is
-    passed through unchanged if it lacks AD or ADS, or any sample's AD/ADS is
-    missing.
+    passed through unchanged if it lacks AD, or any sample's AD/ADS is missing.
+
+    ``add_ads`` (default ``True``) derives ADS from AD -- their sum, which is what
+    ``singleton_filter_add_ads`` computes -- when the callset does not carry it, and
+    adds the header line. Without this a callset with no ADS is passed through
+    untouched: every record silently unfiltered, which looks exactly like a filter
+    that had nothing to do. Set it ``False`` to keep that pass-through behaviour.
 
     ``restrict_to_called`` limits each sample's genotype to the alleles the
     upstream caller already used, so calls are only narrowed, never promoted to a
@@ -81,16 +93,32 @@ def filter_ad_regenotype(input_vcf: str, output_vcf: str, *, min_reads: int = 2,
     vcf = VCF(input_vcf)
     n_samples = len(vcf.samples)
     gl_tags = _present_likelihood_tags(vcf) if drop_stale_likelihoods else []
+    # asked before the header is touched: cyvcf2 raises KeyError on v.format() for a tag
+    # the header does not declare, so this has to gate every read of it
+    in_ads = "ADS" in _format_ids(vcf)
+    derive_ads = add_ads and not in_ads
+    if derive_ads:
+        vcf.add_format_to_header({
+            "ID": "ADS", "Number": "1", "Type": "Integer",
+            "Description": "Summed allelic depth (sum of AD), the reads used to genotype"})
+        sys.stderr.write("NOTE: no FORMAT/ADS in the input; deriving it as the sum of AD\n")
     out = Writer(output_vcf, vcf)
     warned_reduce = False
     for v in vcf:
         ad = v.format("AD")
-        ads = v.format("ADS")
-        if ad is None or ads is None:
+        if ad is None:
             out.write_record(v)
             continue
         ad = ad.astype(np.int64)
-        depth = ads[:, 0].astype(np.int64)
+        ads = v.format("ADS") if in_ads else None
+        if ads is None:
+            if not derive_ads:
+                out.write_record(v)
+                continue
+            # the sum of this sample's own AD, which is what ADS means
+            depth = np.where(ad < 0, 0, ad).sum(axis=1).astype(np.int64)
+        else:
+            depth = ads[:, 0].astype(np.int64)
         if (ad < 0).any() or (depth < 0).any():  # any missing AD/ADS -> pass through
             out.write_record(v)
             continue

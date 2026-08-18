@@ -71,6 +71,12 @@ def per_pair_fraction(blocks_path, sep, bp_per_cm, callable_cm,
 
 
 def snp_density(pos_df, ref: Reference, bp_per_cm, callable_cm, full_cm, min_snp):
+    """SNPs per cM, genome-wide and per chromosome.
+
+    The density the IBD caller had to work with: a segment can only be detected where
+    there are SNPs to detect it on, so a chromosome with a sparse panel yields shorter and
+    fewer segments for reasons that have nothing to do with relatedness.
+    """
     n_snps = len(pos_df)
     win_bp = bp_per_cm  # 1 cM window
     recs = []

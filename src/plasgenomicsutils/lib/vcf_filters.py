@@ -587,6 +587,7 @@ COVERAGE_TABLE_COLUMNS = ["sample", "n_loci", "n_covered", "frac_covered", "n_mi
 
 
 def write_sample_coverage_table(rows: list[dict], path: str) -> None:
+    """Write the per-sample coverage table that explains each keep/drop decision."""
     with open(path, "w") as fh:
         fh.write("\t".join(COVERAGE_TABLE_COLUMNS) + "\n")
         for r in rows:
