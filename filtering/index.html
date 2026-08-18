@@ -1,0 +1,1244 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Post-processing utilities for Plasmodium genomics data">
+      
+      
+      
+        <link rel="canonical" href="https://nickjhathaway.github.io/plasgenomicsutils/filtering/">
+      
+      
+        <link rel="prev" href="../install/">
+      
+      
+        <link rel="next" href="../fws/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>VCF filtering & harmonization - plasgenomicsutils</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="teal">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#vcf-filtering-harmonization" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="plasgenomicsutils" class="md-header__button md-logo" aria-label="plasgenomicsutils" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            plasgenomicsutils
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              VCF filtering & harmonization
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="teal"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="teal"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nickjhathaway/plasgenomicsutils" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nickjhathaway/plasgenomicsutils
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="plasgenomicsutils" class="md-nav__button md-logo" aria-label="plasgenomicsutils" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    plasgenomicsutils
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nickjhathaway/plasgenomicsutils" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nickjhathaway/plasgenomicsutils
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    VCF filtering & harmonization
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    VCF filtering & harmonization
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#whitelisting-regions-from-a-region-filter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Whitelisting regions from a region filter
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Whitelisting regions from a region filter">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#building-one-from-amino-acid-positions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Building one from amino-acid positions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ad-cleaning-and-re-genotyping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AD cleaning and re-genotyping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipeline
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Pipeline">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#turning-steps-on-and-off" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Turning steps on and off
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-a-sample-was-dropped" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why a sample was dropped
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#harmonization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Harmonization
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Harmonization">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#sites-one-cohort-never-called" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sites one cohort never called
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#strand-bias-artifacts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Strand-bias artifacts
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fws/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fws (within-host diversity)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../within-host-mixtures/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Within-host mixtures
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ibd/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IBD post-analysis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../allele-frequencies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Allele frequencies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../coverage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage QC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Command reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <label class="md-nav__link" for="__nav_10" id="__nav_10_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Methods
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Methods
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../strand_bias_artifact_exclusion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Strand-bias artifacts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fws_moimix_reconciliation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fws reconciliation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#whitelisting-regions-from-a-region-filter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Whitelisting regions from a region filter
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Whitelisting regions from a region filter">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#building-one-from-amino-acid-positions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Building one from amino-acid positions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ad-cleaning-and-re-genotyping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AD cleaning and re-genotyping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipeline
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Pipeline">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#turning-steps-on-and-off" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Turning steps on and off
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-a-sample-was-dropped" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why a sample was dropped
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#harmonization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Harmonization
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Harmonization">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#sites-one-cohort-never-called" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sites one cohort never called
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#strand-bias-artifacts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Strand-bias artifacts
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="vcf-filtering-harmonization">VCF filtering &amp; harmonization<a class="headerlink" href="#vcf-filtering-harmonization" title="Permanent link">&para;</a></h1>
+<p>Each step is a parameterized command backed by <code>bcftools</code>/<code>bedtools</code>, reporting
+before/after variant counts.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>plasgenomicsutils<span class="w"> </span>hard_qc_filter<span class="w"> </span>--input<span class="w"> </span><span class="k">in</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">01</span>.bcf<span class="w">            </span><span class="c1"># QD/MQ/SOR/RankSums, keep PASS</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>plasgenomicsutils<span class="w"> </span>singleton_filter_add_ads<span class="w"> </span>--input<span class="w"> </span><span class="m">01</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">02</span>.bcf<span class="w">  </span><span class="c1"># drop singletons, add FORMAT/ADS</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>plasgenomicsutils<span class="w"> </span>tandem_repeat_mask<span class="w"> </span>--input<span class="w"> </span><span class="m">02</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">03</span>.bcf<span class="w">        </span><span class="c1"># --bed defaults to builtin:pf3d7_tandem_repeats</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>plasgenomicsutils<span class="w"> </span>core_region_filter<span class="w">  </span>--input<span class="w"> </span><span class="m">03</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">04</span>.bcf<span class="w">       </span><span class="c1"># keep core genome</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>plasgenomicsutils<span class="w"> </span>paralog_mask<span class="w">        </span>--input<span class="w"> </span><span class="m">04</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">05</span>.bcf<span class="w">       </span><span class="c1"># drop paralog/multigene families (optional, see Pipeline)</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>plasgenomicsutils<span class="w"> </span>filter_ad_regenotype<span class="w"> </span>--input-vcf<span class="w"> </span><span class="m">05</span>.bcf<span class="w"> </span>--output-vcf<span class="w"> </span><span class="m">06</span>.bcf<span class="w">  </span><span class="c1"># clean low AD, re-genotype</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>plasgenomicsutils<span class="w"> </span>biallelic_snp_filter<span class="w"> </span>--input<span class="w"> </span><span class="m">06</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">07</span>.bcf<span class="w">      </span><span class="c1"># keep biallelic SNPs</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>plasgenomicsutils<span class="w"> </span>sample_coverage_filter<span class="w"> </span>--input<span class="w"> </span><span class="m">07</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">08</span>.bcf
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>plasgenomicsutils<span class="w"> </span>locus_missingness_filter<span class="w"> </span>--input<span class="w"> </span><span class="m">08</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">09</span>.bcf
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>plasgenomicsutils<span class="w"> </span>maf_filter<span class="w"> </span>--input<span class="w"> </span><span class="m">09</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">10</span>.bcf<span class="w"> </span>--maf-min<span class="w"> </span><span class="m">0</span>.02<span class="w"> </span>--maf-max<span class="w"> </span><span class="m">0</span>.98
+</code></pre></div>
+<p>Region masks (<code>tandem_repeat_mask</code>, <code>core_region_filter</code>, <code>paralog_mask</code>) take <code>--bed</code>,
+a plain path or a bundled asset via <code>builtin:&lt;name&gt;</code> (<code>pf3d7_core_regions</code>,
+<code>pf3d7_paralog_genes</code>, <code>pf3d7_tandem_repeats</code>).</p>
+<h3 id="whitelisting-regions-from-a-region-filter">Whitelisting regions from a region filter<a class="headerlink" href="#whitelisting-regions-from-a-region-filter" title="Permanent link">&para;</a></h3>
+<p>All three take <code>--keep-bed</code>: a BED of regions to keep whatever that filter says. Use it when a
+mask is right in general but wrong somewhere specific — a few positions inside a tandem repeat
+that are known to be real, or a gene the paralog list catches but you trust.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>plasgenomicsutils<span class="w"> </span>tandem_repeat_mask<span class="w"> </span>--input<span class="w"> </span><span class="m">02</span>.bcf<span class="w"> </span>--output<span class="w"> </span><span class="m">03</span>.bcf<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span>--keep-bed<span class="w"> </span>keep_these.bed
+</code></pre></div>
+<p>It is region-based, so one line covers a whole gene without enumerating its variants:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>Pf3D7_05_v3 958000  962200  pfmdr1        # every variant in the gene survives this filter
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>Pf3D7_07_v3 403623  403626  pfcrt-AA76    # or just one codon
+</code></pre></div>
+<p>Three things worth knowing:</p>
+<ul>
+<li><strong>This exempts a variant from that one rule only.</strong> Whitelisted variants still face every
+  other filter in the chain — QC, re-genotyping, coverage, MAF. It is not a "keep no matter
+  what" list.</li>
+<li><strong>The BED is 0-based half-open</strong>, like any BED, and unlike a VCF <code>POS</code>. Getting that wrong
+  shifts everything a base, so each filter reports how many variants the whitelist actually
+  rescued and warns when the answer is zero — a silent no-op is otherwise indistinguishable
+  from success.</li>
+<li><strong>A whitelisted region rescues whole records.</strong> Overlapping any part of a record is enough,
+  so a one-base entry keeps a variant whose <code>REF</code> is longer than one base (<code>bedtools</code> sizes a
+  record as <code>[POS-1, POS-1+len(REF))</code>, which reaches past a single position).</li>
+</ul>
+<p>In the pipeline config it is just another param:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"tandem_repeat_mask"</span><span class="p">,</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">"params"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"bed"</span><span class="p">:</span><span class="w"> </span><span class="s2">"builtin:pf3d7_tandem_repeats"</span><span class="p">,</span><span class="w"> </span><span class="nt">"keep_bed"</span><span class="p">:</span><span class="w"> </span><span class="s2">"keep_these.bed"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<h4 id="building-one-from-amino-acid-positions">Building one from amino-acid positions<a class="headerlink" href="#building-one-from-amino-acid-positions" title="Permanent link">&para;</a></h4>
+<p>Residue numbers are usually how these exceptions are known ("<em>pfpx1</em> 1701 and 1705 are fine").
+<code>aa_intervals()</code> in <code>plasgenomicsutilsR</code> converts them, and its default output is already
+0-based half-open — the BED convention — so it can be written straight out:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">cds</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nf">read_gff_cds</span><span class="p">(</span><span class="s">"PlasmoDB-68_Pfalciparum3D7.gff"</span><span class="p">)</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">codons</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nf">aa_intervals</span><span class="p">(</span><span class="nf">data.frame</span><span class="p">(</span><span class="n">transcript_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"pfpx1"</span><span class="p">,</span><span class="w"> </span><span class="n">aa_position</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nf">c</span><span class="p">(</span><span class="m">1701</span><span class="p">,</span><span class="w"> </span><span class="m">1705</span><span class="p">)),</span><span class="w"> </span><span class="n">cds</span><span class="p">)</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="nf">write.table</span><span class="p">(</span><span class="n">codons</span><span class="p">[,</span><span class="w"> </span><span class="nf">c</span><span class="p">(</span><span class="s">"chrom"</span><span class="p">,</span><span class="w"> </span><span class="s">"start"</span><span class="p">,</span><span class="w"> </span><span class="s">"end"</span><span class="p">,</span><span class="w"> </span><span class="s">"name"</span><span class="p">)],</span><span class="w"> </span><span class="s">"keep_these.bed"</span><span class="p">,</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">            </span><span class="n">sep</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"\t"</span><span class="p">,</span><span class="w"> </span><span class="n">quote</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">FALSE</span><span class="p">,</span><span class="w"> </span><span class="n">row.names</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">FALSE</span><span class="p">,</span><span class="w"> </span><span class="n">col.names</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">FALSE</span><span class="p">)</span>
+</code></pre></div>
+<p>Do not pass <code>one_based_output = TRUE</code> here — that is for numbers you quote in text, and would
+put every interval one base off. If a codon straddles an intron its <code>start</code>/<code>end</code> span the
+intron too (<code>spans_intron</code> flags it), which for a whitelist only means exempting a little more
+than the three bases; use <code>codon_positions</code> if you want exactly the coding bases.</p>
+<div class="admonition note">
+<p class="admonition-title">Step order depends on your input</p>
+<p>For an already-biallelic core-SNP callset the default order works. For a raw,
+multiallelic joint callset, run <code>biallelic_snp_filter</code> <strong>before</strong>
+<code>singleton_filter_add_ads</code> (whose <code>FORMAT/ADS</code> and the downstream MAF assume
+biallelic sites). MAF filtering is per-population — run once per cohort.</p>
+</div>
+<h2 id="ad-cleaning-and-re-genotyping">AD cleaning and re-genotyping<a class="headerlink" href="#ad-cleaning-and-re-genotyping" title="Permanent link">&para;</a></h2>
+<p><code>filter_ad_regenotype</code> judges depth by <code>AD</code>/<code>ADS</code> (not <code>DP</code>), zeros sub-threshold
+allele depths per sample, recomputes <code>ADS</code>, and re-genotypes conservatively: alleles
+are ranked by depth and a heterozygote is called only when the minor allele's
+within-sample frequency is ≥ <code>--het-min-af</code> (default 0.2). This preserves the
+mixed-infection signal Fws/COI analyses depend on. <code>--restrict-to-called-alleles</code>
+narrows the caller's existing genotypes instead of re-deriving from AD.</p>
+<p><strong>Ploidy.</strong> The default keeps the conventional diploid coding used for <em>Plasmodium</em>
+(<code>0/1</code> = mixed infection). <code>--ploidy {1,2}</code> sets it explicitly and is validated against
+the input ploidy per record: a value <strong>greater</strong> than the input errors (genotypes and
+likelihoods cannot be promoted), <strong>equal</strong> is fine, and <strong>less</strong> warns and trims. Use
+<code>--ploidy 1</code> for true haploid calls (the single best-supported allele).</p>
+<p><strong>Stale genotype-linked fields.</strong> Re-genotyping writes a fresh <code>GT</code>, so a caller's
+<code>Number=G</code> fields (<code>PL</code>/<code>GL</code>) from a different ploidy — e.g. a diploid <code>GT</code> forced over
+hexaploid calls — become inconsistent and would break
+<code>bcftools view --trim-alt-alleles</code>. <code>filter_ad_regenotype</code> blanks them to a consistent
+length automatically as it writes. For files that did <strong>not</strong> go through re-genotyping,
+<code>strip_stale_format</code> does the same on its own:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>plasgenomicsutils<span class="w"> </span>strip_stale_format<span class="w"> </span>--input<span class="w"> </span>calls.bcf<span class="w"> </span>--output<span class="w"> </span>clean.bcf<span class="w">            </span><span class="c1"># null only the inconsistent PL records (surgical, keeps valid ones)</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>plasgenomicsutils<span class="w"> </span>strip_stale_format<span class="w"> </span>--input<span class="w"> </span>calls.bcf<span class="w"> </span>--output<span class="w"> </span>clean.bcf<span class="w"> </span>--mode<span class="w"> </span>always<span class="w"> </span>--fields<span class="w"> </span>PL<span class="w"> </span>GL<span class="w">   </span><span class="c1"># drop the fields entirely</span>
+</code></pre></div>
+<p><code>biallelic_snp_filter</code> applies the same surgical fix before trimming, so the default
+chain never chokes on these fields.</p>
+<p><code>maf_filter</code> takes <code>--maf-min</code>/<code>--maf-max</code>; since the bounds are usually symmetric,
+<code>--maf-max</code> defaults to <code>1 - maf_min</code> when unset (so <code>maf_min = 0.02</code> gives a <code>[0.02, 0.98]</code>
+window). Set both for an asymmetric window.</p>
+<p><strong>Per-group MAF.</strong> With <code>--meta &lt;table.tsv&gt; --group-col country</code> (a per-sample metadata
+table with a <code>sample</code> column and the group column), a site is kept if its minor-allele
+frequency is ≥ <code>--maf-min</code> in <strong>any</strong> group. It is computed on the combined VCF — the
+per-group frequencies pick the <em>sites</em> to keep, then that union is applied back to the
+original, so <strong>every sample's genotypes are preserved</strong>. A carrier whose variant is below
+the threshold <em>within its own group</em> keeps its real <code>0/1</code>/<code>1/1</code> call whenever the site is
+kept via another group (and a <code>0/0</code> sample stays <code>0/0</code>) — there is no split-and-merge, so
+nothing is blanked. A variant that is rare in <em>every</em> group is dropped.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>plasgenomicsutils<span class="w"> </span>maf_filter<span class="w"> </span>--input<span class="w"> </span><span class="k">in</span>.bcf<span class="w"> </span>--output<span class="w"> </span>maf.bcf<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span>--maf-min<span class="w"> </span><span class="m">0</span>.02<span class="w"> </span>--meta<span class="w"> </span>samples.tsv<span class="w"> </span>--group-col<span class="w"> </span>country
+</code></pre></div>
+<h2 id="pipeline">Pipeline<a class="headerlink" href="#pipeline" title="Permanent link">&para;</a></h2>
+<p>Run an ordered, config-driven chain and tally counts per step:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>plasgenomicsutils<span class="w"> </span>filter_pipeline<span class="w"> </span>--emit-default-config<span class="w"> </span>pipeline.json
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>plasgenomicsutils<span class="w"> </span>filter_pipeline<span class="w"> </span>--input<span class="w"> </span><span class="k">in</span>.bcf<span class="w"> </span>--config<span class="w"> </span>pipeline.json<span class="w"> </span>--outdir<span class="w"> </span>filtered/
+</code></pre></div>
+<p>Each step writes <code>filtered/NN_&lt;name&gt;.bcf</code> (indexed) plus a <code>variant_counts.tsv</code> tally
+(<code>step</code>, <code>kind</code>, <code>count</code>, <code>path</code> — <code>kind</code> separates a filter's variant count from a report's
+row count and from a step that was switched off).</p>
+<h3 id="turning-steps-on-and-off">Turning steps on and off<a class="headerlink" href="#turning-steps-on-and-off" title="Permanent link">&para;</a></h3>
+<p>A step with <code>"enabled": false</code> stays in the config and out of the run. JSON has no comments,
+so that is how an optional step stays discoverable instead of being something you have to
+know exists:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"paralog_mask"</span><span class="p">,</span><span class="w"> </span><span class="nt">"enabled"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">  </span><span class="nt">"params"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"bed"</span><span class="p">:</span><span class="w"> </span><span class="s2">"builtin:pf3d7_paralog_genes"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p><strong><code>paralog_mask</code> ships off.</strong> <code>core_region_filter</code> has already removed the subtelomeric
+multigene families that mismap worst; most of what <code>paralog_mask</code> would take next sits in the
+core and is single-copy. Some of that genuinely misbehaves, but a lot of it is fine, and
+dropping all of it costs real signal — paralogy is not by itself evidence a locus is
+unusable. Set <code>"enabled": true</code> when mismapping is specifically what you are controlling for,
+or run the step standalone on the region you doubt.</p>
+<h3 id="why-a-sample-was-dropped">Why a sample was dropped<a class="headerlink" href="#why-a-sample-was-dropped" title="Permanent link">&para;</a></h3>
+<p><code>sample_coverage_filter</code> writes the coverage table its decision is read from, beside the step
+that produced it — <code>filtered/09_sample_coverage_filter_cov_info.tsv</code>:</p>
+<table>
+<thead>
+<tr>
+<th>sample</th>
+<th>n_loci</th>
+<th>n_covered</th>
+<th>frac_covered</th>
+<th>n_missing_ads</th>
+<th>mean_ads</th>
+<th>ads_min</th>
+<th>frac_min</th>
+<th>margin</th>
+<th>dropped</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RCN13010</td>
+<td>1901</td>
+<td>843</td>
+<td>0.443</td>
+<td>0</td>
+<td>15.64</td>
+<td>5</td>
+<td>0.5</td>
+<td>−0.057</td>
+<td>True</td>
+</tr>
+<tr>
+<td>RCN13048</td>
+<td>1901</td>
+<td>912</td>
+<td>0.480</td>
+<td>0</td>
+<td>57.26</td>
+<td>5</td>
+<td>0.5</td>
+<td>−0.020</td>
+<td>True</td>
+</tr>
+<tr>
+<td>RCN13065</td>
+<td>1901</td>
+<td>964</td>
+<td>0.507</td>
+<td>0</td>
+<td>32.15</td>
+<td>5</td>
+<td>0.5</td>
+<td>+0.007</td>
+<td>False</td>
+</tr>
+</tbody>
+</table>
+<p>Sorted worst-covered first, so a surprising drop is the first thing you read. <code>margin</code> is
+<code>frac_covered - frac_min</code>: negative means dropped, and near zero means the sample sat on the
+threshold rather than being obviously bad — <code>RCN13048</code> above missed by 0.02 while carrying a
+mean ADS of 57, i.e. deeply sequenced where it <em>is</em> covered and simply absent elsewhere.
+That is the distinction <code>mean_ads</code> and <code>n_missing_ads</code> exist to make, and it usually decides
+whether to lower <code>frac_min</code> or drop the sample. The same rows go to the console for anything
+dropped or within 0.05 of the threshold, and <code>--cov-table</code> writes them from the standalone
+command.</p>
+<p>The table is derived from the same counts as the keep/drop decision, so it always accounts for
+what happened rather than being a second measurement that might disagree.</p>
+<p>The final callset's <strong>SNP panel BED</strong> is written automatically next to the last step
+(<code>filtered/NN_&lt;last&gt;.snps.bed</code>) — this is the panel the IBD tools read, so it feeds straight
+into <code>build_ibd_matrix</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>plasgenomicsutils<span class="w"> </span>build_ibd_matrix<span class="w"> </span>--blocks<span class="w"> </span>hmmibd.tsv.gz<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span>--snps<span class="w"> </span>filtered/10_maf_filter.snps.bed<span class="w"> </span>--snp-format<span class="w"> </span>bed<span class="w"> </span>--output<span class="w"> </span>ibd_matrix.npz
+</code></pre></div>
+<p>The BED's <code>chrom:pos</code> name column matches the SNP ids you'd get from the VCF, so a panel
+taken as BED or VCF is interchangeable. Pass <code>--no-snp-bed</code> to skip it.</p>
+<h2 id="harmonization">Harmonization<a class="headerlink" href="#harmonization" title="Permanent link">&para;</a></h2>
+<p>Align the allele sets of separately-called cohorts before <code>bcftools merge</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>plasgenomicsutils<span class="w"> </span>harmonize_bcf<span class="w"> </span>--files<span class="w"> </span>cohortA.bcf<span class="w"> </span>cohortB.bcf<span class="w"> </span>cohortC.bcf<span class="w"> </span>--stub<span class="w"> </span>harmonized
+</code></pre></div>
+<p>It strips stale <code>Number=A/R/G</code> fields that a reshaped <code>AD</code> would otherwise break, builds
+the per-site ALT union, and re-genotypes only changed samples. Indel-context records are
+dropped by default (<code>--keep-indels</code> to disable).</p>
+<p>It reports what it did per file — records read, ALT alleles zeroed and removed, records
+reduced to ref-only, then records written, records that gained ALTs, and <strong>union sites absent
+from the file</strong>.</p>
+<h3 id="sites-one-cohort-never-called">Sites one cohort never called<a class="headerlink" href="#sites-one-cohort-never-called" title="Permanent link">&para;</a></h3>
+<p>That last count is the one to read. Harmonizing settles which <em>alleles</em> the files agree on, not
+which <em>sites</em> each one contains: a site only cohort A called is simply not written for cohort B.
+<code>bcftools merge</code> then fills B's samples there with a missing genotype <strong>and a missing
+<code>FORMAT/AD</code></strong>, whole-cohort at a time.</p>
+<p>That breaks any tool reading <code>AD</code> as an integer. hmmibd-rs stops at the first one with:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>Error: error in processing bcf file: BcfReaderError(NumericaValueEmptyInt)
+</code></pre></div>
+<p>To keep only the sites every cohort called:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>bcftools<span class="w"> </span>view<span class="w"> </span>-e<span class="w"> </span><span class="s1">'FMT/AD="."'</span><span class="w"> </span>merged.bcf<span class="w"> </span>-Ob<span class="w"> </span>-o<span class="w"> </span>merged.nomiss.bcf
+</code></pre></div>
+<p>Use <code>FMT/AD="."</code>, not <code>FMT/AD[0]="."</code> — indexing a <code>Number=R</code> field per sample does not test
+for a missing value and silently matches nothing. Note this is not the same as filtering on
+missing genotypes: plenty of sites carry genuine per-sample missing <code>GT</code> while <code>AD</code> is present,
+so <code>-i 'N_PASS(GT="mis")=0'</code> would throw away far more than necessary.</p>
+<p>The alternative, if you would rather keep those sites, is a caller that tolerates missing depth
+— <code>locus_missingness_filter</code> will trim them by missingness fraction, but any site absent from a
+whole cohort fails that too.</p>
+<h2 id="strand-bias-artifacts">Strand-bias artifacts<a class="headerlink" href="#strand-bias-artifacts" title="Permanent link">&para;</a></h2>
+<p>Illumina sequence-specific errors produce fake heterozygous calls whose ALT reads sit
+almost entirely on one strand. Scan a biallelic callset carrying per-strand depths and
+emit a blacklist BED (feed it to <code>tandem_repeat_mask --bed</code>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>bcftools<span class="w"> </span>mpileup<span class="w"> </span>-a<span class="w"> </span>FORMAT/ADF,FORMAT/ADR<span class="w"> </span>-f<span class="w"> </span>ref.fa<span class="w"> </span>-b<span class="w"> </span>bams.txt<span class="w"> </span>-Ou<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="w">  </span><span class="p">|</span><span class="w"> </span>bcftools<span class="w"> </span>norm<span class="w"> </span>-m-<span class="w"> </span>-f<span class="w"> </span>ref.fa<span class="w"> </span>-Ob<span class="w"> </span>-o<span class="w"> </span>strand.bcf
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>plasgenomicsutils<span class="w"> </span>strand_bias_scan<span class="w"> </span>--input-vcf<span class="w"> </span>strand.bcf<span class="w"> </span>--out-tsv<span class="w"> </span>verdicts.tsv<span class="w"> </span>--out-bed<span class="w"> </span>sse.bed
+</code></pre></div>
+<p>Characterize one site at read level (and optionally dump ALT reads):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>plasgenomicsutils<span class="w"> </span>strand_read_check<span class="w"> </span>--bam<span class="w"> </span>sample.bam<span class="w"> </span>--pos<span class="w"> </span>Pf3D7_12_v3:975431<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="w">  </span>--ref<span class="w"> </span>ref.fa<span class="w"> </span>--alt-base<span class="w"> </span>A<span class="w"> </span>--extract-reads
+</code></pre></div>
+<p>See <a href="../strand_bias_artifact_exclusion/">Strand-bias artifacts</a> for the detection rules.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "content.code.copy", "search.suggest", "search.highlight"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
