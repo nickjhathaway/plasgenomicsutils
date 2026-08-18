@@ -88,3 +88,38 @@ def test_every_command_has_help_and_a_description(cmd):
     body = out.split("options:")[0]
     body = re.sub(r"usage:.*?\n\n", "", body, flags=re.S)
     assert len(body.strip()) > 20, f"{cmd} has no description in its --help"
+
+
+# ---- every docs page is reachable from the site nav --------------------------------
+# `mkdocs build --strict` fails on a page that is in docs/ but not in `nav`, since the
+# config promotes omitted files to warnings. Catching it here means a new page is caught
+# when it is written rather than on the next CI run.
+
+def _nav_files(mkdocs_yml: str) -> set[str]:
+    """The *.md entries of the `nav:` block.
+
+    Read with a regex rather than a YAML parser so the guard has no dependency of its own
+    and runs wherever pytest does -- the nav is ours and is a flat list of `Title: page.md`.
+    """
+    lines = mkdocs_yml.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.rstrip() == "nav:")
+    out = set()
+    for line in lines[start + 1:]:
+        if line.strip() and not line.startswith((" ", "\t")):
+            break                                   # back to a top-level key
+        m = re.search(r"([\w.-]+\.md)\s*$", line)
+        if m:
+            out.add(m.group(1))
+    return out
+
+
+def test_every_docs_page_is_in_the_mkdocs_nav():
+    root = Path(__file__).resolve().parents[1]
+    in_nav = _nav_files((root / "mkdocs.yml").read_text())
+    on_disk = {p.name for p in (root / "docs").glob("*.md")}
+    missing = sorted(on_disk - in_nav)
+    assert not missing, (
+        f"docs/ pages absent from mkdocs.yml nav (mkdocs --strict fails on these): "
+        f"{', '.join(missing)}")
+    stale = sorted(in_nav - on_disk)
+    assert not stale, f"mkdocs.yml nav points at pages that do not exist: {', '.join(stale)}"

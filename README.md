@@ -464,6 +464,21 @@ pip install -e ".[dev]"
 pytest
 ```
 
+`scripts/check.sh` runs everything CI runs — `pytest` and `mkdocs build --strict` — so a
+pull request does not have to be the thing that tells you a docs page is unreachable or a
+documented flag no longer exists:
+
+```bash
+scripts/check.sh          # the full set, about the time pytest takes
+scripts/check.sh --fast   # docs + contract checks only, a couple of seconds
+```
+
+`--fast` is the loop between edits: it runs the contract tests (every command in
+`docs/commands.md`, every documented flag real, every docs page in the mkdocs nav) and the
+strict site build, which is where most CI failures come from. The strict build needs
+`pip install -r docs/requirements.txt`; without it that step says so and is skipped rather
+than silently passing.
+
 ## License
 
 GPL-3.
