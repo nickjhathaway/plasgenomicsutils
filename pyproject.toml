@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "plasgenomicsutils"
-version = "0.2.3"
+version = "0.2.4"
 description = "A collection of utilities for post processing Plasmodium genomics data (VCF filtering/harmonization, IBD post-analysis, Fws)."
 readme = "README.md"
 requires-python = ">=3.10"
