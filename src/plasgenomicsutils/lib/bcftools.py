@@ -22,6 +22,22 @@ def format_tags(path: str) -> set[str]:
     return set(re.findall(r"^##FORMAT=<ID=([^,>]+)", proc.stdout, flags=re.M))
 
 
+def info_tags(path: str) -> set[str]:
+    """The INFO tag IDs defined in a VCF/BCF header (e.g. ``{"DP", "RPBZ", "FS"}``)."""
+    require("bcftools")
+    proc = subprocess.run(["bcftools", "view", "-h", str(path)],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return set(re.findall(r"^##INFO=<ID=([^,>]+)", proc.stdout, flags=re.M))
+
+
+def sample_names(path: str) -> list[str]:
+    """The sample names in a VCF/BCF, in file order."""
+    require("bcftools")
+    proc = subprocess.run(["bcftools", "query", "-l", str(path)],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return proc.stdout.split()
+
+
 def require(*tools: str) -> None:
     """Raise unless every named external tool is on PATH."""
     missing = [t for t in tools if shutil.which(t) is None]
@@ -72,6 +88,18 @@ def index_vcf(path: str) -> None:
         sh(f"bcftools index -f {q(path)}", tools=("bcftools",))
     except SystemExit:
         pass
+
+
+def count_variants_matching(path: str, expr: str) -> int:
+    """Number of records satisfying a bcftools filtering expression."""
+    require("bcftools")
+    proc = subprocess.run(f"bcftools view -H -i {q(expr)} {q(path)} | wc -l",
+                          shell=True, executable="/bin/bash", stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(f"ERROR: could not count variants in {path}")
+    return int(proc.stdout.strip())
 
 
 def count_variants(path: str) -> int:

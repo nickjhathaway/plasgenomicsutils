@@ -38,8 +38,10 @@ from .scripts.cov.depth_stats import depth_stats
 from .scripts.cov.dropout_regions import dropout_regions
 
 # -- VCF leaves ---------------------------------------------------------------
+from .scripts.vcf.call_variants import call_variants
 from .scripts.vcf.filter_ad_regenotype import filter_ad_regenotype
 from .scripts.vcf.harmonize_bcf import harmonize_bcf
+from .scripts.vcf.no_alt_filter import no_alt_filter
 from .scripts.vcf.hard_qc_filter import hard_qc_filter
 from .scripts.vcf.singleton_filter_add_ads import singleton_filter_add_ads
 from .scripts.vcf.singleton_counts import singleton_counts
@@ -96,10 +98,14 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Regions below depth in nearly every sample (sWGA amplification dropouts)"),
     },
     "vcf": {
+        "call_variants": Command(call_variants,
+            "Call variants with bcftools, annotated for hard_qc_filter, parallel over regions"),
         "filter_ad_regenotype": Command(filter_ad_regenotype,
             "Clean within-sample AD artifacts by depth/frequency, then re-genotype"),
         "harmonize_bcf": Command(harmonize_bcf,
             "Harmonize ALT sets of separately-called cohorts for bcftools merge"),
+        "no_alt_filter": Command(no_alt_filter,
+            "Drop records with no ALT allele (non-variant positions), counted separately"),
         "hard_qc_filter": Command(hard_qc_filter,
             "GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS"),
         "singleton_filter_add_ads": Command(singleton_filter_add_ads,

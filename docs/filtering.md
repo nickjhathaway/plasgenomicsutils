@@ -20,6 +20,142 @@ Region masks (`tandem_repeat_mask`, `core_region_filter`, `paralog_mask`) take `
 a plain path or a bundled asset via `builtin:<name>` (`pf3d7_core_regions`,
 `pf3d7_paralog_genes`, `pf3d7_tandem_repeats`).
 
+## Non-variant records come first
+
+Calling a region list reports every position in it, so a callset carries a record wherever
+a sample is simply reference (`ALT` is `.`). `no_alt_filter` removes those in their own
+step, before any QC rule, so `variant_counts.tsv` keeps the two reasons apart — how many
+positions had nothing to call, and how many real variants failed quality:
+
+```
+  input                      437
+  no_alt_filter              275     <- 162 positions were non-variant
+  hard_qc_filter             175     <- 100 variants failed QC
+```
+
+**This is not cosmetic: the bias statistics are computed whether or not an ALT was
+called.** A non-variant record still carries `FS`, `RPBZ`, `MQBZ` and the rest, describing
+the non-reference reads that were present but not called — so a hard QC rule removes
+non-variant records on its own, and without this step those removals are silently mixed in
+with the failing variants. On a real 400-position region list, QC took out 41 of 162
+non-variant records: 31 for strand bias, 22 for read position, a few for mapping quality.
+
+Those are positions where non-reference evidence exists but is biased enough that no ALT
+was called — arguably where a reference call is least safe. `--keep-no-alts` (or
+`"params": {"keep": true}`) passes them through instead, for a fill-in workflow where
+"this sample is reference here" is the answer being sought; they are counted either way.
+In the default chain the end result is the same, since `biallelic_snp_filter` drops
+non-variant records later regardless — what changes is where they go and what the counts
+tell you.
+
+## Hard QC on a bcftools callset
+
+`hard_qc_filter` defaults to GATK's metrics — `QD`, `MQ`, `SOR`, `MQRankSum`,
+`ReadPosRankSum` — none of which a `bcftools mpileup | bcftools call` VCF contains.
+`--caller bcftools` asks the same questions of the tags bcftools writes instead:
+
+| the question | GATK | bcftools |
+|---|---|---|
+| is the variant only on one strand? | `SOR > 3`, `FS > 60` | `FS < 1e-6` |
+| does the variant sit at the ends of reads? | `ReadPosRankSum < -5` | `abs(RPBZ) > 5`, `abs(SCBZ) > 5` |
+| are the reads carrying it poorly mapped? | `MQRankSum < -5`, `MQ < 55` | `abs(MQBZ) > 5`, `abs(MQSBZ) > 5`, `MQ < 55` |
+| is the call weak for its depth? | `QD < 20` | `QUAL/INFO/DP` (off by default — see below) |
+| — | — | `abs(BQBZ)`, `MQ0F` (optional extras) |
+
+```bash
+plasgenomicsutils hard_qc_filter --caller bcftools --input in.bcf --output 01.bcf
+```
+
+As a pipeline step, `caller` is written into `--emit-default-config` at its default so it
+is discoverable rather than something you have to know exists:
+
+```json
+{"name": "hard_qc_filter", "params": {"caller": "bcftools"}}
+```
+
+**Two of these are not straight renames**, and getting either backwards silently keeps the
+records it should drop:
+
+* **bcftools `FS` is the p-value itself**, where GATK's is Phred-scaled. So the test is
+  `FS <` a small number, not `FS >` a large one. The default 1e-6 is exactly what GATK's
+  `FS > 60` says, written the other way round.
+* **The `*BZ` tags are two-sided.** GATK's rank sums are signed so that one direction is
+  the artifact, and the usual filter is one-sided; bcftools documents its z-scores as
+  "closer to 0 is better", and a variant stacked at read ends turns up as either sign, so
+  these are tested on `abs()`.
+
+**`QD` does not carry across.** bcftools QUAL is not on GATK's scale — a clean 40x site
+called at QUAL 222 has `QUAL/DP` of 5.6, so reusing GATK's `QD < 20` would throw away a
+good callset. It is therefore off by default under `--caller bcftools`; pass `--qd` to set
+it on a scale you have checked. Every threshold takes `none` to switch that test off.
+
+### Calling so the tags are there
+
+`call_variants` runs `bcftools mpileup | bcftools call` asking for exactly what the filter
+reads, so the two cannot drift apart:
+
+```bash
+plasgenomicsutils call_variants --ref Pf3D7.fasta --bam-list bams.txt \
+  --regions crt_region_snps.bed --threads 8 --output crt_snps.bcf
+```
+
+**`--threads` splits the region list, it does not thread bcftools.** `bcftools mpileup
+--threads` only parallelises compression; the pileup itself is one core, so the way to use
+a machine is a job per chunk of regions. With `--threads 8` a 400-region list is split into
+8 chunks of 50, called concurrently, then indexed and `bcftools concat`-ed back into one
+file. `--chunk-size` sets a fixed size instead, which evens out uneven regions at the cost
+of more jobs. Without `--regions` there is nothing to split and it runs a single job.
+
+Splitting is not quite bit-for-bit, and it is worth knowing how. The same positions come
+out, with the same genotypes, depths, allele depths and bias statistics; **QUAL can move by
+a few points at a handful of records** — indels, and the odd SNP beside one — because
+mpileup derives indel likelihoods and BAQ from the reads around a position, and which
+neighbours share a chunk changes with the split. That is `bcftools mpileup -R` itself, not
+this wrapper: cutting a region file in half by hand and concatenating reproduces it exactly.
+Nothing downstream here reads QUAL, but a QUAL cutoff of your own is the one thing affected.
+
+Calling emits **all sites in the regions**, not just variants, since a region list is
+usually a list of positions to fill in and a reference call there is the answer. Pass
+`--variants-only` for whole-genome calling.
+
+Chunks keep the extension of the file they came from, because **bcftools reads the
+coordinate convention off it** — a `.bed` is 0-based half-open, anything else is 1-based
+`CHROM POS`. Splitting a `.bed` into extensionless pieces would silently shift every region
+by one base.
+
+**Samples are named after their files.** One BAM per sample is the usual arrangement, so
+`--ignore-RG` is on by default: each alignment is one sample whatever its read groups say.
+bcftools then names each sample after the *path* it was given, so the last step renames
+them to the file name with `--sample-suffix` removed -- `.bam` by default:
+
+| BAM | default | `--sample-suffix .sorted.dup.pf.bam` |
+|---|---|---|
+| `/tank/wgs/17017-227227.sorted.dup.pf.bam` | `17017-227227.sorted.dup.pf` | `17017-227227` |
+
+Pass the whole trailing part you want gone. A suffix that would leave two samples with the
+same name is an error, raised **before** any calling starts rather than after an hour of
+it. `--no-ignore-rg` reads names from the RG `SM` tags instead, and `--no-rename-samples`
+keeps the path-derived names. `--dry-run` prints the commands without running them.
+
+The equivalent by hand, if you would rather drive it yourself — most of what the filter
+reads is written by default, but `FS`, `ADF`/`ADR` and `SCR` have to be asked for:
+
+```bash
+bcftools mpileup -f REF.fa \
+  -a FORMAT/AD,FORMAT/ADF,FORMAT/ADR,FORMAT/DP,FORMAT/SP,FORMAT/SCR,INFO/AD,INFO/ADF,INFO/ADR,INFO/FS,INFO/SCR \
+  IN.bam -Ou | bcftools call -m -Ob -o OUT.bcf   # add -v for variants only
+```
+
+`RPBZ`, `SCBZ`, `MQBZ`, `MQSBZ`, `BQBZ`, `MQ0F`, `MQ` and `DP` come out of `mpileup`
+anyway and cannot be requested explicitly. If a callset is missing what a threshold reads,
+the step **stops and names the tags** rather than running: a bcftools comparison against an
+absent tag is simply false, so the filter would otherwise keep every record and report
+nothing wrong.
+
+`ADF`/`ADR` are worth having beyond this step — they are what
+[`strand_bias_scan`](commands.md) reads to flag SSE fake-het artifacts per site, and
+`FORMAT/SP` is the per-sample version of the same question.
+
 ### Whitelisting regions from a region filter
 
 All three take `--keep-bed`: a BED of regions to keep whatever that filter says. Use it when a

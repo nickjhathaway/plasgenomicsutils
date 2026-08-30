@@ -42,8 +42,10 @@ plasgenomicsutils <command> -h     # options for one command
 
 | Command | Description |
 |---|---|
+| `call_variants` | Call variants with bcftools, annotated for `hard_qc_filter`, parallel over regions |
 | `filter_ad_regenotype` | Clean within-sample AD artifacts by depth/frequency, then re-genotype |
 | `harmonize_bcf` | Harmonize ALT sets of separately-called cohorts for `bcftools merge` |
+| `no_alt_filter` | Drop records with no ALT allele (non-variant positions), counted separately |
 | `hard_qc_filter` | GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS |
 | `singleton_filter_add_ads` | Drop near-private variants and add the `FORMAT/ADS` summed-depth tag |
 | `singleton_counts` | Per-sample count of variants where it is the only non-reference carrier |
