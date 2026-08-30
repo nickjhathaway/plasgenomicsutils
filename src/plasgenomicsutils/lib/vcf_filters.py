@@ -10,34 +10,195 @@ import csv
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections import defaultdict
 
 from ..utils.small_utils import Utils
-from .bcftools import (count_variants, format_tags, index_vcf, out_flag, q, require,
-                       sh)
+from .bcftools import (count_variants, count_variants_matching, format_tags, index_vcf,
+                       info_tags, out_flag, q, require, sh)
 from .strip_format import GENOTYPE_LINKED_FORMAT, strip_stale_format
 
 
-def hard_qc_filter(inp: str, out: str, *, qd: float = 20, mq: float = 55,
-                   sor: float = 3, mqranksum: float = -5.0,
+#: What `bcftools mpileup` has to be asked for so a callset carries everything the
+#: ``caller="bcftools"`` filter reads. The rest of the tags it uses (RPBZ, MQBZ, MQSBZ,
+#: BQBZ, SCBZ, MQ0F, MQ, DP) are emitted by default and cannot be requested explicitly.
+BCFTOOLS_MPILEUP_ANNOTATIONS = (
+    "FORMAT/AD,FORMAT/ADF,FORMAT/ADR,FORMAT/DP,FORMAT/SP,FORMAT/SCR,"
+    "INFO/AD,INFO/ADF,INFO/ADR,INFO/FS,INFO/SCR"
+)
+
+#: What `bcftools mpileup` writes whether asked to or not -- these cannot be requested
+#: explicitly (it rejects them in -a), so a check that the filter's tags are obtainable has
+#: to know about them. MQ and DP are always present.
+BCFTOOLS_MPILEUP_DEFAULT_TAGS = frozenset({
+    "BQBZ", "IDV", "IMF", "MQ0F", "MQBZ", "MQSBZ", "RPBZ", "SCBZ", "SGB", "VDB",
+    "MQ", "DP",
+})
+
+#: The call that produces such a callset, quoted back at anyone whose input lacks the tags.
+BCFTOOLS_CALL_RECIPE = (
+    f"bcftools mpileup -f REF.fa -a {BCFTOOLS_MPILEUP_ANNOTATIONS} IN.bam -Ou \\\n"
+    "    | bcftools call -m -Ob -o OUT.bcf        # or: plasgenomicsutils call_variants"
+)
+
+
+def _bcftools_qc_expr(*, qd, mq, strand_bias_p, max_bias_z, read_pos_z, mq0f, bqbz_z):
+    """The bcftools-native mirror of the GATK hard filter, as a bcftools -e expression.
+
+    Each GATK metric has a counterpart in what `bcftools mpileup` writes, but two of them
+    do not carry over naively:
+
+    * GATK ``FS`` is Phred-scaled and rises with bias; **bcftools ``FS`` is the p-value
+      itself**, so the test is ``FS <`` a small number rather than ``FS >`` a large one.
+      (Phred 60, GATK's usual cutoff, is p = 1e-6 -- the same statement either way.)
+    * GATK's rank-sum filters are one-sided, because the sign says which way the alt
+      allele leans. The bcftools ``*BZ`` tags are documented as "closer to 0 is better",
+      and a read-position artifact shows up as either sign, so they are tested on
+      ``abs()``.
+
+    ``DP`` is written as ``INFO/DP`` deliberately: a bare ``DP`` in a bcftools expression
+    resolves to ``FORMAT/DP`` where both exist, which silently changes what is filtered.
+    """
+    parts = []
+    if qd is not None:
+        parts.append(f"QUAL/INFO/DP < {qd}")
+    if mq is not None:
+        parts.append(f"MQ < {mq}")
+    if strand_bias_p is not None:                       # strand bias, Fisher p-value
+        parts.append(f'(FS!="." && FS < {strand_bias_p})')
+    if read_pos_z is not None:                          # the alt sits near the read ends
+        parts.append(f'(RPBZ!="." && abs(RPBZ) > {read_pos_z})')
+        parts.append(f'(SCBZ!="." && abs(SCBZ) > {read_pos_z})')
+    if max_bias_z is not None:                          # mapping quality, and vs strand
+        parts.append(f'(MQBZ!="." && abs(MQBZ) > {max_bias_z})')
+        parts.append(f'(MQSBZ!="." && abs(MQSBZ) > {max_bias_z})')
+    if bqbz_z is not None:
+        parts.append(f'(BQBZ!="." && abs(BQBZ) > {bqbz_z})')
+    if mq0f is not None:
+        parts.append(f'(MQ0F!="." && MQ0F > {mq0f})')
+    if not parts:
+        raise SystemExit("hard_qc_filter: every bcftools threshold was disabled, so this "
+                         "step would keep every record; drop it from the chain instead")
+    return " || ".join(parts)
+
+
+#: INFO tags each bcftools-mode threshold reads, so a missing one is named rather than
+#: silently never matching -- a bcftools comparison against an absent tag is just false.
+_BCFTOOLS_QC_NEEDS = {
+    "qd": ("DP",), "strand_bias_p": ("FS",), "read_pos_z": ("RPBZ", "SCBZ"),
+    "max_bias_z": ("MQBZ", "MQSBZ"), "bqbz_z": ("BQBZ",), "mq0f": ("MQ0F",),
+    "mq": ("MQ",),
+}
+
+
+def _check_bcftools_qc_tags(inp: str, wanted: dict) -> None:
+    have = info_tags(inp)
+    missing = sorted({t for k, v in wanted.items() if v is not None
+                      for t in _BCFTOOLS_QC_NEEDS[k] if t not in have})
+    if not missing:
+        return
+    raise SystemExit(
+        "hard_qc_filter --caller bcftools: this callset has no INFO/"
+        + ", INFO/".join(missing) + ".\n"
+        "  A comparison against a tag that is not there is simply false, so the filter "
+        "would keep\n  everything and say nothing. Call with the annotations it needs:\n\n"
+        f"    {BCFTOOLS_CALL_RECIPE}\n\n"
+        "  ...or disable the thresholds that read the missing tags."
+    )
+
+
+def no_alt_filter(inp: str, out: str, *, keep: bool = False,
+                  keep_bed: str | None = None) -> int:
+    """Drop records with no ALT allele, i.e. positions that turned out non-variant.
+
+    Calling a list of positions (``bcftools call`` without ``-v``) reports every one of
+    them, so a callset over a region list carries a record wherever a sample is simply
+    reference. Removing them in their own step rather than letting a QC rule do it keeps
+    the two reasons apart in ``variant_counts.tsv``: how many positions had nothing to
+    call, and how many real variants failed quality.
+
+    It matters because **the bias statistics are computed whether or not an ALT was
+    called**. A non-variant record still carries FS, RPBZ, MQBZ and the rest, describing
+    the non-reference reads that were there but not called -- so a hard QC filter does
+    remove non-variant records, and on a real region list it removed a quarter of them.
+    Those are positions where the non-reference evidence is strand- or end-biased enough
+    that no ALT was called, which is arguably where a reference call is least safe; either
+    way, deciding it here rather than as a side effect is the point.
+
+    ``keep`` passes them through, for a fill-in workflow where "this sample is reference
+    here" is the answer being sought. The count is reported either way.
+    """
+    n_no_alt = count_variants_matching(inp, 'ALT="."')
+    fmt = out_flag(out)
+    verb = "kept" if keep else "dropped"
+    sys.stderr.write(f"NOTE: {n_no_alt} record(s) have no ALT allele ({verb})\n")
+    if keep:
+        sh(f"bcftools view {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        return 0
+    expr = 'ALT="."'
+    if not keep_bed:
+        sh(f"bcftools view -e {q(expr)} {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        return 0
+    prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    try:
+        shutil.copyfile(inp, prep)
+        sh(f"bcftools view -e {q(expr)} {q(prep)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        return _rescue_whitelisted(prep, out, keep_bed, "no_alt_filter")
+    finally:
+        if os.path.exists(prep):
+            os.unlink(prep)
+
+
+def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None | str = "auto",
+                   mq: float | None = 55, sor: float = 3, mqranksum: float = -5.0,
                    readposranksum: float = -5.0, fs: float | None = None,
-                   keep_bed: str | None = None) -> int:
-    """GATK-style hard filter on INFO metrics; keep records still flagged PASS.
+                   strand_bias_p: float | None = 1e-6, read_pos_z: float | None = 5.0,
+                   max_bias_z: float | None = 5.0, bqbz_z: float | None = None,
+                   mq0f: float | None = None, keep_bed: str | None = None) -> int:
+    """Hard filter on INFO metrics; keep records still flagged PASS.
+
+    ``caller="gatk"`` (the default) filters on QD / MQ / SOR / MQRankSum / ReadPosRankSum,
+    which is what GATK writes. ``caller="bcftools"`` filters on the counterparts
+    `bcftools mpileup` writes -- see :func:`_bcftools_qc_expr` for what maps to what, and
+    where the mapping is not a straight rename.
+
+    ``qd="auto"`` resolves per caller: 20 for GATK, and **off** for bcftools, whose QUAL is
+    not on the same scale -- a 40x site called at QUAL 222 has QUAL/DP of 5.6, so carrying
+    GATK's 20 across would discard a perfectly good callset. Pass a number to set it
+    anyway, or ``None`` to switch it off.
+
+    The GATK-only thresholds (``sor``, ``mqranksum``, ``readposranksum``, ``fs``) are
+    ignored in bcftools mode, and the bcftools-only ones in GATK mode; each set names tags
+    the other caller does not write.
 
     ``keep_bed`` whitelists regions from this rule; a rescued record keeps its ``FAIL``
     FILTER, so a variant kept despite failing QC still says that it failed.
     """
-    parts = [
-        f"QD < {qd}",
-        f"MQ < {mq}",
-        f"SOR > {sor}",
-        f'(MQRankSum!="." && MQRankSum < {mqranksum})',
-        f'(ReadPosRankSum!="." && ReadPosRankSum < {readposranksum})',
-    ]
-    if fs is not None:
-        parts.append(f"FS > {fs}")
-    expr = " || ".join(parts)
+    if caller not in ("gatk", "bcftools"):
+        raise SystemExit(f"hard_qc_filter: caller must be gatk or bcftools, not {caller!r}")
+    # "auto" means "whatever suits this caller": QD 20 is GATK's, and QUAL/DP on bcftools
+    # output is not the same quantity, so it is left off there rather than reused.
+    if qd == "auto":
+        qd = 20.0 if caller == "gatk" else None
+
+    if caller == "bcftools":
+        thresholds = dict(qd=qd, mq=mq, strand_bias_p=strand_bias_p,
+                          read_pos_z=read_pos_z, max_bias_z=max_bias_z, bqbz_z=bqbz_z,
+                          mq0f=mq0f)
+        _check_bcftools_qc_tags(inp, thresholds)
+        expr = _bcftools_qc_expr(**thresholds)
+    else:
+        parts = [
+            f"QD < {qd}",
+            f"MQ < {mq}",
+            f"SOR > {sor}",
+            f'(MQRankSum!="." && MQRankSum < {mqranksum})',
+            f'(ReadPosRankSum!="." && ReadPosRankSum < {readposranksum})',
+        ]
+        if fs is not None:
+            parts.append(f"FS > {fs}")
+        expr = " || ".join(parts)
     fmt = out_flag(out)
     if not keep_bed:
         sh(f"bcftools filter -m + -s FAIL -e {q(expr)} {q(inp)} -Ou "

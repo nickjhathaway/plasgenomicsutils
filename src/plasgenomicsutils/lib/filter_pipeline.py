@@ -84,6 +84,7 @@ def _sample_coverage(inp, out, **kw):
 
 # name -> callable(input_path, output_path, **params)
 STEPS = {
+    "no_alt_filter": _whitelisted(F.no_alt_filter, "no_alt_filter"),
     "hard_qc_filter": _whitelisted(F.hard_qc_filter, "hard_qc_filter"),
     "singleton_filter_add_ads": _whitelisted(F.singleton_add_ads, "singleton_filter_add_ads"),
     "tandem_repeat_mask": _region(F.tandem_repeat_mask),
@@ -124,7 +125,7 @@ def _singleton_report(inp, out, **kw):
 #: rather than filtering it on quality (``biallelic_snp_filter`` -- letting a whitelisted
 #: multiallelic record through would break every downstream reader's assumption).
 WHITELISTABLE = {
-    "hard_qc_filter", "singleton_filter_add_ads", "tandem_repeat_mask",
+    "no_alt_filter", "hard_qc_filter", "singleton_filter_add_ads", "tandem_repeat_mask",
     "core_region_filter", "paralog_mask", "locus_missingness_filter", "maf_filter",
 }
 
@@ -146,7 +147,14 @@ DEFAULT_CONFIG = {
     # remove is exactly the thing worth keeping. A step's own params.keep_bed overrides it.
     "keep_bed": None,
     "steps": [
-        {"name": "hard_qc_filter"},
+        # Non-variant records first, and in their own step: the bias statistics are
+        # computed whether or not an ALT was called, so hard_qc_filter does remove them --
+        # counting them separately keeps "nothing to call here" apart from "failed QC".
+        {"name": "no_alt_filter", "params": {"keep": False}},
+        # `caller` is written out at its default for the same reason as keep_bed: a
+        # bcftools callset carries none of GATK's metrics, and "bcftools" here is what
+        # makes this step read the ones it does carry (FS/RPBZ/SCBZ/MQBZ/MQSBZ).
+        {"name": "hard_qc_filter", "params": {"caller": "gatk"}},
         # before singleton_filter_add_ads, which removes what this counts
         {"name": "singleton_counts", "report": True, "ext": "tsv",
          "params": {"min_depth": 5, "max_missing_frac": 0.2}},
