@@ -194,7 +194,9 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
     A top-level ``"keep_bed"`` in the config is a whitelist for the whole chain: every step
     in :data:`WHITELISTABLE` keeps the variants it covers, so a resistance locus survives the
     run without being written into each step. A step's own ``params.keep_bed`` overrides it,
-    and ``"keep_bed": null`` in a step's params opts that step out.
+    and ``"keep_bed": null`` in a step's params opts that step out. A whitelist that rescues
+    nothing is warned about once for the run rather than at each step, since a step with
+    nothing to rescue is the normal case and most steps are that.
     """
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -202,51 +204,54 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
     tally = [{"step": "input", "path": input_path, "variants": count_variants(input_path)}]
     prev = input_path
     seen: list[str] = []
-    for i, step in enumerate(config["steps"], start=1):
-        name = step["name"]
-        ext = step.get("ext", "bcf")
-        params = dict(step.get("params", {}))
-        if (config.get("keep_bed") and name in WHITELISTABLE
-                and "keep_bed" not in params):
-            params["keep_bed"] = config["keep_bed"]
-        out_path = str(out / f"{i:02d}_{name}.{ext}")
+    # One "the whitelist rescued nothing" warning for the run, not one per step: most
+    # steps have nothing for a whitelist to do, and saying so each time reads as an error.
+    with F.deferred_whitelist_warnings():
+        for i, step in enumerate(config["steps"], start=1):
+            name = step["name"]
+            ext = step.get("ext", "bcf")
+            params = dict(step.get("params", {}))
+            if (config.get("keep_bed") and name in WHITELISTABLE
+                    and "keep_bed" not in params):
+                params["keep_bed"] = config["keep_bed"]
+            out_path = str(out / f"{i:02d}_{name}.{ext}")
 
-        # `"enabled": false` keeps a step in the config, and out of the run. That is how an
-        # optional step stays discoverable -- JSON has no comments, so a step you would
-        # otherwise have to know about is written down with the switch off.
-        if step.get("enabled", True) is False:
-            print(f"[{i:02d}] {name} -- skipped (\"enabled\": false)")
-            tally.append({"step": name, "skipped": True})
-            continue
+            # `"enabled": false` keeps a step in the config, and out of the run. That is how an
+            # optional step stays discoverable -- JSON has no comments, so a step you would
+            # otherwise have to know about is written down with the switch off.
+            if step.get("enabled", True) is False:
+                print(f"[{i:02d}] {name} -- skipped (\"enabled\": false)")
+                tally.append({"step": name, "skipped": True})
+                continue
 
-        if step.get("report"):
-            if name not in REPORTS:
-                raise SystemExit(f"ERROR: unknown pipeline report '{name}'. "
-                                 f"Known: {', '.join(REPORTS)}")
-            if name == "singleton_counts" and "singleton_filter_add_ads" in seen:
-                print(f"[{i:02d}] WARNING: singleton_counts runs after "
-                      f"singleton_filter_add_ads, which drops the variants it counts -- "
-                      f"every sample will score zero. Move it earlier.")
-            print(f"[{i:02d}] {name} (report) -> {out_path}")
-            n = REPORTS[name](prev, out_path, **params)
-            tally.append({"step": name, "path": out_path, "report": True, "rows": n})
+            if step.get("report"):
+                if name not in REPORTS:
+                    raise SystemExit(f"ERROR: unknown pipeline report '{name}'. "
+                                     f"Known: {', '.join(REPORTS)}")
+                if name == "singleton_counts" and "singleton_filter_add_ads" in seen:
+                    print(f"[{i:02d}] WARNING: singleton_counts runs after "
+                          f"singleton_filter_add_ads, which drops the variants it counts -- "
+                          f"every sample will score zero. Move it earlier.")
+                print(f"[{i:02d}] {name} (report) -> {out_path}")
+                n = REPORTS[name](prev, out_path, **params)
+                tally.append({"step": name, "path": out_path, "report": True, "rows": n})
+                seen.append(name)
+                continue                       # the callset is unchanged
+
+            if name not in STEPS:
+                raise SystemExit(f"ERROR: unknown pipeline step '{name}'. "
+                                 f"Known: {', '.join(STEPS)}")
+            print(f"[{i:02d}] {name} -> {out_path}")
+            rescued = STEPS[name](prev, out_path, **params)
             seen.append(name)
-            continue                       # the callset is unchanged
-
-        if name not in STEPS:
-            raise SystemExit(f"ERROR: unknown pipeline step '{name}'. "
-                             f"Known: {', '.join(STEPS)}")
-        print(f"[{i:02d}] {name} -> {out_path}")
-        rescued = STEPS[name](prev, out_path, **params)
-        seen.append(name)
-        index_vcf(out_path)   # keep intermediates indexed (quiets pysam, enables region queries)
-        n = count_variants(out_path)
-        row = {"step": name, "path": out_path, "variants": n}
-        if isinstance(rescued, int) and rescued > 0:
-            row["rescued"] = rescued
-        tally.append(row)
-        print(f"     variants: {n:,}")
-        prev = out_path
+            index_vcf(out_path)   # keep intermediates indexed (quiets pysam, enables region queries)
+            n = count_variants(out_path)
+            row = {"step": name, "path": out_path, "variants": n}
+            if isinstance(rescued, int) and rescued > 0:
+                row["rescued"] = rescued
+            tally.append(row)
+            print(f"     variants: {n:,}")
+            prev = out_path
 
     if emit_snp_bed and len(tally) > 1:
         bed_path = str(out / (Path(prev).stem + ".snps.bed"))

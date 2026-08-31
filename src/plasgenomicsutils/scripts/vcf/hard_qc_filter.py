@@ -26,8 +26,8 @@ def get_parser_hard_qc_filter() -> argparse.ArgumentParser:
         description="Hard filter on the caller's own QC metrics, keeping PASS. "
                     "--caller gatk (default) reads QD/MQ/SOR/MQRankSum/ReadPosRankSum; "
                     "--caller bcftools reads what bcftools mpileup writes instead "
-                    "(FS/RPBZ/SCBZ/MQBZ/MQSBZ), which is the same set of questions asked "
-                    "of a bcftools callset.",
+                    "(RPBZ/SCBZ/MQBZ/MQSBZ, and SOR computed from ADF/ADR), which is the "
+                    "same set of questions asked of a bcftools callset.",
         epilog="A bcftools callset needs the right annotations to filter on:\n\n    "
                + BCFTOOLS_CALL_RECIPE + "\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -42,7 +42,11 @@ def get_parser_hard_qc_filter() -> argparse.ArgumentParser:
                         "the same scale; 'none' switches it off.")
     p.add_argument("--mq", type=_threshold, default=55.0,
                    help="Drop MQ < this (default: 55; 'none' to switch off)")
-    p.add_argument("--sor", type=float, default=3.0, help="Drop SOR > this (default: 3)")
+    p.add_argument("--sor", type=_threshold, default=3.0,
+                   help="Strand bias, in both modes: drop SOR > this (default: 3, GATK's "
+                        "own cutoff). GATK writes SOR; for a bcftools callset it is "
+                        "computed from INFO/ADF and INFO/ADR, so the threshold means the "
+                        "same thing either way. 'none' switches it off.")
     p.add_argument("--mqranksum", type=float, default=-5.0, help="Drop MQRankSum < this (default: -5)")
     p.add_argument("--readposranksum", type=float, default=-5.0,
                    help="Drop ReadPosRankSum < this (default: -5)")
@@ -51,13 +55,18 @@ def get_parser_hard_qc_filter() -> argparse.ArgumentParser:
 
     b = p.add_argument_group(
         "bcftools metrics (--caller bcftools)",
-        "The mirror of the GATK thresholds above. Note two are not straight renames: "
-        "bcftools FS is the strand-bias p-value itself, so the test is 'below' a small "
-        "number rather than 'above' a large one (Phred 60 is p=1e-6, the same statement); "
-        "and the *BZ tags are two-sided, since a read-position artifact leans either way.")
-    b.add_argument("--strand-bias-p", type=_threshold, default=1e-6,
-                   help="Strand bias: drop INFO/FS below this p-value (default: 1e-6, "
-                        "the p-value GATK's FS > 60 corresponds to)")
+        "The mirror of the GATK thresholds above. Strand bias is --sor in both modes; "
+        "these are the rest. Note the *BZ tags are two-sided, since a read-position "
+        "artifact leans either way, and that they are test statistics: a z-score grows "
+        "with the reads pooled across samples, so a cutoff that suits 20 samples is "
+        "stricter at 400.")
+    b.add_argument("--strand-bias-p", type=_threshold, default="auto",
+                   help="Strand bias as a significance test instead: drop INFO/FS below "
+                        "this p-value. Off by default ('auto'), because FS is a p-value "
+                        "pooled over every sample -- at a few hundred samples it rejects "
+                        "sites with no meaningful skew, and under ~1e-38 it saturates at "
+                        "0.0 in the file's 32-bit float. Use --sor. 1e-6 is what GATK's "
+                        "FS > 60 corresponds to, if you want it anyway.")
     b.add_argument("--read-pos-z", type=_threshold, default=5.0,
                    help="Variants sitting at the ends of reads: drop |RPBZ| or |SCBZ| "
                         "above this (default: 5, mirroring ReadPosRankSum < -5)")

@@ -122,3 +122,41 @@ def test_a_step_opts_out_of_the_pipeline_wide_whitelist(tmp_path):
     tally = P.run_pipeline(inp, str(tmp_path / "run"), cfg, emit_snp_bed=False)
     last = [r for r in tally if r["step"] == "maf_filter"][0]
     assert "resistance" not in _ids(last["path"])
+
+
+def test_a_whitelist_that_works_somewhere_does_not_warn_anywhere(tmp_path, capsys):
+    """The warning is a verdict on the run, not on each step: over a chain, most steps have
+    nothing for a whitelist to do, and saying so at every one reads as a misconfiguration."""
+    inp, keep = _wl_vcf(tmp_path)
+    cfg = {"keep_bed": keep,
+           "steps": [{"name": "no_alt_filter"},          # nothing here to rescue
+                     {"name": "hard_qc_filter"}]}        # rescues the resistance variant
+    tally = P.run_pipeline(inp, str(tmp_path / "run"), cfg, emit_snp_bed=False)
+    steps = {r["step"]: r for r in tally if r["step"] != "input"}
+    assert not steps["no_alt_filter"].get("rescued")
+    assert steps["hard_qc_filter"]["rescued"] == 1
+    assert "rescued nothing" not in capsys.readouterr().out
+
+
+def test_a_whitelist_that_matches_nothing_warns_once_for_the_whole_run(tmp_path, capsys):
+    inp, _ = _wl_vcf(tmp_path)
+    bad = tmp_path / "bad.bed"
+    bad.write_text("nosuchchrom\t1\t2\n")
+    cfg = {"keep_bed": str(bad),
+           "steps": [{"name": "no_alt_filter"},
+                     {"name": "hard_qc_filter"},
+                     {"name": "maf_filter", "params": {"maf_min": 0.05}}]}
+    P.run_pipeline(inp, str(tmp_path / "run"), cfg, emit_snp_bed=False)
+    out = capsys.readouterr().out
+    assert out.count("rescued nothing") == 1
+    assert "3 step(s)" in out
+
+
+def test_a_single_filter_run_on_its_own_still_warns_immediately(tmp_path, capsys):
+    """Outside a pipeline there is no later step to redeem it, so the warning is the same
+    verdict, reported where it happens."""
+    inp, _ = _wl_vcf(tmp_path)
+    bad = tmp_path / "bad.bed"
+    bad.write_text("nosuchchrom\t1\t2\n")
+    F.hard_qc_filter(inp, str(tmp_path / "o.bcf"), keep_bed=str(bad))
+    assert "rescued nothing" in capsys.readouterr().out

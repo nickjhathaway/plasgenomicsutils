@@ -56,7 +56,7 @@ tell you.
 
 | the question | GATK | bcftools |
 |---|---|---|
-| is the variant only on one strand? | `SOR > 3`, `FS > 60` | `FS < 1e-6` |
+| is the variant only on one strand? | `SOR > 3` | `SOR > 3`, computed from `ADF`/`ADR` |
 | does the variant sit at the ends of reads? | `ReadPosRankSum < -5` | `abs(RPBZ) > 5`, `abs(SCBZ) > 5` |
 | are the reads carrying it poorly mapped? | `MQRankSum < -5`, `MQ < 55` | `abs(MQBZ) > 5`, `abs(MQSBZ) > 5`, `MQ < 55` |
 | is the call weak for its depth? | `QD < 20` | `QUAL/INFO/DP` (off by default — see below) |
@@ -73,16 +73,35 @@ is discoverable rather than something you have to know exists:
 {"name": "hard_qc_filter", "params": {"caller": "bcftools"}}
 ```
 
-**Two of these are not straight renames**, and getting either backwards silently keeps the
-records it should drop:
+**The `*BZ` tags are two-sided**, and getting that backwards silently keeps the records it
+should drop. GATK's rank sums are signed so that one direction is the artifact, and the
+usual filter is one-sided; bcftools documents its z-scores as "closer to 0 is better", and
+a variant stacked at read ends turns up as either sign, so these are tested on `abs()`.
 
-* **bcftools `FS` is the p-value itself**, where GATK's is Phred-scaled. So the test is
-  `FS <` a small number, not `FS >` a large one. The default 1e-6 is exactly what GATK's
-  `FS > 60` says, written the other way round.
-* **The `*BZ` tags are two-sided.** GATK's rank sums are signed so that one direction is
-  the artifact, and the usual filter is one-sided; bcftools documents its z-scores as
-  "closer to 0 is better", and a variant stacked at read ends turns up as either sign, so
-  these are tested on `abs()`.
+### Strand bias is measured, not tested
+
+bcftools writes `FS`, a Fisher p-value for strand bias — but a p-value answers *am I sure
+there is a skew*, and that answer turns yes for any skew at all once enough reads are
+pooled. `FS` is computed over every sample at once, so a fixed cutoff means something
+different in a callset of 20 samples than in one of 400: the same site, called from the
+same reads, moves toward the cutoff purely because more samples carry it.
+
+So the strand-bias test is `SOR`, GATK's strand odds ratio, which measures **how big** the
+skew is and does not move when a cohort grows. bcftools writes no `SOR`, so it is computed
+from the 2×2 table in `INFO/ADF` and `INFO/ADR` and compared at the same `> 3` GATK uses —
+one threshold that means the same thing in either mode.
+
+`--strand-bias-p` adds `FS` back if you want a significance test as well. Two things to
+know before relying on it: at a few hundred samples it rejects sites with no meaningful
+skew at all, and `INFO/FS` is a 32-bit float, so any p below about `1e-38` is stored as
+exactly `0.0` — a genuinely one-strand artifact and a merely deep site become the same
+number in the file.
+
+The same caution applies in kind, though not in degree, to the `*BZ` tags: a Mann-Whitney
+z-score also grows with the reads behind it, so a `--read-pos-z` that suits a small cohort
+is a stricter filter on a large one. There is no effect-size form of those tags in a
+bcftools callset; if a large cohort starts failing on `RPBZ` where a small one did not,
+that is the reason to check before widening the threshold.
 
 **`QD` does not carry across.** bcftools QUAL is not on GATK's scale — a clean 40x site
 called at QUAL 222 has `QUAL/DP` of 5.6, so reusing GATK's `QD < 20` would throw away a

@@ -6,7 +6,9 @@ building blocks can be run individually or chained by ``filter_pipeline``.
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import math
 import os
 import shutil
 import subprocess
@@ -43,7 +45,43 @@ BCFTOOLS_CALL_RECIPE = (
 )
 
 
-def _bcftools_qc_expr(*, qd, mq, strand_bias_p, max_bias_z, read_pos_z, mq0f, bqbz_z):
+def _sor_from_ad_expr(threshold: float) -> str:
+    """``SOR > threshold`` written out of INFO/ADF and INFO/ADR, since bcftools writes no SOR.
+
+    GATK's StrandOddsRatio on the 2x2 table of ref/alt by forward/reverse, with the +1
+    pseudocount, is::
+
+        R    = (refFwd/refRev) * (altRev/altFwd)
+        SOR  = ln(R + 1/R) + ln(min/max of the ref pair) - ln(min/max of the alt pair)
+
+    which is an **effect size**: scale every count by the same factor and it does not move.
+    That is the whole reason to compute it rather than read ``FS``. ``FS`` is a p-value, so
+    it answers "am I sure there is a skew" -- a question whose answer is always yes once a
+    cohort is large enough, because significance grows with the reads pooled across samples
+    while the skew itself stays put.
+
+    bcftools has no logarithm, so the comparison is exponentiated and cross-multiplied into
+    integer arithmetic, which is exact and cannot overflow at any plausible depth::
+
+        (A^2 + B^2) * min(ref) * max(alt)  >  e^threshold * A * B * max(ref) * min(alt)
+
+    with ``A = refFwd*altRev``, ``B = refRev*altFwd``. ``min``/``max`` of a pair come from
+    ``(a+b-|a-b|)`` and ``(a+b+|a-b|)``; their halves cancel between the two sides.
+
+    ``INFO/`` is spelled out on every tag: a bare ``ADF`` is ambiguous where FORMAT/ADF also
+    exists, and bcftools refuses the expression rather than guessing. Only the first ALT is
+    tested, which is what the biallelic callsets this chain produces contain.
+    """
+    ref_f, ref_r = "(INFO/ADF[0]+1)", "(INFO/ADR[0]+1)"
+    alt_f, alt_r = "(INFO/ADF[1]+1)", "(INFO/ADR[1]+1)"
+    a, b = f"({ref_f}*{alt_r})", f"({ref_r}*{alt_f})"
+    lo = lambda x, y: f"({x}+{y}-abs({x}-{y}))"       # noqa: E731 - 2x min(x, y)
+    hi = lambda x, y: f"({x}+{y}+abs({x}-{y}))"       # noqa: E731 - 2x max(x, y)
+    return (f"(N_ALT>0 && ({a}*{a}+{b}*{b})*{lo(ref_f, ref_r)}*{hi(alt_f, alt_r)} > "
+            f"{math.exp(threshold):.10g}*{a}*{b}*{hi(ref_f, ref_r)}*{lo(alt_f, alt_r)})")
+
+
+def _bcftools_qc_expr(*, qd, mq, sor, strand_bias_p, max_bias_z, read_pos_z, mq0f, bqbz_z):
     """The bcftools-native mirror of the GATK hard filter, as a bcftools -e expression.
 
     Each GATK metric has a counterpart in what `bcftools mpileup` writes, but two of them
@@ -52,6 +90,9 @@ def _bcftools_qc_expr(*, qd, mq, strand_bias_p, max_bias_z, read_pos_z, mq0f, bq
     * GATK ``FS`` is Phred-scaled and rises with bias; **bcftools ``FS`` is the p-value
       itself**, so the test is ``FS <`` a small number rather than ``FS >`` a large one.
       (Phred 60, GATK's usual cutoff, is p = 1e-6 -- the same statement either way.)
+      Both are p-values, and both therefore measure the cohort as much as the site, which
+      is why ``sor`` and not ``strand_bias_p`` is the strand-bias test on by default --
+      see :func:`_sor_from_ad_expr`.
     * GATK's rank-sum filters are one-sided, because the sign says which way the alt
       allele leans. The bcftools ``*BZ`` tags are documented as "closer to 0 is better",
       and a read-position artifact shows up as either sign, so they are tested on
@@ -65,6 +106,8 @@ def _bcftools_qc_expr(*, qd, mq, strand_bias_p, max_bias_z, read_pos_z, mq0f, bq
         parts.append(f"QUAL/INFO/DP < {qd}")
     if mq is not None:
         parts.append(f"MQ < {mq}")
+    if sor is not None:                                 # strand bias, as an effect size
+        parts.append(_sor_from_ad_expr(sor))
     if strand_bias_p is not None:                       # strand bias, Fisher p-value
         parts.append(f'(FS!="." && FS < {strand_bias_p})')
     if read_pos_z is not None:                          # the alt sits near the read ends
@@ -87,6 +130,7 @@ def _bcftools_qc_expr(*, qd, mq, strand_bias_p, max_bias_z, read_pos_z, mq0f, bq
 #: silently never matching -- a bcftools comparison against an absent tag is just false.
 _BCFTOOLS_QC_NEEDS = {
     "qd": ("DP",), "strand_bias_p": ("FS",), "read_pos_z": ("RPBZ", "SCBZ"),
+    "sor": ("ADF", "ADR"),
     "max_bias_z": ("MQBZ", "MQSBZ"), "bqbz_z": ("BQBZ",), "mq0f": ("MQ0F",),
     "mq": ("MQ",),
 }
@@ -94,13 +138,22 @@ _BCFTOOLS_QC_NEEDS = {
 
 def _check_bcftools_qc_tags(inp: str, wanted: dict) -> None:
     have = info_tags(inp)
-    missing = sorted({t for k, v in wanted.items() if v is not None
-                      for t in _BCFTOOLS_QC_NEEDS[k] if t not in have})
+    missing = defaultdict(set)
+    for k, v in wanted.items():
+        if v is None:
+            continue
+        for t in _BCFTOOLS_QC_NEEDS[k]:
+            if t not in have:
+                missing[t].add("--" + k.replace("_", "-"))
     if not missing:
         return
+    # naming the threshold beside the tag, since which flag to reach for is the next
+    # question and the mapping from tag to flag is not obvious from either end
+    named = ", ".join(f"INFO/{t} (read by {', '.join(sorted(f))})"
+                      for t, f in sorted(missing.items()))
     raise SystemExit(
-        "hard_qc_filter --caller bcftools: this callset has no INFO/"
-        + ", INFO/".join(missing) + ".\n"
+        "hard_qc_filter --caller bcftools: this callset has no "
+        + named + ".\n"
         "  A comparison against a tag that is not there is simply false, so the filter "
         "would keep\n  everything and say nothing. Call with the annotations it needs:\n\n"
         f"    {BCFTOOLS_CALL_RECIPE}\n\n"
@@ -151,9 +204,9 @@ def no_alt_filter(inp: str, out: str, *, keep: bool = False,
 
 
 def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None | str = "auto",
-                   mq: float | None = 55, sor: float = 3, mqranksum: float = -5.0,
+                   mq: float | None = 55, sor: float | None = 3, mqranksum: float = -5.0,
                    readposranksum: float = -5.0, fs: float | None = None,
-                   strand_bias_p: float | None = 1e-6, read_pos_z: float | None = 5.0,
+                   strand_bias_p: float | None | str = "auto", read_pos_z: float | None = 5.0,
                    max_bias_z: float | None = 5.0, bqbz_z: float | None = None,
                    mq0f: float | None = None, keep_bed: str | None = None) -> int:
     """Hard filter on INFO metrics; keep records still flagged PASS.
@@ -168,6 +221,13 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
     GATK's 20 across would discard a perfectly good callset. Pass a number to set it
     anyway, or ``None`` to switch it off.
 
+    ``sor`` is the strand-bias test in **both** modes and means the same thing in both: GATK
+    writes SOR, and for a bcftools callset it is computed from ``INFO/ADF``/``INFO/ADR`` (see
+    :func:`_sor_from_ad_expr`), so the threshold carries across unchanged. ``strand_bias_p``
+    tests bcftools' ``FS`` instead and is ``"auto"`` -- meaning off -- because a fixed
+    p-value cutoff gets stricter as a cohort grows while the skew it is meant to detect does
+    not. Set it to a number to add it back.
+
     The GATK-only thresholds (``sor``, ``mqranksum``, ``readposranksum``, ``fs``) are
     ignored in bcftools mode, and the bcftools-only ones in GATK mode; each set names tags
     the other caller does not write.
@@ -181,9 +241,14 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
     # output is not the same quantity, so it is left off there rather than reused.
     if qd == "auto":
         qd = 20.0 if caller == "gatk" else None
+    # FS is off by default for the reason given in _sor_from_ad_expr: it is a p-value, so
+    # a fixed cutoff tightens as a cohort grows, and `sor` asks the same question of the
+    # skew itself. Pass a number to switch it back on.
+    if strand_bias_p == "auto":
+        strand_bias_p = None
 
     if caller == "bcftools":
-        thresholds = dict(qd=qd, mq=mq, strand_bias_p=strand_bias_p,
+        thresholds = dict(qd=qd, mq=mq, sor=sor, strand_bias_p=strand_bias_p,
                           read_pos_z=read_pos_z, max_bias_z=max_bias_z, bqbz_z=bqbz_z,
                           mq0f=mq0f)
         _check_bcftools_qc_tags(inp, thresholds)
@@ -286,6 +351,60 @@ def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True) -> None:
 
 
 
+class _WhitelistTally:
+    """Whether a whitelist has done anything yet, so "it rescued nothing" can be a verdict.
+
+    A whitelist that matches nothing -- wrong contig names, or 1-based positions written into a
+    BED -- is worth flagging, since it is otherwise indistinguishable from one that worked. A
+    whitelist that simply had nothing to do at one particular step is not: over a chain of
+    filters most steps are that, and warning at each of them reads as a misconfiguration.
+    """
+
+    def __init__(self) -> None:
+        self.deferring = False
+        self.rescued = 0
+        self.misses: list[str] = []
+
+
+_WHITELIST = _WhitelistTally()
+
+
+@contextlib.contextmanager
+def deferred_whitelist_warnings():
+    """Hold the "rescued nothing" warning until the end of a chain of filters.
+
+    Inside this, a step that rescues nothing is recorded rather than reported, and the warning
+    is printed once on the way out -- only if no step in the whole run rescued anything, which
+    is the case it was written for.
+    """
+    prev = (_WHITELIST.deferring, _WHITELIST.rescued, _WHITELIST.misses)
+    _WHITELIST.deferring, _WHITELIST.rescued, _WHITELIST.misses = True, 0, []
+    try:
+        yield _WHITELIST
+    finally:
+        if not _WHITELIST.rescued and _WHITELIST.misses:
+            steps = ", ".join(_WHITELIST.misses)
+            print(f"\nWARNING: the whitelist rescued nothing -- no variant it covers would "
+                  f"have been dropped by any of the {len(_WHITELIST.misses)} step(s) it "
+                  f"applies to ({steps}). Check the contig names, and that its positions are "
+                  f"0-based half-open like any BED.")
+        _WHITELIST.deferring, _WHITELIST.rescued, _WHITELIST.misses = prev
+
+
+def _note_whitelist(label: str, keep_bed: str, n: int, dropped_by: str) -> None:
+    """Report what the whitelist did at one step: kept variants now, misses at the end."""
+    _WHITELIST.rescued += n
+    if n:
+        print(f"     {label}: {n:,} variant(s) kept by the whitelist that {dropped_by} "
+              f"would have dropped")
+    elif _WHITELIST.deferring:
+        _WHITELIST.misses.append(label)
+    else:
+        print(f"     {label}: WARNING the whitelist {keep_bed} rescued nothing -- no variant "
+              f"it covers would have been dropped here. Check the contig names, and that its "
+              f"positions are 0-based half-open like any BED.")
+
+
 def _rescue_whitelisted(prepared: str, out: str, keep_bed: str | None, label: str) -> int:
     """Add back the whitelisted records a just-run filter dropped. Returns how many.
 
@@ -324,12 +443,7 @@ def _rescue_whitelisted(prepared: str, out: str, keep_bed: str | None, label: st
             index_vcf(resc)
             sh(f"bcftools concat -a {q(kept)} {q(resc)} -Ou "
                f"| bcftools sort -O{fmt} -o {q(out)}", tools=("bcftools",))
-            print(f"     {label}: {n:,} variant(s) kept by the whitelist that this filter "
-                  f"would have dropped")
-        else:
-            print(f"     {label}: WARNING the whitelist {keep_bed} rescued nothing -- no "
-                  f"variant it covers would have been dropped here. Check the contig names, "
-                  f"and that its positions are 0-based half-open like any BED.")
+        _note_whitelist(label, keep_bed, n, "this filter")
         return n
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -412,7 +526,8 @@ def region_filter(inp: str, out: str, *, bed: str, exclude: bool,
 
     Returns the number of variants the whitelist rescued, and says so, since a whitelist that
     matches nothing (wrong contig name, or 1-based positions written into a 0-based BED) is
-    otherwise indistinguishable from one that worked.
+    otherwise indistinguishable from one that worked. Rescuing nothing *here* is only worth a
+    warning if nothing was rescued anywhere -- see :func:`deferred_whitelist_warnings`.
     """
     fmt = out_flag(out)
     v = "-v " if exclude else ""
@@ -420,13 +535,7 @@ def region_filter(inp: str, out: str, *, bed: str, exclude: bool,
     try:
         if keep_bed:
             eff_bed, rescued = _effective_region_bed(inp, bed, keep_bed, exclude)
-            if rescued:
-                print(f"     {label}: {rescued:,} variant(s) kept by the whitelist that the "
-                      f"region rule would have dropped")
-            else:
-                print(f"     {label}: WARNING the whitelist {keep_bed} rescued nothing -- "
-                      f"no variant it covers would have been dropped here. Check the contig "
-                      f"names, and that its positions are 0-based half-open like any BED.")
+            _note_whitelist(label, keep_bed, rescued, "the region rule")
         sh(f"bcftools view {q(inp)} "
            f"| bedtools intersect {v}-header -a stdin -b {q(eff_bed)} "
            f"| bcftools view -O{fmt} -o {q(out)}", tools=("bcftools", "bedtools"))
