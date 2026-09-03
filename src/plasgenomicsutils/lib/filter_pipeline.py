@@ -82,6 +82,18 @@ def _sample_coverage(inp, out, **kw):
     return dropped
 
 
+def _fws(inp, out, **kw):
+    """Keep the monoclonal samples, leaving the Fws table that explains each drop."""
+    from .fws import fws_filter
+
+    kw.setdefault("fws_table_path", _sidecar(out, "fws.tsv"))
+    dropped = fws_filter(inp, out, **kw)
+    print(f"     dropped {len(dropped)} polyclonal/unscored sample(s)"
+          + (f": {', '.join(dropped)}" if dropped else "")
+          + f"\n     Fws table -> {kw['fws_table_path']}")
+    return dropped
+
+
 # name -> callable(input_path, output_path, **params)
 STEPS = {
     "no_alt_filter": _whitelisted(F.no_alt_filter, "no_alt_filter"),
@@ -94,6 +106,7 @@ STEPS = {
     "strip_stale_format": lambda inp, out, **kw: strip_stale_format(inp, out, **kw),
     "biallelic_snp_filter": F.biallelic_snp_filter,
     "sample_coverage_filter": lambda inp, out, **kw: _sample_coverage(inp, out, **kw),
+    "fws_filter": _fws,
     "locus_missingness_filter": _whitelisted(F.locus_missingness_filter,
                                              "locus_missingness_filter"),
     "maf_filter": _whitelisted(F.maf_filter, "maf_filter"),
@@ -173,6 +186,12 @@ DEFAULT_CONFIG = {
         {"name": "sample_coverage_filter"},
         {"name": "locus_missingness_filter"},
         {"name": "maf_filter", "params": {"maf_min": 0.02}},  # maf_max defaults to 1 - maf_min
+        # Keeping only monoclonal infections is an analysis choice, not a QC rule -- it
+        # changes which infections the callset describes -- so it is written out switched
+        # off rather than left undiscoverable. It drops samples and no variants; a site the
+        # survivors no longer support is still there, which is why re-running maf_filter and
+        # locus_missingness_filter after it is worth doing when the frequencies matter.
+        {"name": "fws_filter", "enabled": False, "params": {"fws_min": 0.95}},
     ]
 }
 

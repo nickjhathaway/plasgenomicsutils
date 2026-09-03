@@ -40,6 +40,7 @@ from .scripts.cov.dropout_regions import dropout_regions
 # -- VCF leaves ---------------------------------------------------------------
 from .scripts.vcf.call_variants import call_variants
 from .scripts.vcf.filter_ad_regenotype import filter_ad_regenotype
+from .scripts.vcf.fws_filter import fws_filter
 from .scripts.vcf.harmonize_bcf import harmonize_bcf
 from .scripts.vcf.no_alt_filter import no_alt_filter
 from .scripts.vcf.hard_qc_filter import hard_qc_filter
@@ -56,6 +57,8 @@ from .scripts.vcf.locus_missingness_filter import locus_missingness_filter
 from .scripts.vcf.maf_filter import maf_filter
 from .scripts.vcf.filter_pipeline import filter_pipeline
 from .scripts.vcf.strand_bias_scan import strand_bias_scan
+from .scripts.vcf.variant_spacing import variant_spacing
+from .scripts.vcf.vcf_to_bed import vcf_to_bed
 from .scripts.vcf.strand_read_check import strand_read_check
 
 
@@ -97,43 +100,59 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
         "coverage_dropout_regions": Command(dropout_regions,
             "Regions below depth in nearly every sample (sWGA amplification dropouts)"),
     },
+    # Working with a callset itself: making one, merging one, converting one.
     "vcf": {
         "call_variants": Command(call_variants,
             "Call variants with bcftools, annotated for hard_qc_filter, parallel over regions"),
-        "filter_ad_regenotype": Command(filter_ad_regenotype,
-            "Clean within-sample AD artifacts by depth/frequency, then re-genotype"),
         "harmonize_bcf": Command(harmonize_bcf,
             "Harmonize ALT sets of separately-called cohorts for bcftools merge"),
+        "vcf_to_bed": Command(vcf_to_bed,
+            "Convert a VCF/BCF to 0-based BED (stdout by default)"),
+    },
+    # The filtering chain: the runner, then its steps **in the order the default
+    # config runs them** rather than alphabetically -- the order is the point, and a
+    # step reads differently depending on what has already happened. Every one is also
+    # a standalone command.
+    "vcf_filter_pipeline": {
+        "filter_pipeline": Command(filter_pipeline,
+            "Run an ordered, config-driven chain of filtering steps, tallying counts"),
         "no_alt_filter": Command(no_alt_filter,
             "Drop records with no ALT allele (non-variant positions), counted separately"),
         "hard_qc_filter": Command(hard_qc_filter,
             "GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS"),
         "singleton_filter_add_ads": Command(singleton_filter_add_ads,
             "Drop near-private variants and add the FORMAT/ADS summed-depth tag"),
-        "biallelic_snp_filter": Command(biallelic_snp_filter,
-            "Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping"),
-        "strip_stale_format": Command(strip_stale_format,
-            "Strip stale genotype-linked FORMAT fields (e.g. PL) that no longer match the genotypes"),
         "tandem_repeat_mask": Command(tandem_repeat_mask,
             "Remove variants overlapping a tandem-repeat BED"),
         "core_region_filter": Command(core_region_filter,
             "Keep only variants inside the core-genome BED"),
         "paralog_mask": Command(paralog_mask,
             "Remove variants overlapping paralogous/multigene-family genes"),
+        "filter_ad_regenotype": Command(filter_ad_regenotype,
+            "Clean within-sample AD artifacts by depth/frequency, then re-genotype"),
+        "biallelic_snp_filter": Command(biallelic_snp_filter,
+            "Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping"),
         "sample_coverage_filter": Command(sample_coverage_filter,
             "Drop low-coverage samples; refresh AC/AN/AF"),
         "locus_missingness_filter": Command(locus_missingness_filter,
             "Keep loci with low missingness and high per-sample coverage"),
         "maf_filter": Command(maf_filter,
             "Keep variants within a minor-allele-frequency window"),
-        "filter_pipeline": Command(filter_pipeline,
-            "Run an ordered, config-driven chain of filtering steps, tallying counts"),
+        "fws_filter": Command(fws_filter,
+            "Keep only monoclonal samples (Fws >= a threshold); refresh AC/AN/AF"),
+        "strip_stale_format": Command(strip_stale_format,
+            "Strip stale genotype-linked FORMAT fields (e.g. PL) that no longer match the genotypes"),
+    },
+    # Reads a callset and writes a table; never changes the data.
+    "vcf_reporting": {
         "singleton_counts": Command(singleton_counts,
             "Per-sample count of variants where it is the only non-reference carrier"),
         "strand_bias_scan": Command(strand_bias_scan,
             "Flag strand-bias (SSE) fake-het artifacts from FORMAT/ADF+ADR; emit a blacklist BED"),
         "strand_read_check": Command(strand_read_check,
             "Read-level strand-bias diagnostic at one site (+ optional ALT-read extraction)"),
+        "variant_spacing": Command(variant_spacing,
+            "Per-chromosome gaps between consecutive variants, and density per cM"),
         "wsaf_profile": Command(wsaf_profile,
             "Per-sample: is there a dominant clone, and what --min-freq reduces the sample to it"),
     },

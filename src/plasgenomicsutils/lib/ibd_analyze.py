@@ -100,11 +100,26 @@ def annotate_pairs_with_groups(pair_summary, meta, group_col="group") -> pd.Data
     silently disappearing would shrink the denominator of every fraction computed from
     this frame.
     """
-    meta_idx = meta.set_index("sample")[group_col].to_dict()
+    # both sides as strings: a numeric-looking id is still an id, and metadata read as
+    # int64 would match none of the string labels the matrix carries
+    meta_idx = {str(k): v for k, v in meta.set_index("sample")[group_col].to_dict().items()}
     pair_summary = pair_summary.copy()
-    pair_summary["group1"] = pair_summary["sample1"].map(meta_idx).fillna("unknown")
-    pair_summary["group2"] = pair_summary["sample2"].map(meta_idx).fillna("unknown")
+    for col, out in (("sample1", "group1"), ("sample2", "group2")):
+        pair_summary[out] = pair_summary[col].astype(str).map(meta_idx).fillna("unknown")
     pair_summary["same_group"] = pair_summary["group1"] == pair_summary["group2"]
+
+    # Nothing matching is not a result, it is a mismatched metadata file -- and without
+    # this the run completes, writes every output, and reports no groups at all.
+    known = (pair_summary["group1"] != "unknown") | (pair_summary["group2"] != "unknown")
+    if not known.any():
+        ex_pairs = pair_summary["sample1"].astype(str).head(3).tolist()
+        ex_meta = [str(k) for k in list(meta_idx)[:3]]
+        print(f"  WARNING: no sample in the metadata matches one in the matrix, so every "
+              f"pair is 'unknown' and no group can be formed.\n"
+              f"    ids in the matrix:   {', '.join(ex_pairs)}\n"
+              f"    ids in the metadata: {', '.join(ex_meta)}\n"
+              f"    Check that the metadata's 'sample' column holds the same ids as the "
+              f"callset the matrix was built from.")
     return pair_summary
 
 

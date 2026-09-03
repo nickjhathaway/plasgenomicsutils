@@ -102,9 +102,11 @@ def test_paralog_masking_is_off_by_default_but_present_to_turn_on():
     step = next(s for s in DEFAULT_CONFIG["steps"] if s["name"] == "paralog_mask")
     assert step["enabled"] is False              # discoverable, not silently absent
     assert step["params"]["bed"] == "builtin:pf3d7_paralog_genes"
-    # every other step runs
-    assert all(s.get("enabled", True) for s in DEFAULT_CONFIG["steps"]
-               if s["name"] != "paralog_mask")
+    # exactly two steps ship switched off, and both for a stated reason: paralog masking is
+    # a choice about which regions to trust, and fws_filter changes which infections the
+    # callset describes. Anything else arriving here off is a mistake, not a default.
+    off = {s["name"] for s in DEFAULT_CONFIG["steps"] if s.get("enabled", True) is False}
+    assert off == {"paralog_mask", "fws_filter"}
 
 
 def test_the_default_config_still_masks_tandem_repeats_and_keeps_the_core():

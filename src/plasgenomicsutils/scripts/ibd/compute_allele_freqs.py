@@ -64,9 +64,9 @@ def compute_allele_freqs():
     sample_to_group = None
     if args.meta:
         sep = Utils.resolve_delim(args.meta_file_separator)
-        meta = Utils.normalise_columns(pd.read_csv(args.meta, sep=sep),
-                                       ("sample", args.group_col),
-                                       source=f"metadata ({args.meta})")
+        # through read_meta, not pd.read_csv: it is what makes the sample ids strings, and
+        # an all-numeric cohort read as int64 matches none of the VCF's sample names
+        meta = Utils.read_meta(args.meta, sep=sep, wants=("sample", args.group_col))
         for col in ("sample", args.group_col):
             Utils.resolve_column(meta.columns, col, source=f"metadata ({args.meta})")
         sample_to_group = (

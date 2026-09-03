@@ -5,8 +5,10 @@ than from bcftools' own --threads. What has to hold is that the split is invisib
 result, and that what gets called carries what `hard_qc_filter --caller bcftools` reads.
 """
 
+import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -129,10 +131,13 @@ def test_bam_list_and_the_passthrough_options(tmp_path):
 
 
 def test_the_alignment_arguments_are_required_and_exclusive(tmp_path):
-    with pytest.raises(SystemExit, match="--bam .*or --bam-list"):
+    with pytest.raises(SystemExit, match="--bam-list or --bam-dir"):
         C.call_variants("ref.fa", "o.bcf", dry_run=True)
-    with pytest.raises(SystemExit, match="alternatives, not both"):
-        C.call_variants("ref.fa", "o.bcf", bams=["a.bam"], bam_list="b.txt", dry_run=True)
+    for kw in ({"bams": ["a.bam"], "bam_list": "b.txt"},
+               {"bams": ["a.bam"], "bam_dir": "d"},
+               {"bam_list": "b.txt", "bam_dir": "d"}):
+        with pytest.raises(SystemExit, match="alternatives, not both"):
+            C.call_variants("ref.fa", "o.bcf", dry_run=True, **kw)
 
 
 # ---- naming samples after their files --------------------------------------------
@@ -297,3 +302,58 @@ def test_the_default_pipeline_config_makes_the_caller_switchable():
     from plasgenomicsutils.lib.filter_pipeline import DEFAULT_CONFIG
     step = next(s for s in DEFAULT_CONFIG["steps"] if s["name"] == "hard_qc_filter")
     assert step.get("params", {}).get("caller") == "gatk"
+
+
+# ---- --bam-dir: a directory of alignments instead of a list ------------------------
+
+def _bam_dir(tmp_path, names=("b.bam", "a.bam", "c.cram", "notes.txt", "a.bam.bai")):
+    d = tmp_path / "bams"
+    d.mkdir()
+    for n in names:
+        (d / n).write_text("")
+    (d / "nested").mkdir()
+    (d / "nested" / "deep.bam").write_text("")
+    return str(d)
+
+
+def test_bams_in_dir_is_sorted_and_not_recursive(tmp_path):
+    from plasgenomicsutils.lib.call_variants import bams_in_dir
+
+    got = [os.path.basename(p) for p in bams_in_dir(_bam_dir(tmp_path))]
+    # sorted, because this order becomes the sample order of the output callset
+    assert got == ["a.bam", "b.bam", "c.cram"]
+    # a subdirectory of alignments is somebody else's cohort, not part of this one
+    assert not any("deep" in p for p in got)
+    # and nothing that is not an alignment
+    assert not any(p.endswith((".txt", ".bai")) for p in got)
+
+
+def test_an_empty_or_missing_directory_says_which(tmp_path):
+    from plasgenomicsutils.lib.call_variants import bams_in_dir
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(SystemExit, match="no \\*.bam"):
+        bams_in_dir(str(empty))
+    with pytest.raises(SystemExit, match="is not a directory"):
+        bams_in_dir(str(tmp_path / "nope"))
+
+
+def test_bam_dir_gives_the_same_commands_as_listing_those_files(tmp_path):
+    d = _bam_dir(tmp_path)
+    listed = sorted(str(p) for p in Path(d).glob("*.bam")) + [str(Path(d) / "c.cram")]
+    a = C.call_variants("ref.fa", str(tmp_path / "o.bcf"), bam_dir=d, dry_run=True)
+    b = C.call_variants("ref.fa", str(tmp_path / "o.bcf"), bams=listed, dry_run=True)
+    assert a == b
+
+
+def test_a_directory_still_gets_its_samples_renamed(tmp_path):
+    """The rename runs however the alignments arrived -- the directory form must not slip
+    past it and leave samples named after their paths."""
+    d = tmp_path / "cohort"
+    d.mkdir()
+    for n in ("s1.sorted.bam", "s2.sorted.bam"):
+        (d / n).write_text("")
+    cmds = C.call_variants("ref.fa", str(tmp_path / "o.bcf"), bam_dir=str(d),
+                           sample_suffix=".sorted.bam", dry_run=True)
+    assert any("bcftools reheader" in c and ".sorted.bam" in c for c in cmds)

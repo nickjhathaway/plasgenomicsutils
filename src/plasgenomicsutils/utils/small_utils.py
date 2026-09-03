@@ -108,10 +108,39 @@ class Utils:
         return df
 
     @staticmethod
+    def normalise_sample_ids(df, col: str = "sample"):
+        """Make ``df[col]`` a column of strings, if it is there.
+
+        **A sample id is a label, not a number.** An all-numeric cohort -- micronix ids,
+        barcodes, anything without a letter in it -- reads back from a metadata table as
+        int64, while every id it has to be joined against (a VCF sample name, an IBD pair
+        label, a matrix row) is a string. Those never match, and nothing errors: a merge
+        just finds nothing, so groups come out empty and the run looks like it worked.
+
+        Integral floats are formatted without their trailing ``.0``, since one blank cell
+        is enough to make pandas read the whole column as float and turn ``4064928010``
+        into ``4064928010.0``.
+        """
+        import pandas as pd
+
+        if col not in df.columns or df[col].dtype == object:
+            return df
+        df = df.copy()
+        vals = df[col]
+        if pd.api.types.is_float_dtype(vals):
+            df[col] = vals.map(lambda v: "" if pd.isna(v)
+                               else (str(int(v)) if float(v).is_integer() else str(v)))
+        else:
+            df[col] = vals.astype(str)
+        return df
+
+    @staticmethod
     def read_meta(path: str, sep=None, wants=("sample",), quiet: bool = False):
-        """Read a metadata table and normalise the case of its key columns."""
-        return Utils.normalise_columns(Utils.read_table(path, sep), wants,
-                                       source=f"metadata ({path})", quiet=quiet)
+        """Read a metadata table, normalise the case of its key columns, and make the
+        sample ids strings -- see :func:`normalise_sample_ids` for why that matters."""
+        df = Utils.normalise_columns(Utils.read_table(path, sep), wants,
+                                     source=f"metadata ({path})", quiet=quiet)
+        return Utils.normalise_sample_ids(df)
 
     @staticmethod
     def output_file_check(path: str, overwrite: bool) -> None:

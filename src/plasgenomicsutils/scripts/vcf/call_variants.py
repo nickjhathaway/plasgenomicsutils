@@ -22,6 +22,10 @@ def get_parser_call_variants() -> argparse.ArgumentParser:
                "    plasgenomicsutils call_variants --ref Pf3D7.fasta \\\n"
                "      --bam-list bams.txt --regions crt_region_snps.bed \\\n"
                "      --threads 8 --output crt_snps.bcf\n\n"
+               "...or point it at a directory of alignments instead:\n\n"
+               "    plasgenomicsutils call_variants --ref Pf3D7.fasta \\\n"
+               "      --bam-dir /path/to/bams --regions crt_region_snps.bed \\\n"
+               "      --threads 8 --output crt_snps.bcf\n\n"
                "The region list is split into 8 chunks, one job each; the parts are "
                "concatenated and indexed, and\nthe samples are named after their BAM "
                "files rather than their paths.\n",
@@ -31,6 +35,10 @@ def get_parser_call_variants() -> argparse.ArgumentParser:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--bam", nargs="+", help="One or more BAM/CRAM files")
     src.add_argument("--bam-list", help="File of BAM paths, one per line")
+    src.add_argument("--bam-dir",
+                     help="Directory to call every alignment in: its *.bam and *.cram, "
+                          "sorted by name, not recursing into subdirectories. Sorted "
+                          "because that order becomes the sample order of the output.")
     p.add_argument("--output", required=True, help="Output .bcf / .vcf.gz")
 
     r = p.add_argument_group("regions and parallelism")
@@ -110,6 +118,7 @@ def call_variants():
 
     cmds = C.call_variants(
         args.ref, args.output, bams=args.bam, bam_list=args.bam_list,
+        bam_dir=args.bam_dir,
         regions=args.regions, threads=args.threads, chunk_size=args.chunk_size,
         annotations=args.annotations, ploidy=args.ploidy, ignore_rg=args.ignore_rg,
         sample_suffix=None if args.no_rename_samples else args.sample_suffix,

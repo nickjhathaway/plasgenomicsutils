@@ -743,19 +743,39 @@ def _maf_filter_grouped(inp: str, out: str, *, meta: str, group_col: str,
     return rescued
 
 
+def vcf_to_bed(inp: str, out: str | None = None, *, snps_only: bool = False,
+               name_column: bool = True) -> None:
+    """Write the records of a VCF/BCF as BED. ``out=None`` writes to stdout.
+
+    Columns are ``chrom``, 0-based start, end, and (unless ``name_column=False``) a
+    ``chrom:pos0`` name — the canonical label
+    (:func:`~plasgenomicsutils.lib.intervals.snp_label`) a panel loaded from either BED or
+    VCF derives, so the two agree.
+
+    **Everything is 0-based half-open**, which is the whole point of the conversion: VCF
+    ``POS`` is 1-based and BED is not, and doing this by hand is where the off-by-one
+    lives. The interval is the span of the REF allele — one base for a SNP, ``len(REF)``
+    for an indel or MNP — so a record's extent is what a region file needs it to be rather
+    than just its start.
+
+    ``snps_only`` keeps single-base substitutions and drops indels and everything else.
+    """
+    require("bcftools")
+    fields = "%CHROM\\t%POS0\\t%END" + ("\\t%CHROM:%POS0" if name_column else "") + "\\n"
+    pipe = f"bcftools view -v snps {q(inp)} -Ou | " if snps_only else ""
+    src = "-" if snps_only else q(inp)
+    redirect = f" > {q(out)}" if out else ""
+    sh(f"{pipe}bcftools query -f '{fields}' {src}{redirect}", tools=("bcftools",))
+
+
 def snp_bed(inp: str, bed: str) -> None:
     """Write a BED of the SNP positions in ``inp`` — the SNP panel the IBD tools read
     (``build_ibd_matrix --snp-format bed``).
 
-    Columns: ``chrom``, 0-based start, end, and a ``chrom:pos0`` name. Every column is
-    0-based, so the file does not contradict itself, and the name matches the canonical
-    label (:func:`~plasgenomicsutils.lib.intervals.snp_label`) that a panel loaded from
-    either BED or VCF derives. Only SNP records are emitted.
+    A :func:`vcf_to_bed` restricted to SNPs; see there for the columns and the coordinate
+    convention.
     """
-    require("bcftools")
-    sh(f"bcftools view -v snps {q(inp)} -Ou "
-       f"| bcftools query -f '%CHROM\\t%POS0\\t%END\\t%CHROM:%POS0\\n' - > {q(bed)}",
-       tools=("bcftools",))
+    vcf_to_bed(inp, bed, snps_only=True)
 
 
 # --- small bcftools query helpers -------------------------------------------

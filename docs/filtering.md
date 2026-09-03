@@ -220,7 +220,9 @@ Residue numbers are usually how these exceptions are known ("*pfpx1* 1701 and 17
 0-based half-open — the BED convention — so it can be written straight out:
 
 ```r
-cds <- read_gff_cds("PlasmoDB-68_Pfalciparum3D7.gff")
+cds <- read_gff_cds(paste0("https://ftp.ensemblgenomes.ebi.ac.uk/pub/protists/release-63/",
+                           "gff3/plasmodium_falciparum/",
+                           "Plasmodium_falciparum.GCA000002765v3.63.gff3.gz"))
 codons <- aa_intervals(data.frame(transcript_id = "pfpx1", aa_position = c(1701, 1705)), cds)
 write.table(codons[, c("chrom", "start", "end", "name")], "keep_these.bed",
             sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
@@ -338,6 +340,56 @@ command.
 
 The table is derived from the same counts as the keep/drop decision, so it always accounts for
 what happened rather than being a second measurement that might disagree.
+
+### Keeping only monoclonal infections
+
+`fws_filter` drops every sample whose Fws falls below a threshold, leaving the ones a single
+clone dominates. It ships in the default config **switched off**, because unlike everything
+else in the chain it is not a quality rule — it changes which infections the callset
+describes, and that is an analysis decision:
+
+```json
+{"name": "fws_filter", "enabled": false, "params": {"fws_min": 0.95}}
+```
+
+```bash
+plasgenomicsutils fws_filter --input 12_maf_filter.bcf --output monoclonal.bcf --fws-min 0.92
+```
+
+Three things about where it goes and what it touches:
+
+**It runs at the end, not as an entry gate.** Fws reads a sample's within-host diversity
+against the cohort's own allele frequencies, so it wants a callset the rest of the chain has
+already filtered and re-genotyped — the AD floor in `filter_ad_regenotype` is what removes
+the minor-allele noise Fws would otherwise score as a second clone.
+
+**It drops samples and no variants.** Removing samples changes every allele frequency, so a
+site that cleared a MAF or missingness bar with the whole cohort may not clear it with the
+one that remains. Deciding what that means for the site set is yours, so nothing is quietly
+removed here; `AC`/`AN`/`AF` are refreshed on the way out, so putting `maf_filter` and
+`locus_missingness_filter` after it re-applies them to the survivors:
+
+```json
+{"name": "fws_filter",  "params": {"fws_min": 0.92}},
+{"name": "maf_filter",  "params": {"maf_min": 0.02}},
+{"name": "locus_missingness_filter"}
+```
+
+**A sample it cannot score is dropped, not kept.** With no usable sites there is no Fws, and
+an unknown sample is not a monoclonal one — keeping it would readmit exactly what the step
+exists to remove. Those are counted and named separately from the polyclonal drops.
+
+Like `sample_coverage_filter`, it writes the table its decision came from beside the step
+(`filtered/13_fws_filter_fws.tsv`, or `--fws-table` from the standalone command) with one row
+per sample — `sample`, `fws`, `n_sites`, `monoclonal`, `dropped` — and prints anything
+dropped or within 0.05 of the threshold to the console, so a sample that missed by a hair is
+visible without opening the file. A threshold that keeps nobody is an error rather than an
+empty callset, since on an unfiltered input that is the likeliest reading.
+
+Neither this nor `sample_coverage_filter` is whitelistable: `keep_bed` names regions, and
+these steps judge samples. Use `calculate_fws` when the scores themselves are what you want
+rather than a filtered callset — it reports the same numbers with
+`--monoclonal-threshold`.
 
 The final callset's **SNP panel BED** is written automatically next to the last step
 (`filtered/NN_<last>.snps.bed`) — this is the panel the IBD tools read, so it feeds straight
