@@ -16,7 +16,14 @@ dependencies:
   - cyvcf2 >=0.30         # bulk FORMAT-array read/write (fast filter_ad_regenotype)
   - scikit-allel >=1.3    # rogers_huff_r for the LD scan; pairwise-complete by design
   # --- external CLIs the vcf/ filtering commands shell out to ---
-  - bcftools >=1.18
+  # bcftools is pinned, not floored. Its behaviour is not stable across releases in ways
+  # that change results silently: 1.19 does not classify a record with ALT="." as type
+  # `ref`, so `bcftools view -V ref` does not remove it there and does on 1.24. The
+  # filters are written not to depend on that (see `_snp_select_args`), and CI runs the
+  # suite against both this pin and whatever the distro ships -- but an environment we
+  # hand people should be one exact version, so what they get is what was tested.
+  # Raise this deliberately, and re-run the suite on both versions when you do.
+  - bcftools =1.24
   - bedtools >=2.30
   - htslib >=1.18
   # --- coverage ---

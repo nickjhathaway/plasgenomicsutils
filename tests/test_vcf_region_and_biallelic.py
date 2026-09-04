@@ -319,3 +319,18 @@ def test_with_both_tests_off_it_trims_and_says_so(tmp_path, capsys):
                            biallelic=False)
     assert "only trims unused ALT alleles" in capsys.readouterr().out
     assert set(_kept(out)) == {100, 200, 300, 400, 500, 600}
+
+
+@pytest.mark.parametrize("snps_only,biallelic", [(True, True), (True, False), (False, True)])
+def test_the_type_test_excludes_a_no_alt_record_by_allele_count(snps_only, biallelic):
+    """Not by trusting `-V ref`, whose meaning depends on the bcftools version.
+
+    A record with ALT="." is type `ref` to bcftools 1.24 but to 1.19 is no type at all --
+    `-v ref` selects nothing there, so `-V ref` excludes nothing and a non-variant record
+    survives a SNPs-only filter. `--min-alleles 2` counts alleles instead, which every
+    version agrees on, so it has to be present whenever either test is on.
+    """
+    args = F._snp_select_args(snps_only, biallelic)
+    assert "-m2" in args.split()
+    assert ("-M2" in args.split()) == biallelic
+    assert (f"-V {F.NON_SNP_TYPES}" in args) == snps_only

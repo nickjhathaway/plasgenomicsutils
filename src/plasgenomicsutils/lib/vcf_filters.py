@@ -326,8 +326,16 @@ def _snp_select_args(snps_only: bool, biallelic: bool) -> str:
     parts = []
     if snps_only:
         parts.append(f"-V {NON_SNP_TYPES}")
+    # A record with no ALT has to go when the type test is on, and `-V ref` cannot be
+    # trusted to do it: whether ALT="." counts as type `ref` changed between bcftools
+    # releases. On 1.19 `-v ref` selects nothing at all, so `-V ref` excludes nothing and a
+    # non-variant record survives a SNPs-only filter; on 1.24 it is excluded as intended.
+    # `--min-alleles 2` asks the same question by counting alleles, which every version
+    # answers the same way. `ref` stays in the exclusion list as the statement of intent.
+    if snps_only or biallelic:
+        parts.append("-m2")
     if biallelic:
-        parts.append("-m2 -M2")
+        parts.append("-M2")
     return " ".join(parts)
 
 
