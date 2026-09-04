@@ -267,13 +267,15 @@ def _kept(path):
 
 
 @pytest.mark.parametrize("kw,expected", [
-    ({}, [100]),                                        # the default: biallelic SNPs
+    ({}, [100]),                                        # biallelic SNPs
     ({"biallelic": False}, [100, 200]),                 # SNPs, multiallelic allowed
     ({"snps_only": False}, [100, 400, 600]),            # biallelic anything
 ])
 def test_the_two_tests_are_independent(tmp_path, kw, expected):
+    """`mnp_handling` is pinned here so this stays a test of the other two knobs."""
     out = str(tmp_path / "o.bcf")
-    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=False, **kw)
+    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=False,
+                           mnp_handling="remove", **kw)
     assert _kept(out) == expected
 
 
@@ -281,14 +283,16 @@ def test_a_mixed_snp_indel_record_is_not_a_snp(tmp_path):
     """`bcftools view -v snps` keeps a record if ANY allele is a SNP, so `A>T,ATT` passes it.
     Selecting by exclusion is what makes 'SNPs only' mean every allele."""
     out = str(tmp_path / "o.bcf")
-    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=False, biallelic=False)
+    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=False, biallelic=False,
+                           mnp_handling="remove")
     assert 300 not in _kept(out)
 
 
 def test_a_record_left_with_no_alt_is_not_kept_by_the_type_test(tmp_path):
     """With the biallelic test off nothing else drops it, so `ref` has to be excluded too."""
     out = str(tmp_path / "o.bcf")
-    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=False, biallelic=False)
+    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=False, biallelic=False,
+                           mnp_handling="remove")
     assert 500 not in _kept(out)
 
 
@@ -309,14 +313,15 @@ def test_trimming_still_rescues_a_site_that_becomes_biallelic(tmp_path):
 def test_turning_everything_off_is_refused_rather_than_copying_the_input(tmp_path):
     with pytest.raises(SystemExit, match="drop it from the chain"):
         F.biallelic_snp_filter(_types_vcf(tmp_path), str(tmp_path / "o.bcf"),
-                               trim=False, snps_only=False, biallelic=False)
+                               trim=False, snps_only=False, biallelic=False,
+                               mnp_handling="keep")
 
 
 def test_with_both_tests_off_it_trims_and_says_so(tmp_path, capsys):
     """Legal, since trimming is real work -- but it must not look like a filter that ran."""
     out = str(tmp_path / "o.bcf")
     F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=True, snps_only=False,
-                           biallelic=False)
+                           biallelic=False, mnp_handling="keep")
     assert "only trims unused ALT alleles" in capsys.readouterr().out
     assert set(_kept(out)) == {100, 200, 300, 400, 500, 600}
 
@@ -334,3 +339,105 @@ def test_the_type_test_excludes_a_no_alt_record_by_allele_count(snps_only, biall
     assert "-m2" in args.split()
     assert ("-M2" in args.split()) == biallelic
     assert (f"-V {F.NON_SNP_TYPES}" in args) == snps_only
+
+
+# --- mnp_handling ----------------------------------------------------------------------
+
+def _mnp_vcf(tmp_path):
+    """A plain SNP, a true MNP, and a SNP written with padding."""
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=c1,length=10000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2",
+           "c1\t100\t.\tA\tT\t.\t.\t.\tGT\t0/1\t1/1",
+           "c1\t200\t.\tAT\tGC\t.\t.\t.\tGT\t0/1\t1/1",       # a real MNP
+           "c1\t300\t.\tTTATA\tCTATA\t.\t.\t.\tGT\t0/1\t1/1"]  # one base differs
+    p = tmp_path / "mnp.vcf"
+    p.write_text("\n".join(hdr) + "\n")
+    return str(p)
+
+
+def _rec(path):
+    out = subprocess.run(["bcftools", "query", "-f", "%POS\t%REF\t%ALT\n", path],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return [tuple(line.split("\t")) for line in out.stdout.splitlines()]
+
+
+def test_split_breaks_an_mnp_into_snps_and_minimises_a_padded_one(tmp_path):
+    """The default. `TTATA>CTATA` is one substitution written long, not an MNP -- splitting
+    rewrites it minimally, which is what a downstream tool assuming one base per record
+    needs."""
+    out = str(tmp_path / "o.bcf")
+    F.biallelic_snp_filter(_mnp_vcf(tmp_path), out, trim=False)
+    assert _rec(out) == [("100", "A", "T"), ("200", "A", "G"), ("201", "T", "C"),
+                         ("300", "T", "C")]
+
+
+def test_remove_drops_an_mnp_and_keep_leaves_it(tmp_path):
+    dropped, kept = str(tmp_path / "d.bcf"), str(tmp_path / "k.bcf")
+    F.biallelic_snp_filter(_mnp_vcf(tmp_path), dropped, trim=False, mnp_handling="remove")
+    F.biallelic_snp_filter(_mnp_vcf(tmp_path), kept, trim=False, mnp_handling="keep")
+    # the padded record is a SNP to bcftools either way -- only the real MNP moves
+    assert ("200", "AT", "GC") not in _rec(dropped)
+    assert ("200", "AT", "GC") in _rec(kept)
+    assert ("300", "TTATA", "CTATA") in _rec(kept)
+
+
+def test_split_leaves_multiallelic_sites_whole(tmp_path):
+    """`norm -a` decomposes multiallelic sites as readily as MNPs, one record per ALT with
+    `*` for the others. Splitting by allele count first keeps it away from the sites that
+    `biallelic=False` exists to preserve."""
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=c1,length=10000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2",
+           "c1\t100\t.\tA\tT\t.\t.\t.\tGT\t0/1\t1/1",
+           "c1\t200\t.\tA\tT,G\t.\t.\t.\tGT\t1/2\t1/1",     # multiallelic SNP
+           "c1\t300\t.\tAT\tGC\t.\t.\t.\tGT\t0/1\t1/1"]     # MNP
+    v = tmp_path / "both.vcf"
+    v.write_text("\n".join(hdr) + "\n")
+    out = str(tmp_path / "o.bcf")
+    F.biallelic_snp_filter(str(v), out, trim=False, biallelic=False, mnp_handling="split")
+    # the MNP is split, the multiallelic site is untouched, and the order is restored
+    assert _rec(out) == [("100", "A", "T"), ("200", "A", "T,G"),
+                         ("300", "A", "G"), ("301", "T", "C")]
+
+
+def test_a_record_whose_only_alt_is_a_spanning_deletion_is_dropped(tmp_path):
+    """`T > *` says an upstream deletion covers this position and nothing else: two alleles
+    by count, no variant to call. `A > *,T` is a real SNP that merely sits under one."""
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=c1,length=10000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2",
+           "c1\t100\t.\tA\tT\t.\t.\t.\tGT\t0/1\t1/1",
+           "c1\t200\t.\tT\t*\t.\t.\t.\tGT\t0/1\t1/1",
+           "c1\t300\t.\tA\t*,T\t.\t.\t.\tGT\t1/2\t1/1"]
+    v = tmp_path / "star.vcf"
+    v.write_text("\n".join(hdr) + "\n")
+    strict, loose = str(tmp_path / "a.bcf"), str(tmp_path / "b.bcf")
+    F.biallelic_snp_filter(str(v), strict, trim=False)
+    F.biallelic_snp_filter(str(v), loose, trim=False, biallelic=False,
+                           mnp_handling="keep")
+    assert _kept(strict) == [100]                    # the multiallelic goes to `biallelic`
+    assert _kept(loose) == [100, 300]                # ...and comes back when it is off
+    assert 200 not in _kept(loose)
+
+
+def test_an_unknown_mnp_handling_is_named(tmp_path):
+    with pytest.raises(SystemExit, match="mnp_handling must be one of"):
+        F.biallelic_snp_filter(_mnp_vcf(tmp_path), str(tmp_path / "o.bcf"),
+                               mnp_handling="atomise")
+
+
+def test_split_breaks_up_a_multiallelic_mnp_too(tmp_path):
+    """Splitting the site apart first is what makes this reachable: atomising a multiallelic
+    record directly would decompose the site instead of the substitution."""
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=c1,length=10000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2",
+           "c1\t300\t.\tAT\tGC,GG\t.\t.\t.\tGT\t1/2\t1/1"]
+    v = tmp_path / "mm.vcf"
+    v.write_text("\n".join(hdr) + "\n")
+    out = str(tmp_path / "o.bcf")
+    F.biallelic_snp_filter(str(v), out, trim=False, biallelic=False, mnp_handling="split")
+    # both ALTs carry G at the first base, so that position collapses; the second stays
+    # multiallelic because that is where the two alleles actually differ
+    assert _rec(out) == [("300", "A", "G"), ("301", "T", "C,G")]

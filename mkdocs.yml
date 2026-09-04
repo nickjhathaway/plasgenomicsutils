@@ -67,4 +67,5 @@ nav:
   - Command reference: commands.md
   - Methods:
       - Strand-bias artifacts: strand_bias_artifact_exclusion.md
+      - Read-position bias as an effect size: read_position_bias_effect_size.md
       - Fws reconciliation: fws_moimix_reconciliation.md

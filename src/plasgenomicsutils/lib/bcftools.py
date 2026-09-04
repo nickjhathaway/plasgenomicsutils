@@ -117,7 +117,7 @@ def count_variants(path: str) -> int:
 
 
 #: The classes counted per step, in the order they are reported.
-VARIANT_TYPES = ("snps", "indels", "mnps", "mixed", "other", "no_alt")
+VARIANT_TYPES = ("snps", "indels", "mnps", "mixed", "spanning_del", "other", "no_alt")
 
 
 def classify_record(ref: str, alt: str) -> str:
@@ -132,8 +132,15 @@ def classify_record(ref: str, alt: str) -> str:
     alts = [a for a in alt.split(",") if a and a != "."]
     if not alts:
         return "no_alt"
-    if any(a.startswith(("<", "*")) or "[" in a or "]" in a for a in alts):
+    if any(a.startswith("<") or "[" in a or "]" in a for a in alts):
         return "other"
+    if "*" in alts:
+        # `*` says an upstream deletion covers this position in some samples. A record
+        # carrying one is not a plain SNP however its other alleles read -- no type filter
+        # will pass it -- and in a joint callset it is routinely the largest class of all,
+        # so it is named rather than left to share `other` with symbolic alleles and
+        # breakends, which are a different problem entirely.
+        return "spanning_del"
     kinds = set()
     for a in alts:
         if len(a) != len(ref):
@@ -141,7 +148,11 @@ def classify_record(ref: str, alt: str) -> str:
         elif len(ref) == 1:
             kinds.add("snps")
         else:
-            kinds.add("mnps")
+            # Equal length and more than one base is not automatically an MNP. A single
+            # substitution is often written with padding -- REF=TTATA ALT=CTATA differs
+            # only at the first base -- and counting those as MNPs invents a population of
+            # them that is not there. bcftools reads them as SNPs; so does this.
+            kinds.add("snps" if sum(x != y for x, y in zip(ref, a)) == 1 else "mnps")
     return kinds.pop() if len(kinds) == 1 else "mixed"
 
 

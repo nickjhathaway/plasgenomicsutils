@@ -36,6 +36,7 @@ from .assets import resolve_bed
 from .. import __version__
 from .bcftools import VARIANT_TYPES, index_vcf, variant_type_counts
 from .regenotype import filter_ad_regenotype
+from .reporting import detail, listing, say
 from .strip_format import strip_stale_format
 
 
@@ -84,9 +85,8 @@ def _sample_coverage(inp, out, **kw):
     """
     kw.setdefault("cov_table_path", _sidecar(out, "cov_info.tsv"))
     dropped = F.sample_coverage_filter(inp, out, **kw)
-    print(f"     dropped {len(dropped)} low-coverage sample(s)"
-          + (f": {', '.join(dropped)}" if dropped else "")
-          + f"\n     coverage table -> {kw['cov_table_path']}")
+    say(f"     dropped {len(dropped)} low-coverage sample(s)" + listing(dropped, limit=5)
+        + f"\n     coverage table -> {kw['cov_table_path']}")
     return dropped
 
 
@@ -96,9 +96,8 @@ def _fws(inp, out, **kw):
 
     kw.setdefault("fws_table_path", _sidecar(out, "fws.tsv"))
     dropped = fws_filter(inp, out, **kw)
-    print(f"     dropped {len(dropped)} polyclonal/unscored sample(s)"
-          + (f": {', '.join(dropped)}" if dropped else "")
-          + f"\n     Fws table -> {kw['fws_table_path']}")
+    say(f"     dropped {len(dropped)} polyclonal/unscored sample(s)"
+        + listing(dropped, limit=5) + f"\n     Fws table -> {kw['fws_table_path']}")
     return dropped
 
 
@@ -137,10 +136,10 @@ def _singleton_report(inp, out, **kw):
     df = df.sort_values("singleton_rate", ascending=False)
     df.to_csv(out, sep="\t", index=False)
     flagged = df[df["flag"] != ""]
-    print(f"     {n_variants:,} variants scanned, "
-          f"{int(df['n_singleton'].sum()):,} singletons, {len(flagged)} sample(s) flagged")
+    say(f"     {n_variants:,} variants scanned, "
+        f"{int(df['n_singleton'].sum()):,} singletons, {len(flagged)} sample(s) flagged")
     for r in flagged.itertuples(index=False):
-        print(f"       {r.sample}\t{r.singleton_rate:.2f}/1000\t{r.flag}")
+        detail(f"       {r.sample}\t{r.singleton_rate:.2f}/1000\t{r.flag}")
     return len(df)
 
 
@@ -178,7 +177,9 @@ DEFAULT_CONFIG = {
         # Non-variant records first, and in their own step: the bias statistics are
         # computed whether or not an ALT was called, so hard_qc_filter does remove them --
         # counting them separately keeps "nothing to call here" apart from "failed QC".
-        {"name": "no_alt_filter", "params": {"keep": False}},
+        # trim first, so every count below describes the alleles this cohort actually
+        # carries rather than the ones the callset it was subset from did
+        {"name": "no_alt_filter", "params": {"keep": False, "trim": True}},
         # `caller` is written out at its default for the same reason as keep_bed: a
         # bcftools callset carries none of GATK's metrics, and "bcftools" here is what
         # makes this step read the ones it does carry (FS/RPBZ/SCBZ/MQBZ/MQSBZ).
@@ -199,7 +200,8 @@ DEFAULT_CONFIG = {
         {"name": "filter_ad_regenotype"},
         # both tests written out at their defaults so the split is discoverable: `biallelic`
         # off keeps multiallelic SNPs for downstream tools that can read them.
-        {"name": "biallelic_snp_filter", "params": {"snps_only": True, "biallelic": True}},
+        {"name": "biallelic_snp_filter",
+         "params": {"snps_only": True, "biallelic": True, "mnp_handling": "split"}},
         {"name": "sample_coverage_filter"},
         {"name": "locus_missingness_filter"},
         {"name": "maf_filter", "params": {"maf_min": 0.02}},  # maf_max defaults to 1 - maf_min
@@ -364,12 +366,18 @@ def effective_config(config: dict, **meta) -> dict:
     return out
 
 
+def type_counts_note(counts: dict) -> str:
+    """Every class present, SNPs first. Used by the per-step lines and the end-of-run
+    table alike, so the two cannot drift into showing different things."""
+    if not counts:
+        return ""
+    named = [f"snps {counts.get('snps', 0):,}"]
+    named += [f"{n} {counts[n]:,}" for n in VARIANT_TYPES if n != "snps" and counts.get(n)]
+    return "   (" + ", ".join(named) + ")"
+
+
 def _types_note(counts: dict) -> str:
-    """The non-SNP classes, named only when there are any -- a clean SNP callset says
-    nothing, and anything else says what is still in there."""
-    rest = [f"{n} {counts[n]:,}" for n in VARIANT_TYPES
-            if n != "snps" and counts.get(n)]
-    return f"   (snps {counts['snps']:,}" + (", " + ", ".join(rest) if rest else "") + ")"
+    return type_counts_note(counts)
 
 
 def _remove_intermediate(row: dict) -> None:
@@ -383,7 +391,7 @@ def _remove_intermediate(row: dict) -> None:
         except OSError:
             pass
     row["removed"] = True
-    print(f"     removed {Path(path).name}")
+    say(f"     removed {Path(path).name}")
 
 
 def run_pipeline(input_path: str, outdir: str, config: dict,
@@ -409,7 +417,7 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
         effective_config(config, version=__version__, input=os.path.abspath(input_path),
                          started=datetime.now().astimezone().isoformat(timespec="seconds")),
         indent=2) + "\n")
-    print(f"  config as run -> {used}")
+    say(f"  config as run -> {used}")
 
     counts = variant_type_counts(input_path)
     tally = [{"step": "input", "path": input_path, "variants": counts["total"],
@@ -438,7 +446,7 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
             # optional step stays discoverable -- JSON has no comments, so a step you would
             # otherwise have to know about is written down with the switch off.
             if step.get("enabled", True) is False:
-                print(f"[{i:02d}] {name} -- skipped (\"enabled\": false)")
+                say(f"[{i:02d}] {name} -- skipped (\"enabled\": false)")
                 tally.append({"step": name, "skipped": True})
                 continue
 
@@ -447,10 +455,10 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
                     raise SystemExit(f"ERROR: unknown pipeline report '{name}'. "
                                      f"Known: {', '.join(REPORTS)}")
                 if name == "singleton_counts" and "singleton_filter_add_ads" in seen:
-                    print(f"[{i:02d}] WARNING: singleton_counts runs after "
+                    say(f"[{i:02d}] WARNING: singleton_counts runs after "
                           f"singleton_filter_add_ads, which drops the variants it counts -- "
                           f"every sample will score zero. Move it earlier.")
-                print(f"[{i:02d}] {name} (report) -> {out_path}")
+                say(f"[{i:02d}] {name} (report) -> {out_path}")
                 n = REPORTS[name](prev, out_path, **params)
                 tally.append({"step": name, "path": out_path, "report": True, "rows": n})
                 seen.append(name)
@@ -459,7 +467,7 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
             if name not in STEPS:
                 raise SystemExit(f"ERROR: unknown pipeline step '{name}'. "
                                  f"Known: {', '.join(STEPS)}")
-            print(f"[{i:02d}] {name} -> {out_path}")
+            say(f"[{i:02d}] {name} -> {out_path}")
             rescued = STEPS[name](prev, out_path, **params)
             seen.append(name)
             index_vcf(out_path)   # keep intermediates indexed (quiets pysam, enables region queries)
@@ -469,7 +477,7 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
             if isinstance(rescued, int) and rescued > 0:
                 row["rescued"] = rescued
             tally.append(row)
-            print(f"     variants: {n:,}{_types_note(counts)}")
+            say(f"     variants: {n:,}{_types_note(counts)}")
             if prune and prev_row is not None:
                 _remove_intermediate(prev_row)
             prev_row = row
@@ -479,7 +487,7 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
         bed_path = str(out / (Path(prev).stem + ".snps.bed"))
         F.snp_bed(prev, bed_path)
         n_snps = sum(1 for _ in open(bed_path))
-        print(f"\nSNP panel BED ({n_snps:,} SNPs) -> {bed_path}")
+        say(f"\nSNP panel BED ({n_snps:,} SNPs) -> {bed_path}")
         tally.append({"step": "snp_bed", "path": bed_path, "variants": n_snps})
 
     return tally

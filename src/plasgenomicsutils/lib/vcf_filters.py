@@ -17,6 +17,7 @@ import tempfile
 from collections import defaultdict
 
 from ..utils.small_utils import Utils
+from .reporting import detail, say
 from .bcftools import (count_variants, count_variants_matching, format_tags, index_vcf,
                        info_tags, out_flag, q, require, sh)
 from .strip_format import GENOTYPE_LINKED_FORMAT, strip_stale_format
@@ -81,7 +82,59 @@ def _sor_from_ad_expr(threshold: float) -> str:
             f"{math.exp(threshold):.10g}*{a}*{b}*{hi(ref_f, ref_r)}*{lo(alt_f, alt_r)})")
 
 
-def _bcftools_qc_expr(*, qd, mq, sor, strand_bias_p, max_bias_z, read_pos_z, mq0f, bqbz_z):
+#: Allele counts behind the ref-vs-alt z-scores (RPBZ, SCBZ, MQBZ, BQBZ): first ALT only,
+#: as for SOR. INFO/AD is these two sums, but ADF/ADR are what SOR already requires.
+_N_REF = "(INFO/ADF[0]+INFO/ADR[0])"
+_N_ALT = "(INFO/ADF[1]+INFO/ADR[1])"
+#: Strand counts behind MQSBZ, which compares mapping quality between strands, not alleles.
+_N_FWD = "(INFO/ADF[0]+INFO/ADF[1])"
+_N_REV = "(INFO/ADR[0]+INFO/ADR[1])"
+
+
+def _mwu_bias_expr(tag: str, z: float, eff: float | None, n1: str, n2: str) -> str:
+    """``|tag| > z``, and -- unless ``eff`` is None -- the effect behind that z ``> eff``.
+
+    The ``*BZ`` tags are Mann-Whitney z-scores comparing two groups of reads pooled over
+    every sample at the site: ref against alt for ``RPBZ``/``SCBZ``/``MQBZ``/``BQBZ``,
+    forward against reverse for ``MQSBZ``. A z-score grows with the reads behind it: the
+    same modest shift in read position scores z = 1 in one sample and z = 30 in a cohort of
+    400, so a fixed z cutoff asks "am I sure there is a shift" -- a question whose answer is
+    always yes once a cohort is large enough. The effect size the z is built from does not
+    move with depth. With ``n1`` and ``n2`` reads in the two groups::
+
+        eff = z * sqrt((n1 + n2 + 1) / (12 * n1 * n2))
+
+    is how far ``P(a read from one group ranks above a read from the other)`` sits from
+    0.5, so ``eff = 0.15`` means a 65:35 split (rank-biserial correlation 0.3). Multiply
+    every count by the same factor and it is unchanged -- the property the strand-bias test
+    already has through SOR.
+
+    The two are combined rather than swapped because the effect size is noisy where the z
+    is not: at a single sample's depth a shift of 0.15 is well within sampling error, and
+    a threshold on the effect alone fails four times as many low-depth sites as the z does,
+    all of them noise. Requiring both is exactly the z rule where reads are few (z = 5 at
+    100 reads per group already implies eff = 0.2) and exactly the effect rule where reads
+    are many, with no depth at which the combined rule is stricter than the z alone.
+
+    bcftools has no square root, so the comparison is squared and cross-multiplied::
+
+        z^2 * (n1 + n2 + 1) > 12 * eff^2 * n1 * n2
+
+    A record whose ADF/ADR carry no ALT entry (a no-ALT site) makes the effect clause
+    false, so with ``eff`` set these tests do not judge non-variant records;
+    ``no_alt_filter`` removes those on its own terms.
+    """
+    parts = [f'{tag}!="."', f"abs({tag}) > {z}"]
+    if eff is not None:
+        # N_ALT>0 first: on a no-ALT record ADF[1]/ADR[1] do not exist, and bcftools does
+        # not treat arithmetic on a missing index as false -- the same guard SOR carries
+        parts.append("N_ALT>0")
+        parts.append(f"{tag}*{tag}*({n1}+{n2}+1) > {12 * eff * eff:.10g}*{n1}*{n2}")
+    return "(" + " && ".join(parts) + ")"
+
+
+def _bcftools_qc_expr(*, qd, mq, sor, strand_bias_p, max_bias_z, read_pos_z, mq0f, bqbz_z,
+                      bias_eff):
     """The bcftools-native mirror of the GATK hard filter, as a bcftools -e expression.
 
     Each GATK metric has a counterpart in what `bcftools mpileup` writes, but two of them
@@ -97,6 +150,10 @@ def _bcftools_qc_expr(*, qd, mq, sor, strand_bias_p, max_bias_z, read_pos_z, mq0
       allele leans. The bcftools ``*BZ`` tags are documented as "closer to 0 is better",
       and a read-position artifact shows up as either sign, so they are tested on
       ``abs()``.
+    * Every ``*BZ`` tag is a z-score, and a z-score grows with the reads pooled across
+      samples. Each is therefore tested together with the effect size behind it, computed
+      from ``INFO/ADF``/``INFO/ADR`` -- allele counts for the ref-vs-alt tags, strand
+      counts for ``MQSBZ`` -- unless ``bias_eff`` is None. See :func:`_mwu_bias_expr`.
 
     ``DP`` is written as ``INFO/DP`` deliberately: a bare ``DP`` in a bcftools expression
     resolves to ``FORMAT/DP`` where both exist, which silently changes what is filtered.
@@ -110,14 +167,16 @@ def _bcftools_qc_expr(*, qd, mq, sor, strand_bias_p, max_bias_z, read_pos_z, mq0
         parts.append(_sor_from_ad_expr(sor))
     if strand_bias_p is not None:                       # strand bias, Fisher p-value
         parts.append(f'(FS!="." && FS < {strand_bias_p})')
+    # each z test is "significant and large" -- see _mwu_bias_expr for why not one or the
+    # other; bias_eff=None makes them plain z tests again
     if read_pos_z is not None:                          # the alt sits near the read ends
-        parts.append(f'(RPBZ!="." && abs(RPBZ) > {read_pos_z})')
-        parts.append(f'(SCBZ!="." && abs(SCBZ) > {read_pos_z})')
+        parts.append(_mwu_bias_expr("RPBZ", read_pos_z, bias_eff, _N_REF, _N_ALT))
+        parts.append(_mwu_bias_expr("SCBZ", read_pos_z, bias_eff, _N_REF, _N_ALT))
     if max_bias_z is not None:                          # mapping quality, and vs strand
-        parts.append(f'(MQBZ!="." && abs(MQBZ) > {max_bias_z})')
-        parts.append(f'(MQSBZ!="." && abs(MQSBZ) > {max_bias_z})')
+        parts.append(_mwu_bias_expr("MQBZ", max_bias_z, bias_eff, _N_REF, _N_ALT))
+        parts.append(_mwu_bias_expr("MQSBZ", max_bias_z, bias_eff, _N_FWD, _N_REV))
     if bqbz_z is not None:
-        parts.append(f'(BQBZ!="." && abs(BQBZ) > {bqbz_z})')
+        parts.append(_mwu_bias_expr("BQBZ", bqbz_z, bias_eff, _N_REF, _N_ALT))
     if mq0f is not None:
         parts.append(f'(MQ0F!="." && MQ0F > {mq0f})')
     if not parts:
@@ -130,19 +189,35 @@ def _bcftools_qc_expr(*, qd, mq, sor, strand_bias_p, max_bias_z, read_pos_z, mq0
 #: silently never matching -- a bcftools comparison against an absent tag is just false.
 _BCFTOOLS_QC_NEEDS = {
     "qd": ("DP",), "strand_bias_p": ("FS",), "read_pos_z": ("RPBZ", "SCBZ"),
+    "bias_eff": ("ADF", "ADR"),
     "sor": ("ADF", "ADR"),
     "max_bias_z": ("MQBZ", "MQSBZ"), "bqbz_z": ("BQBZ",), "mq0f": ("MQ0F",),
     "mq": ("MQ",),
 }
 
 
-def _check_bcftools_qc_tags(inp: str, wanted: dict) -> None:
+#: INFO tags each GATK-mode threshold reads.
+_GATK_QC_NEEDS = {
+    "qd": ("QD",), "mq": ("MQ",), "sor": ("SOR",), "mqranksum": ("MQRankSum",),
+    "readposranksum": ("ReadPosRankSum",), "fs": ("FS",),
+}
+
+
+def _check_qc_tags(inp: str, wanted: dict, needs: dict, label: str, advice: str) -> None:
+    """Fail before running bcftools when the callset lacks a tag a threshold reads.
+
+    bcftools aborts on an undefined tag, but from inside a shell pipeline: the error names
+    the tag and then the run dies with `unknown file type` from the next process in the
+    pipe, which reads as a corrupt input rather than a missing annotation. Checking the
+    header first turns that into one sentence naming every missing tag at once, and which
+    threshold to switch off if the annotation is genuinely unavailable.
+    """
     have = info_tags(inp)
     missing = defaultdict(set)
     for k, v in wanted.items():
         if v is None:
             continue
-        for t in _BCFTOOLS_QC_NEEDS[k]:
+        for t in needs[k]:
             if t not in have:
                 missing[t].add("--" + k.replace("_", "-"))
     if not missing:
@@ -152,16 +227,79 @@ def _check_bcftools_qc_tags(inp: str, wanted: dict) -> None:
     named = ", ".join(f"INFO/{t} (read by {', '.join(sorted(f))})"
                       for t, f in sorted(missing.items()))
     raise SystemExit(
-        "hard_qc_filter --caller bcftools: this callset has no "
-        + named + ".\n"
+        f"{label}: this callset has no " + named + ".\n"
         "  A comparison against a tag that is not there is simply false, so the filter "
-        "would keep\n  everything and say nothing. Call with the annotations it needs:\n\n"
-        f"    {BCFTOOLS_CALL_RECIPE}\n\n"
-        "  ...or disable the thresholds that read the missing tags."
+        "would keep\n  everything and say nothing. " + advice
     )
 
 
-def no_alt_filter(inp: str, out: str, *, keep: bool = False,
+def _check_bcftools_qc_tags(inp: str, wanted: dict) -> None:
+    _check_qc_tags(
+        inp, wanted, _BCFTOOLS_QC_NEEDS, "hard_qc_filter --caller bcftools",
+        "Call with the annotations it needs:\n\n"
+        f"    {BCFTOOLS_CALL_RECIPE}\n\n"
+        "  ...or disable the thresholds that read the missing tags.")
+
+
+def _check_gatk_qc_tags(inp: str, wanted: dict) -> None:
+    _check_qc_tags(
+        inp, wanted, _GATK_QC_NEEDS, "hard_qc_filter --caller gatk",
+        "These are GATK's annotations;\n"
+        "  a callset from `bcftools call` does not carry them and wants "
+        "`--caller bcftools` instead.\n"
+        "  A callset that has been through an earlier filter may simply have had its INFO "
+        "stripped.\n"
+        "  Otherwise set the thresholds that read the missing tags to null to switch them "
+        "off.")
+
+
+def _trim_alt_alleles(inp: str, out: str) -> int:
+    """Drop ALT alleles no genotype carries; return how many records lost one.
+
+    A joint callset subset to fewer samples keeps every ALT the full cohort had, now
+    carried by nobody: `bcftools view -S` removes samples, not alleles. Those alleles are
+    still counted, still classified, and still filtered on, so the numbers describe a
+    cohort that is not the one in the file.
+
+    A genotype-linked Number=G field (e.g. PL) whose length disagrees with the genotypes
+    makes `--trim-alt-alleles` abort, so the same guard `biallelic_snp_filter` uses applies
+    here: null just the inconsistent records first, keeping the valid likelihoods.
+    """
+    src, tmp = inp, None
+    try:
+        if any(t in format_tags(inp) for t in GENOTYPE_LINKED_FORMAT):
+            tmp = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+            strip_stale_format(inp, tmp, fields=GENOTYPE_LINKED_FORMAT, mode="mismatch")
+            src = tmp
+        sh(f"bcftools view --trim-alt-alleles {q(src)} -Ob -o {q(out)}", tools=("bcftools",))
+    finally:
+        if tmp:
+            for suffix in ("", ".csi"):
+                try:
+                    os.remove(tmp + suffix)
+                except OSError:
+                    pass
+    return _count_alt_changes(inp, out)
+
+
+def _count_alt_changes(before: str, after: str) -> int:
+    """How many records' ALT columns differ between two callsets.
+
+    Trimming never drops a record, so the two stream in lockstep and this needs no index
+    and no memory beyond a line at a time.
+    """
+    cmd = ["bcftools", "query", "-f", "%CHROM\t%POS\t%ALT\n"]
+    a = subprocess.Popen(cmd + [str(before)], stdout=subprocess.PIPE, text=True)
+    b = subprocess.Popen(cmd + [str(after)], stdout=subprocess.PIPE, text=True)
+    try:
+        return sum(1 for x, y in zip(a.stdout, b.stdout) if x != y)
+    finally:
+        for proc in (a, b):
+            proc.stdout.close()
+            proc.wait()
+
+
+def no_alt_filter(inp: str, out: str, *, keep: bool = False, trim: bool = False,
                   keep_bed: str | None = None) -> int:
     """Drop records with no ALT allele, i.e. positions that turned out non-variant.
 
@@ -181,9 +319,33 @@ def no_alt_filter(inp: str, out: str, *, keep: bool = False,
 
     ``keep`` passes them through, for a fill-in workflow where "this sample is reference
     here" is the answer being sought. The count is reported either way.
+
+    ``trim`` first drops ALT alleles no genotype carries, which is what makes every count
+    after this step describe the cohort in the file rather than the one it was subset from.
+    The two are reported separately -- how many records lost an allele, and how many were
+    left with none -- because they are different facts, and trimming is what creates some
+    of the second kind.
     """
-    n_no_alt = count_variants_matching(inp, 'ALT="."')
     fmt = out_flag(out)
+    trimmed = None
+    try:
+        if trim:
+            # trim BEFORE the count: a record whose every ALT was uncarried becomes ALT="."
+            # here, and it is this step's job to say so rather than the next step's to
+            # wonder where it came from
+            trimmed = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+            n_trimmed = _trim_alt_alleles(inp, trimmed)
+            inp = trimmed
+            sys.stderr.write(f"NOTE: {n_trimmed} record(s) had ALT allele(s) no genotype "
+                             f"carries trimmed away\n")
+        return _no_alt_filter(inp, out, fmt, keep=keep, keep_bed=keep_bed)
+    finally:
+        if trimmed and os.path.exists(trimmed):
+            os.unlink(trimmed)
+
+
+def _no_alt_filter(inp: str, out: str, fmt: str, *, keep: bool, keep_bed: str | None) -> int:
+    n_no_alt = count_variants_matching(inp, 'ALT="."')
     verb = "kept" if keep else "dropped"
     sys.stderr.write(f"NOTE: {n_no_alt} record(s) have no ALT allele ({verb})\n")
     if keep:
@@ -208,6 +370,7 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
                    readposranksum: float = -5.0, fs: float | None = None,
                    strand_bias_p: float | None | str = "auto", read_pos_z: float | None = 5.0,
                    max_bias_z: float | None = 5.0, bqbz_z: float | None = None,
+                   bias_eff: float | None = 0.15,
                    mq0f: float | None = None, keep_bed: str | None = None) -> int:
     """Hard filter on INFO metrics; keep records still flagged PASS.
 
@@ -227,6 +390,14 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
     tests bcftools' ``FS`` instead and is ``"auto"`` -- meaning off -- because a fixed
     p-value cutoff gets stricter as a cohort grows while the skew it is meant to detect does
     not. Set it to a number to add it back.
+
+    ``bias_eff`` qualifies every z test in bcftools mode (``read_pos_z`` on RPBZ/SCBZ,
+    ``max_bias_z`` on MQBZ/MQSBZ, ``bqbz_z`` on BQBZ): a site fails a z test only when the
+    z exceeds its cutoff **and** the effect size behind that z exceeds ``bias_eff`` (see
+    :func:`_mwu_bias_expr` for the arithmetic and why both). The z alone tightens as a
+    cohort grows -- a shift that scores z = 1 in one sample scores z = 30 pooled over 400 --
+    and the effect alone is noise at a single sample's depth. ``bias_eff=None`` restores
+    the plain z tests. Setting a z cutoff to None switches that test off, as before.
 
     The GATK-only thresholds (``sor``, ``mqranksum``, ``readposranksum``, ``fs``) are
     ignored in bcftools mode, and the bcftools-only ones in GATK mode; each set names tags
@@ -248,21 +419,32 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
         strand_bias_p = None
 
     if caller == "bcftools":
+        # the effect size only reads ADF/ADR on behalf of a z test, so with every z test
+        # off it must not ask for them
+        if read_pos_z is None and max_bias_z is None and bqbz_z is None:
+            bias_eff = None
         thresholds = dict(qd=qd, mq=mq, sor=sor, strand_bias_p=strand_bias_p,
                           read_pos_z=read_pos_z, max_bias_z=max_bias_z, bqbz_z=bqbz_z,
-                          mq0f=mq0f)
+                          mq0f=mq0f, bias_eff=bias_eff)
         _check_bcftools_qc_tags(inp, thresholds)
         expr = _bcftools_qc_expr(**thresholds)
     else:
-        parts = [
-            f"QD < {qd}",
-            f"MQ < {mq}",
-            f"SOR > {sor}",
-            f'(MQRankSum!="." && MQRankSum < {mqranksum})',
-            f'(ReadPosRankSum!="." && ReadPosRankSum < {readposranksum})',
-        ]
-        if fs is not None:
-            parts.append(f"FS > {fs}")
+        thresholds = dict(qd=qd, mq=mq, sor=sor, mqranksum=mqranksum,
+                          readposranksum=readposranksum, fs=fs)
+        _check_gatk_qc_tags(inp, thresholds)
+        # each threshold is skipped when it is None, so switching one off is a way to run
+        # against a callset that lacks its tag rather than an error with no way forward
+        forms = {
+            "qd": "QD < {}", "mq": "MQ < {}", "sor": "SOR > {}",
+            "mqranksum": '(MQRankSum!="." && MQRankSum < {})',
+            "readposranksum": '(ReadPosRankSum!="." && ReadPosRankSum < {})',
+            "fs": "FS > {}",
+        }
+        parts = [forms[k].format(v) for k, v in thresholds.items() if v is not None]
+        if not parts:
+            raise SystemExit(
+                "hard_qc_filter --caller gatk: every threshold is off, so this step would "
+                "copy its input; drop it from the chain instead")
         expr = " || ".join(parts)
     fmt = out_flag(out)
     if not keep_bed:
@@ -322,10 +504,18 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
 NON_SNP_TYPES = "indels,mnps,other,ref,bnd"
 
 
-def _snp_select_args(snps_only: bool, biallelic: bool) -> str:
+MNP_HANDLING = ("split", "remove", "keep")
+
+
+def _snp_select_args(snps_only: bool, biallelic: bool, mnp_handling: str = "remove") -> str:
     parts = []
     if snps_only:
-        parts.append(f"-V {NON_SNP_TYPES}")
+        # `remove` is the only mode that excludes MNPs here. `keep` wants them, and `split`
+        # has to let them through so there is something left for the atomiser to split --
+        # after which there are none, because each has become its component SNPs.
+        types = (NON_SNP_TYPES if mnp_handling == "remove"
+                 else ",".join(t for t in NON_SNP_TYPES.split(",") if t != "mnps"))
+        parts.append(f"-V {types}")
     # A record with no ALT has to go when the type test is on, and `-V ref` cannot be
     # trusted to do it: whether ALT="." counts as type `ref` changed between bcftools
     # releases. On 1.19 `-v ref` selects nothing at all, so `-V ref` excludes nothing and a
@@ -334,13 +524,19 @@ def _snp_select_args(snps_only: bool, biallelic: bool) -> str:
     # answers the same way. `ref` stays in the exclusion list as the statement of intent.
     if snps_only or biallelic:
         parts.append("-m2")
+        # A record whose only ALT is `*` states that an upstream deletion covers this
+        # position and nothing else -- two alleles by count, no variant to call. It passes
+        # every test above, so it needs naming. The N_ALT test is what keeps `A > *,T`, a
+        # real SNP that merely sits under a deletion in some samples.
+        parts.append("""-e 'N_ALT=1 && ALT="*"'""")
     if biallelic:
         parts.append("-M2")
     return " ".join(parts)
 
 
 def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True,
-                         snps_only: bool = True, biallelic: bool = True) -> None:
+                         snps_only: bool = True, biallelic: bool = True,
+                         mnp_handling: str = "split") -> None:
     """Keep SNPs and/or biallelic sites, optionally trimming unused ALT alleles first.
 
     The two questions are separate knobs because they are separate questions. ``snps_only``
@@ -357,19 +553,51 @@ def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True,
     discarded by a naive ``-m2 -M2``. Trimming is also what turns a mixed ``A>T,ATT`` record
     into a plain SNP when nothing carried the indel, so the type test belongs after it too.
 
+    ``mnp_handling`` decides what happens to a multi-base substitution:
+
+    * ``"split"`` (default) breaks it into its component SNPs with ``bcftools norm -a``,
+      which needs no reference. This also rewrites a substitution that was merely *written*
+      with padding -- ``REF=TTATA ALT=CTATA`` differs at one base and is a SNP -- into its
+      minimal form, which is what makes a callset safe for tools that assume one base per
+      SNP record.
+    * ``"remove"`` drops the record, the behaviour of the type test alone.
+    * ``"keep"`` leaves it as it is, for a downstream tool that reads MNPs.
+
+    ``"split"`` composes with ``biallelic=False``: multiallelic sites are split apart,
+    atomised, and rejoined, which leaves them exactly as they were while still breaking up
+    any MNP among them.
+
     With both tests off the step only trims, which it says rather than looking like a no-op.
     """
+    if mnp_handling not in MNP_HANDLING:
+        raise SystemExit(f"biallelic_snp_filter: mnp_handling must be one of "
+                         f"{', '.join(MNP_HANDLING)}, not {mnp_handling!r}")
     fmt = out_flag(out)
-    select = _snp_select_args(snps_only, biallelic)
+    select = _snp_select_args(snps_only, biallelic, mnp_handling)
+    split = mnp_handling == "split"
     if not select:
-        print("     biallelic_snp_filter: no type or allele-count test is on, so this step "
-              "only trims unused ALT alleles")
-        if not trim:
+        say("     biallelic_snp_filter: no type or allele-count test is on, so this step "
+              + ("only splits multi-base substitutions and trims unused ALT alleles"
+                 if split else "only trims unused ALT alleles"))
+        if not trim and not split:
             raise SystemExit(
-                "biallelic_snp_filter: trim, snps_only and biallelic are all off, so this "
-                "step would copy its input; drop it from the chain instead")
+                "biallelic_snp_filter: trim, snps_only and biallelic are all off and "
+                "mnp_handling does not split, so this step would copy its input; drop it "
+                "from the chain instead")
+    # Atomise *after* the selection, never before: the selection decides which records
+    # exist, and the atomiser is happy to take a multiallelic record apart as well as an
+    # MNP -- one output record per ALT, `*` standing in for the others.
+    #
+    # Splitting the site first is what stops that. `-m -any` leaves the atomiser nothing
+    # but biallelic records, where it can only do what was asked; `-m +any` then puts the
+    # sites back together. On a real callset the round trip is exact -- record for record,
+    # including INFO and every FORMAT field -- because nothing was ever decomposed for the
+    # wrong reason, only re-expressed.
+    atomize = (f" | bcftools norm -m -any - -Ou | bcftools norm -a - -Ou"
+               f" | bcftools norm -m +any - -O{fmt} -o {q(out)}") if split else ""
+    tail = f" -O{fmt} -o {q(out)}" if not split else " -Ou"
     if not trim:
-        sh(f"bcftools view {select} {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        sh(f"bcftools view {select} {q(inp)}{tail}{atomize}", tools=("bcftools",))
         return
     # A genotype-linked Number=G field (e.g. PL) whose length disagrees with the genotypes
     # makes `--trim-alt-alleles` abort. If any are present, surgically null just the
@@ -383,7 +611,7 @@ def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True,
             strip_stale_format(inp, tmp, fields=GENOTYPE_LINKED_FORMAT, mode="mismatch")
             src = tmp
         sh(f"bcftools view --trim-alt-alleles {q(src)} -Ou "
-           f"| bcftools view {select} - -O{fmt} -o {q(out)}", tools=("bcftools",))
+           f"| bcftools view {select} -{tail}{atomize}", tools=("bcftools",))
     finally:
         if tmp:
             for suffix in ("", ".csi"):
@@ -437,12 +665,12 @@ def _note_whitelist(label: str, keep_bed: str, n: int, dropped_by: str) -> None:
     """Report what the whitelist did at one step: kept variants now, misses at the end."""
     _WHITELIST.rescued += n
     if n:
-        print(f"     {label}: {n:,} variant(s) kept by the whitelist that {dropped_by} "
+        say(f"     {label}: {n:,} variant(s) kept by the whitelist that {dropped_by} "
               f"would have dropped")
     elif _WHITELIST.deferring:
         _WHITELIST.misses.append(label)
     else:
-        print(f"     {label}: WARNING the whitelist {keep_bed} rescued nothing -- no variant "
+        say(f"     {label}: WARNING the whitelist {keep_bed} rescued nothing -- no variant "
               f"it covers would have been dropped here. Check the contig names, and that its "
               f"positions are 0-based half-open like any BED.")
 
@@ -628,7 +856,7 @@ def sample_coverage_filter(inp: str, out: str, *, ads_min: int = 10,
     # the borderline cases, said out loud -- an unexpected drop is usually one of these
     for r in rows:
         if r["dropped"] or abs(r["margin"]) <= 0.05:
-            print(f"       {r['sample']}\t{r['n_covered']:,}/{r['n_loci']:,} loci"
+            detail(f"       {r['sample']}\t{r['n_covered']:,}/{r['n_loci']:,} loci"
                   f"\t{r['frac_covered']:.3f}\tmean ADS {r['mean_ads']:g}"
                   f"\t{'DROPPED' if r['dropped'] else 'kept'}"
                   f" ({r['margin']:+.3f} vs {frac_min:g})")

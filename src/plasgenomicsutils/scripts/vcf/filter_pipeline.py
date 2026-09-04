@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ...lib import filter_pipeline as P
 from ...lib.bcftools import VARIANT_TYPES
+from ...lib.reporting import LEVELS, say, set_verbosity
 
 
 def get_parser_filter_pipeline() -> argparse.ArgumentParser:
@@ -27,6 +28,12 @@ def get_parser_filter_pipeline() -> argparse.ArgumentParser:
                         "rather than all of them. The input is never touched, the final "
                         "output stays, and the side tables are kept. Overrides "
                         "\"remove_intermediates\" in the config.")
+    p.add_argument("--verbosity", choices=list(LEVELS), default="verbose",
+                   help="How much the run narrates. `verbose` (default) gives one line per "
+                        "step plus each report's summary; `very-verbose` adds the "
+                        "per-sample lines behind those summaries, which is unreadable on a "
+                        "large cohort and exactly what you want on a small one; `quiet` "
+                        "prints nothing. Every table and file is written either way.")
     p.add_argument("--no-snp-bed", action="store_true",
                    help="Do not auto-write the final SNP-panel BED (used by the IBD tools)")
     return p
@@ -60,25 +67,25 @@ def filter_pipeline():
     if not args.input or not args.config:
         raise SystemExit("ERROR: --input and --config are required (or use --emit-default-config)")
 
+    set_verbosity(args.verbosity)
     config = P.load_config(args.config)
     if args.remove_intermediates:
         config["remove_intermediates"] = True
     tally = P.run_pipeline(args.input, args.outdir, config, emit_snp_bed=not args.no_snp_bed)
 
-    print("\n=== variant counts per step ===")
+    say("\n=== variant counts per step ===")
     for row in tally:
         kind, count, _ = _tally_fields(row)
         shown = "skipped" if kind == "skipped" else f"{count:,}"
         note = " rows" if kind == "report" else ""
         if row.get("rescued"):
             note += f"   (+{row['rescued']:,} whitelisted)"
-        types = row.get("types") or {}
-        rest = [f"{t} {types[t]:,}" for t in VARIANT_TYPES if t != "snps" and types.get(t)]
-        if rest:
-            note += f"   [{', '.join(rest)}]"
+        types = P.type_counts_note(row.get("types") or {})
+        if types:
+            note += types
         if row.get("removed"):
             note += "   (removed)"
-        print(f"  {row['step']:<28} {shown:>12}{note}")
+        say(f"  {row['step']:<28} {shown:>12}{note}")
 
     # `rescued` records how many of a step's kept variants only survived because the
     # whitelist covered them -- a run artifact rather than something to re-derive from the
@@ -95,7 +102,7 @@ def filter_pipeline():
                  path]
         lines.append("\t".join(cells) + "\n")
     Path(args.outdir, "variant_counts.tsv").write_text("".join(lines))
-    print(f"\n  -> {Path(args.outdir, 'variant_counts.tsv')}")
+    say(f"\n  -> {Path(args.outdir, 'variant_counts.tsv')}")
 
 
 if __name__ == "__main__":

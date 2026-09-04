@@ -162,7 +162,8 @@ def test_the_default_pipeline_writes_a_summary_for_every_row(tmp_path):
     header = rows[0].split("\t")
     assert header[:3] == ["step", "kind", "count"]
     assert header[-3:] == ["rescued", "removed", "path"]
-    assert header[3:-3] == ["snps", "indels", "mnps", "mixed", "other", "no_alt"]
+    assert header[3:-3] == ["snps", "indels", "mnps", "mixed", "spanning_del", "other",
+                            "no_alt"]
     cols = {n: i for i, n in enumerate(header)}
     # nothing is whitelisted in this config, and nothing was pruned
     assert all(r.split("\t")[cols["rescued"]] == "" for r in rows[1:])
@@ -251,15 +252,22 @@ def test_a_sidecar_name_survives_a_two_part_extension():
 
 
 def test_borderline_samples_are_printed_so_a_surprise_drop_is_visible(tmp_path, with_ads,
-                                                                     capsys):
+                                                                     capsys, monkeypatch):
     """A sample that missed by a hair reads very differently from a hopeless one, so both
-    sides of the threshold are logged, not just the drops."""
-    from plasgenomicsutils.lib import vcf_filters as F
+    sides of the threshold are logged, not just the drops -- at `very-verbose`, where the
+    per-sample lines live. At the default they stay in the coverage table, which is written
+    either way."""
+    from plasgenomicsutils.lib import reporting, vcf_filters as F
 
+    monkeypatch.setattr(reporting, "_level", reporting.VERY_VERBOSE)
     F.sample_coverage_filter(with_ads, str(tmp_path / "o.bcf"), ads_min=5, frac_min=0.5)
     out = capsys.readouterr().out
     assert "DROPPED" in out and "kept" in out
     assert "mean ADS" in out                      # why, not just whether
+
+    monkeypatch.setattr(reporting, "_level", reporting.VERBOSE)
+    F.sample_coverage_filter(with_ads, str(tmp_path / "o2.bcf"), ads_min=5, frac_min=0.5)
+    assert "mean ADS" not in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #
@@ -497,7 +505,15 @@ def test_a_record_is_one_class_and_a_mixed_one_is_not_a_snp():
     assert classify_record("ATT", "A") == "indels"
     assert classify_record("AT", "GC") == "mnps"
     assert classify_record("A", ".") == "no_alt"
-    for symbolic in ("<*>", "<NON_REF>", "*", "A[chr1:100["):
+    # a substitution written with padding is one SNP, not a multi-base change; counting it
+    # as an MNP invents a population of them that is not in the data
+    assert classify_record("TTATA", "CTATA") == "snps"
+    assert classify_record("ATCG", "GTCA") == "mnps"      # two bases really do differ
+    # `*` is its own class: routinely the largest one in a joint callset, and a different
+    # problem from a symbolic allele or a breakend
+    assert classify_record("T", "*") == "spanning_del"
+    assert classify_record("A", "*,T") == "spanning_del"
+    for symbolic in ("<*>", "<NON_REF>", "A[chr1:100["):
         assert classify_record("A", symbolic) == "other"
 
 
@@ -739,3 +755,41 @@ def test_the_expression_reads_maf_and_only_bounds_the_top_when_asked():
     # an asymmetric window is a band on the alternate, not a minor-allele floor: otherwise a
     # site at AF 0.75 would fail a 0.3 floor while sitting inside a 0.3-0.8 band
     assert _maf_expr(0.3, 0.8) == "MAX(AF) >= 0.3 && MAX(AF) <= 0.8"
+
+
+def test_verbosity_gates_the_per_sample_lines_not_the_files(tmp_path, capsys, monkeypatch):
+    """The enumerations are the part that does not scale: a coverage table with one line
+    per sample is the most useful output on fifty samples and the least on five thousand.
+    Every file is written at every level -- only the narration changes."""
+    from plasgenomicsutils.lib import reporting
+
+    monkeypatch.setattr(reporting, "_level", reporting.VERY_VERBOSE)
+    reporting.say("summary"); reporting.detail("  per-sample")
+    assert capsys.readouterr().out == "summary\n  per-sample\n"
+
+    monkeypatch.setattr(reporting, "_level", reporting.VERBOSE)
+    reporting.say("summary"); reporting.detail("  per-sample")
+    assert capsys.readouterr().out == "summary\n"
+
+    monkeypatch.setattr(reporting, "_level", reporting.QUIET)
+    reporting.say("summary"); reporting.detail("  per-sample")
+    assert capsys.readouterr().out == ""
+
+
+def test_a_name_list_is_spelled_out_only_when_it_is_short_or_asked_for(monkeypatch):
+    from plasgenomicsutils.lib import reporting
+
+    many = [f"s{i}" for i in range(40)]
+    monkeypatch.setattr(reporting, "_level", reporting.VERBOSE)
+    assert reporting.listing(many, limit=5) == ""            # the count is the message
+    assert reporting.listing(["a", "b"], limit=5) == ": a, b"  # a handful still fits
+    assert reporting.listing([], limit=5) == ""
+    monkeypatch.setattr(reporting, "_level", reporting.VERY_VERBOSE)
+    assert reporting.listing(many, limit=5).startswith(": s0, s1")
+
+
+def test_an_unknown_verbosity_is_refused_by_name():
+    from plasgenomicsutils.lib.reporting import set_verbosity
+
+    with pytest.raises(SystemExit, match="verbosity must be one of"):
+        set_verbosity("loud")

@@ -147,7 +147,7 @@ def test_depth_resolves_to_info_dp(tmp_path):
     """A bare `DP` in a bcftools expression means FORMAT/DP where both exist."""
     assert "QUAL/INFO/DP" in F._bcftools_qc_expr(
         qd=20, mq=None, sor=None, strand_bias_p=None, max_bias_z=None, read_pos_z=None,
-        mq0f=None, bqbz_z=None)
+        mq0f=None, bqbz_z=None, bias_eff=None)
 
 
 # ---- refusing to run rather than silently keeping everything ----------------------
@@ -217,7 +217,7 @@ def _mixed_vcf(tmp_path):
     hdr.append("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1")
     solo = {"ADF": "10", "ADR": "10"}        # Number=R: one entry where there is no ALT
     rows = [(1000, "T", CLEAN), (2000, "T", _with(**_strands(100, 100, 20, 0))),
-            (3000, ".", _with(**solo)), (4000, ".", _with(RPBZ=-14.7, **solo))]
+            (3000, ".", _with(**solo)), (4000, ".", _with(MQ=30, **solo))]
     for pos, alt, info in rows:
         kv = ";".join(f"{k}={v}" for k, v in info.items())
         hdr.append(f"chr1\t{pos}\t.\tA\t{alt}\t222\t.\t{kv}\tGT\t0/1")
@@ -230,7 +230,9 @@ def test_a_hard_qc_rule_does_remove_non_variant_records(tmp_path):
     """Why the separate step exists: this is what happens without it."""
     out = str(tmp_path / "qc.vcf")
     F.hard_qc_filter(_mixed_vcf(tmp_path), out, caller="bcftools")
-    # 4000 is non-variant AND read-position biased, so QC takes it out along with 2000
+    # 4000 is non-variant AND badly mapped, so QC takes it out along with 2000. (The z
+    # tests are the exception since v0.2.4: a no-ALT record has no alt reads to size the
+    # effect on, so they leave it alone -- see test_a_non_variant_record_is_not_judged_on_z.)
     assert _kept(out) == [1000, 3000]
 
 
@@ -335,3 +337,135 @@ def test_a_non_variant_record_is_not_judged_on_strand_bias(tmp_path):
     out = str(tmp_path / "o.bcf")
     F.hard_qc_filter(str(v), out, caller="bcftools")
     assert _kept(out) == [1000]
+
+
+# ---- the z tests as significant *and* large ------------------------------------------
+#
+# RPBZ/SCBZ/MQBZ/MQSBZ are Mann-Whitney z-scores pooled over every read at the site, so a
+# fixed z cutoff tightens as a cohort grows exactly as FS does. The effect size behind the
+# z does not, so a z only counts when its effect is at least `bias_eff`. The counts come
+# from ADF/ADR: ref vs alt for the allele tags, forward vs reverse for MQSBZ.
+
+def _eff(z, n1, n2):
+    """The effect size the filter is meant to recover, written out independently."""
+    return abs(z) * math.sqrt((n1 + n2 + 1) / (12 * n1 * n2))
+
+
+def _z_for(eff, n1, n2):
+    """The z a given effect scores with these many reads behind it."""
+    return eff / math.sqrt((n1 + n2 + 1) / (12 * n1 * n2))
+
+
+@pytest.mark.parametrize("scale", [1, 10, 100, 1000])
+def test_the_read_position_verdict_does_not_move_with_cohort_size(tmp_path, scale):
+    """The whole point, as for SOR. The same modest shift (eff 0.05) and the same real
+    artifact (eff 0.4), each seen in a cohort `scale` times larger: the z grows with
+    sqrt(scale) but the verdict must not change."""
+    n1, n2 = 100 * scale, 100 * scale
+    counts = _strands(n1 // 2, n1 - n1 // 2, n2 // 2, n2 - n2 // 2)
+    modest, artifact = _z_for(0.05, n1, n2), _z_for(0.4, n1, n2)
+    v = _vcf(tmp_path, [(1000, _with(RPBZ=modest, **counts)),
+                        (2000, _with(RPBZ=-artifact, **counts))])
+    out = str(tmp_path / "o.bcf")
+    F.hard_qc_filter(v, out, caller="bcftools")
+    assert _kept(out) == [1000]
+    # ...and the plain z test, which is what bias_eff=None restores, does flip on the
+    # modest shift once the cohort is large: z = 24 at scale 1000
+    out2 = str(tmp_path / "o2.bcf")
+    F.hard_qc_filter(v, out2, caller="bcftools", bias_eff=None)
+    assert _kept(out2) == ([1000] if modest <= 5 else [])
+
+
+def test_a_real_cohort_site_z_32_with_a_65_35_split_is_kept(tmp_path):
+    """Pf3D7_07_v3:403266 in a 374-sample sWGA callset: RPBZ 32.2 over 50348 ref and 5886
+    alt reads, an effect of 0.128 -- a real pfcrt allele the plain z rule threw out."""
+    counts = _strands(21132, 29216, 2555, 3331)
+    assert round(_eff(32.2012, 50348, 5886), 3) == 0.128
+    v = _vcf(tmp_path, [(1000, _with(RPBZ=32.2012, **counts))])
+    a, b, c = (str(tmp_path / f"{x}.bcf") for x in "abc")
+    F.hard_qc_filter(v, a, caller="bcftools")
+    assert _kept(a) == [1000]
+    F.hard_qc_filter(v, b, caller="bcftools", bias_eff=0.1)     # a stricter bar fails it
+    assert _kept(b) == []
+    F.hard_qc_filter(v, c, caller="bcftools", bias_eff=None)    # and so does z alone
+    assert _kept(c) == []
+
+
+def test_the_effect_gate_never_rescues_a_low_depth_site_the_z_would_fail(tmp_path):
+    """Where reads are few, z > 5 already implies a large effect, so the combined rule is
+    the z rule: nothing that failed before at single-sample depth passes now."""
+    counts = _strands(50, 50, 50, 50)                           # 100 ref, 100 alt
+    assert _eff(5.01, 100, 100) > 0.15
+    v = _vcf(tmp_path, [(1000, _with(RPBZ=5.01, **counts)), (2000, _with(SCBZ=-5.01, **counts)),
+                        (3000, _with(RPBZ=4.99, **counts))])
+    out = str(tmp_path / "o.bcf")
+    F.hard_qc_filter(v, out, caller="bcftools")
+    assert _kept(out) == [3000]
+
+
+def test_mapping_quality_bias_is_gated_the_same_way(tmp_path):
+    """MQBZ compares ref with alt reads like RPBZ; MQSBZ compares the two strands, so its
+    counts are the strand totals."""
+    n = 20000
+    allele = _strands(n // 2, n // 2, n // 2, n // 2)          # 20000 ref, 20000 alt
+    z_small = _z_for(0.05, n, n)                                # ~ 12 at this depth
+    assert z_small > 5
+    v = _vcf(tmp_path, [(1000, _with(MQBZ=z_small, **allele)),
+                        (2000, _with(MQSBZ=z_small, **allele)),
+                        (3000, _with(MQBZ=_z_for(0.3, n, n), **allele))])
+    out = str(tmp_path / "o.bcf")
+    F.hard_qc_filter(v, out, caller="bcftools")
+    assert _kept(out) == [1000, 2000]
+    # a lopsided strand table changes MQSBZ's counts but not MQBZ's
+    lop = _strands(19000, 1000, 19000, 1000)                    # 38000 fwd, 2000 rev
+    z_mqs = _z_for(0.05, 38000, 2000)                           # the same small effect
+    v2 = _vcf(tmp_path, [(1000, _with(MQSBZ=z_mqs, **lop)),
+                         (2000, _with(MQSBZ=_z_for(0.3, 38000, 2000), **lop))], name="l.vcf")
+    out2 = str(tmp_path / "o2.bcf")
+    F.hard_qc_filter(v2, out2, caller="bcftools")
+    assert _kept(out2) == [1000]
+
+
+def test_a_non_variant_record_is_not_judged_on_z(tmp_path):
+    """No alt reads, no effect to size: the z tests leave a no-ALT record to no_alt_filter,
+    the same way the strand-bias test does."""
+    hdr = _vcf(tmp_path, [(1000, _with(RPBZ=-14.7, MQBZ=9.0))])
+    txt = pathlib.Path(hdr).read_text().replace(
+        "chr1\t1000\t.\tA\tT\t222\t.\tDP=40",
+        "chr1\t1000\t.\tA\t.\t222\t.\tDP=40").replace("ADF=10,10", "ADF=10").replace(
+        "ADR=10,10", "ADR=10")
+    v = tmp_path / "noalt.vcf"
+    v.write_text(txt)
+    out = str(tmp_path / "o.bcf")
+    F.hard_qc_filter(str(v), out, caller="bcftools")
+    assert _kept(out) == [1000]
+    # bias_eff=None is the old behaviour, and it does remove the record
+    out2 = str(tmp_path / "o2.bcf")
+    F.hard_qc_filter(str(v), out2, caller="bcftools", bias_eff=None)
+    assert _kept(out2) == []
+
+
+def test_switching_a_z_test_off_switches_its_effect_gate_off_too(tmp_path):
+    """read_pos_z=None means no read-position test at all, as it always has -- the effect
+    size qualifies a z, it is not a test of its own. With every z test off, ADF/ADR are
+    not demanded on its behalf either."""
+    v = _vcf(tmp_path, [(1000, _with(RPBZ=40.0, MQBZ=40.0))])
+    out = str(tmp_path / "o.bcf")
+    F.hard_qc_filter(v, out, caller="bcftools", read_pos_z=None, max_bias_z=None)
+    assert _kept(out) == [1000]
+    bare = _vcf(tmp_path, [(1000, {k: val for k, val in CLEAN.items()
+                                    if k not in ("ADF", "ADR")})],
+                tags=[t for t in BCF_INFO if t not in ("ADF", "ADR")], name="bare.vcf")
+    out2 = str(tmp_path / "o2.bcf")
+    F.hard_qc_filter(bare, out2, caller="bcftools", sor=None, read_pos_z=None,
+                     max_bias_z=None)
+    assert _kept(out2) == [1000]
+
+
+def test_the_effect_gate_names_the_strand_tags_it_reads(tmp_path):
+    bare = _vcf(tmp_path, [(1000, {k: val for k, val in CLEAN.items()
+                                    if k not in ("ADF", "ADR")})],
+                tags=[t for t in BCF_INFO if t not in ("ADF", "ADR")])
+    with pytest.raises(SystemExit) as e:
+        F.hard_qc_filter(bare, str(tmp_path / "o.bcf"), caller="bcftools", sor=None)
+    assert "--bias-eff" in str(e.value)

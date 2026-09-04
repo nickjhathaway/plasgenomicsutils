@@ -29,6 +29,13 @@ def get_parser_biallelic_snp_filter() -> argparse.ArgumentParser:
     p.add_argument("--no-biallelic", dest="biallelic", action="store_false",
                    help="Keep sites with more than one ALT allele. The rest of the site set "
                         "is unchanged; this only stops multiallelic SNPs being dropped.")
+    p.add_argument("--mnp-handling", choices=list(F.MNP_HANDLING), default="split",
+                   help="What to do with a multi-base substitution: `split` (default) "
+                        "breaks it into its component SNPs with `bcftools norm -a`, which "
+                        "also rewrites a SNP that was merely written with padding "
+                        "(REF=TTATA ALT=CTATA differs at one base) into its minimal form; "
+                        "`remove` drops the record; `keep` leaves it for a downstream tool "
+                        "that reads MNPs.")
     return p
 
 
@@ -39,7 +46,8 @@ def parse_args_biallelic_snp_filter():
 def biallelic_snp_filter():
     args = parse_args_biallelic_snp_filter()
     F.biallelic_snp_filter(args.input, args.output, trim=not args.no_trim,
-                           snps_only=args.snps_only, biallelic=args.biallelic)
+                           snps_only=args.snps_only, biallelic=args.biallelic,
+                           mnp_handling=args.mnp_handling)
     report_counts(args.input, args.output, "biallelic_snp_filter")
 
 

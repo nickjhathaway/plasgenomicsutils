@@ -35,6 +35,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .reporting import detail, say
+
 # --------------------------------------------------------------------------- #
 #  Region exclusion (CNV windows depress Fws, so they are dropped)            #
 # --------------------------------------------------------------------------- #
@@ -347,7 +349,7 @@ def fws_filter(inp, out, *, fws_min=0.95, estimator="regression", min_depth=0, n
         if r["dropped"] or near:
             score = "unscored" if r["fws"] is None else f"{r['fws']:.4f}"
             margin = "" if r["fws"] is None else f" ({r['fws'] - fws_min:+.4f})"
-            print(f"       {r['sample']}\tFws {score}\t{r['n_sites']:,} sites"
+            detail(f"       {r['sample']}\tFws {score}\t{r['n_sites']:,} sites"
                   f"\t{'DROPPED' if r['dropped'] else 'kept'}{margin}")
 
     if dropped_samples_path:
@@ -364,6 +366,6 @@ def fws_filter(inp, out, *, fws_min=0.95, estimator="regression", min_depth=0, n
     sh(f"{view} | bcftools +fill-tags -O{fmt} -o {q(out)} -- -t AC,AN,AF",
        tools=("bcftools",))
     if unscored:
-        print(f"     {len(unscored)} sample(s) could not be scored and were dropped: "
+        say(f"     {len(unscored)} sample(s) could not be scored and were dropped: "
               + ", ".join(unscored))
     return dropped

@@ -57,10 +57,10 @@ tell you.
 | the question | GATK | bcftools |
 |---|---|---|
 | is the variant only on one strand? | `SOR > 3` | `SOR > 3`, computed from `ADF`/`ADR` |
-| does the variant sit at the ends of reads? | `ReadPosRankSum < -5` | `abs(RPBZ) > 5`, `abs(SCBZ) > 5` |
-| are the reads carrying it poorly mapped? | `MQRankSum < -5`, `MQ < 55` | `abs(MQBZ) > 5`, `abs(MQSBZ) > 5`, `MQ < 55` |
+| does the variant sit at the ends of reads? | `ReadPosRankSum < -5` | `abs(RPBZ) > 5`, `abs(SCBZ) > 5`, each with effect `> 0.15` |
+| are the reads carrying it poorly mapped? | `MQRankSum < -5`, `MQ < 55` | `abs(MQBZ) > 5`, `abs(MQSBZ) > 5`, each with effect `> 0.15`; `MQ < 55` |
 | is the call weak for its depth? | `QD < 20` | `QUAL/INFO/DP` (off by default — see below) |
-| — | — | `abs(BQBZ)`, `MQ0F` (optional extras) |
+| — | — | `abs(BQBZ)` (with effect), `MQ0F` (optional extras) |
 
 ```bash
 plasgenomicsutils hard_qc_filter --caller bcftools --input in.bcf --output 01.bcf
@@ -97,11 +97,36 @@ skew at all, and `INFO/FS` is a 32-bit float, so any p below about `1e-38` is st
 exactly `0.0` — a genuinely one-strand artifact and a merely deep site become the same
 number in the file.
 
-The same caution applies in kind, though not in degree, to the `*BZ` tags: a Mann-Whitney
-z-score also grows with the reads behind it, so a `--read-pos-z` that suits a small cohort
-is a stricter filter on a large one. There is no effect-size form of those tags in a
-bcftools callset; if a large cohort starts failing on `RPBZ` where a small one did not,
-that is the reason to check before widening the threshold.
+The same caution applies to the `*BZ` tags, and they get the same treatment. Each is a
+Mann-Whitney z-score comparing two groups of reads pooled over every sample at the site —
+ref against alt for `RPBZ`, `SCBZ`, `MQBZ` and `BQBZ`, forward against reverse for `MQSBZ` —
+and a z-score grows with the reads behind it: the same modest shift in read position
+scores z = 1 in one sample and z = 30 pooled over 400. So a z only counts when the **effect
+size** behind it, which does not move with depth, is also above `--bias-eff` (default 0.15):
+
+    eff = |z| * sqrt((n1 + n2 + 1) / (12 * n1 * n2))
+
+with `n1`, `n2` the two groups' read counts from `INFO/ADF` + `INFO/ADR`. It is how far
+*P(a read from one group ranks above a read from the other)* sits from 0.5, so 0.15 is a
+65:35 split (rank-biserial correlation 0.3). Multiply every count by the same factor and it
+is unchanged, exactly as SOR is.
+
+The effect is a *qualifier* on the z, not a replacement, because it is noisy where the z is
+not: at a single sample's depth a shift of 0.15 is within sampling error, and a threshold on
+the effect alone fails four times as many low-depth sites as the z does, all of them noise.
+Requiring both is the z rule where reads are few (z = 5 at 100 reads per allele already
+implies an effect of 0.2) and the effect rule where reads are many, and there is no depth at
+which it is stricter than the z alone. On a 374-sample sWGA callset the read-position z was
+failing 64–73% of sites above 8,000 pooled reads; with the effect required as well it fails
+18–20%, the same rate as at lower depth. `--bias-eff none` restores the plain z tests.
+The evidence behind this, with figures and the data to regenerate them, is in
+[Read-position bias as an effect size](read_position_bias_effect_size.md).
+
+This is a bcftools-mode fix. GATK's `ReadPosRankSum` and `MQRankSum` are the same kind of
+statistic and grow the same way, but GATK computes them from the reads of non-hom-ref
+samples only and writes no pooled counts to size the effect from, so they are still
+thresholded on the z; a large GATK cohort failing on them where a small one did not is the
+same phenomenon.
 
 **`QD` does not carry across.** bcftools QUAL is not on GATK's scale — a clean 40x site
 called at QUAL 222 has `QUAL/DP` of 5.6, so reusing GATK's `QD < 20` would throw away a
