@@ -35,6 +35,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .reporting import detail, say
+
 # --------------------------------------------------------------------------- #
 #  Region exclusion (CNV windows depress Fws, so they are dropped)            #
 # --------------------------------------------------------------------------- #
@@ -252,3 +254,118 @@ def compute_fws(ref, alt, *, estimator="regression", min_depth=0, n_bins=10,
         return fws, n_info
 
     raise ValueError(f"unknown estimator {estimator!r} (use 'regression' or 'ratio')")
+
+
+def fws_table(path, *, fws_min=0.95, estimator="regression", min_depth=0, n_bins=10,
+              min_alt_samples=0, snps_only=True, exclude_call_regions=None):
+    """Score every sample in a callset and say which ones a ``fws_min`` cut would keep.
+
+    Returns ``(rows, n_sites)``: one row per sample with ``sample``, ``fws`` (``None`` where
+    it could not be computed), ``n_sites``, ``monoclonal`` and ``dropped``, in file order.
+
+    A sample with no usable sites cannot be scored, and an unscored sample is **not** a
+    monoclonal one -- it is a sample nothing is known about, so it is dropped and counted
+    apart from the polyclonal ones. Silently keeping it would put exactly the samples this
+    step exists to exclude back in the output.
+    """
+    import numpy as np
+
+    exclude = load_exclude_regions(exclude_call_regions) if exclude_call_regions else {}
+    samples, ref, alt = read_ad_vcf(path, exclude, snps_only=snps_only)
+    if ref.size == 0:
+        raise SystemExit("fws_filter: no usable biallelic SNP sites in the input")
+    fws, n_info = compute_fws(ref, alt, estimator=estimator, min_depth=min_depth,
+                              n_bins=n_bins, min_alt_samples=min_alt_samples)
+    rows = []
+    for s, f, n in zip(samples, fws, n_info):
+        scored = bool(np.isfinite(f))
+        mono = scored and float(f) >= fws_min
+        rows.append({"sample": s, "fws": float(f) if scored else None,
+                     "n_sites": int(n), "monoclonal": mono, "dropped": not mono})
+    return rows, int(ref.shape[0])
+
+
+def write_fws_table(rows, path):
+    """Write what :func:`fws_table` decided, one row per sample."""
+    import csv as _csv
+
+    with open(path, "w", newline="") as fh:
+        w = _csv.writer(fh, delimiter="\t", lineterminator="\n")
+        w.writerow(["sample", "fws", "n_sites", "monoclonal", "dropped"])
+        for r in rows:
+            w.writerow([r["sample"], "" if r["fws"] is None else f"{r['fws']:.6f}",
+                        r["n_sites"], r["monoclonal"], r["dropped"]])
+
+
+def fws_filter(inp, out, *, fws_min=0.95, estimator="regression", min_depth=0, n_bins=10,
+               min_alt_samples=0, snps_only=True, exclude_call_regions=None,
+               fws_table_path=None, dropped_samples_path=None):
+    """Keep only samples with Fws >= ``fws_min`` -- the monoclonal infections. Drops samples.
+
+    This is an analysis choice rather than a QC rule, and it is the one step in the chain
+    that changes *which infections* the callset describes, so it is off in the default
+    config and has to be asked for.
+
+    **It removes no variants.** Sites the remaining samples no longer support are left in
+    place: dropping samples changes every allele frequency, so a site that cleared a MAF or
+    missingness bar with the whole cohort may not clear it with this one. That is a real
+    consequence and not one to bury inside a sample filter -- put ``maf_filter`` and
+    ``locus_missingness_filter`` after this step to re-apply them to the survivors.
+    ``AC``/``AN``/``AF`` are refreshed here, so those steps read the new frequencies.
+
+    Fws is measured against the cohort's own allele frequencies, so it wants the callset
+    the rest of the chain has already cleaned -- run it at the end, not as an entry gate.
+    Re-genotyping upstream is what removes the minor-allele noise Fws would otherwise read
+    as within-host diversity.
+
+    ``fws_table_path`` writes the per-sample scores the decision was made from; a sample
+    that vanished from a cohort is otherwise just a name in a log.
+
+    Returns the list of dropped sample names.
+    """
+    from .bcftools import out_flag, q, require, sh
+
+    require("bcftools")
+    rows, n_sites = fws_table(inp, fws_min=fws_min, estimator=estimator,
+                              min_depth=min_depth, n_bins=n_bins,
+                              min_alt_samples=min_alt_samples, snps_only=snps_only,
+                              exclude_call_regions=exclude_call_regions)
+    dropped = sorted(r["sample"] for r in rows if r["dropped"])
+    unscored = sorted(r["sample"] for r in rows if r["fws"] is None)
+    if len(dropped) == len(rows):
+        raise SystemExit(
+            f"fws_filter: Fws >= {fws_min:g} keeps no samples of {len(rows)} "
+            f"(scored over {n_sites:,} site(s)). Lower the threshold, or check that this "
+            f"callset is filtered and re-genotyped -- unfiltered calls read as within-host "
+            f"diversity and push every sample's Fws down.")
+
+    if fws_table_path:
+        write_fws_table(rows, fws_table_path)
+
+    # the borderline ones said out loud, the way sample_coverage_filter does: a drop that
+    # missed by a hair is the one worth seeing without opening the table
+    for r in sorted(rows, key=lambda r: (r["fws"] is not None, r["fws"] or 0)):
+        near = r["fws"] is not None and abs(r["fws"] - fws_min) <= 0.05
+        if r["dropped"] or near:
+            score = "unscored" if r["fws"] is None else f"{r['fws']:.4f}"
+            margin = "" if r["fws"] is None else f" ({r['fws'] - fws_min:+.4f})"
+            detail(f"       {r['sample']}\tFws {score}\t{r['n_sites']:,} sites"
+                  f"\t{'DROPPED' if r['dropped'] else 'kept'}{margin}")
+
+    if dropped_samples_path:
+        with open(dropped_samples_path, "w") as fh:
+            fh.write("\n".join(dropped) + ("\n" if dropped else ""))
+
+    fmt = out_flag(out)
+    if dropped:
+        from .vcf_filters import _write_tmp_list
+        drop_arg = dropped_samples_path or _write_tmp_list(dropped)
+        view = f"bcftools view -S ^{q(drop_arg)} {q(inp)} -Ou"
+    else:
+        view = f"bcftools view {q(inp)} -Ou"
+    sh(f"{view} | bcftools +fill-tags -O{fmt} -o {q(out)} -- -t AC,AN,AF",
+       tools=("bcftools",))
+    if unscored:
+        say(f"     {len(unscored)} sample(s) could not be scored and were dropped: "
+              + ", ".join(unscored))
+    return dropped

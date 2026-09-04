@@ -35,7 +35,11 @@ markdown_extensions:
   - attr_list
   - pymdownx.highlight:
       anchor_linenums: true
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.inlinehilite
   - toc:
       permalink: true
@@ -63,4 +67,5 @@ nav:
   - Command reference: commands.md
   - Methods:
       - Strand-bias artifacts: strand_bias_artifact_exclusion.md
+      - Read-position bias as an effect size: read_position_bias_effect_size.md
       - Fws reconciliation: fws_moimix_reconciliation.md
