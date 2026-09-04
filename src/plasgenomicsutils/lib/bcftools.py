@@ -116,6 +116,58 @@ def count_variants(path: str) -> int:
     return int(proc.stdout.strip() or 0)
 
 
+#: The classes counted per step, in the order they are reported.
+VARIANT_TYPES = ("snps", "indels", "mnps", "mixed", "other", "no_alt")
+
+
+def classify_record(ref: str, alt: str) -> str:
+    """Which class a record belongs to, from its REF and ALT column.
+
+    A record is one class, not several: ``snps`` means **every** ALT is a single-base
+    substitution, which is the same reading ``biallelic_snp_filter --snps-only`` uses. A
+    record carrying both a substitution and an indel is ``mixed`` rather than being counted
+    under both -- `bcftools view -v snps` would keep it, and calling that a SNP is how a
+    mixed record slips through a SNP filter unnoticed.
+    """
+    alts = [a for a in alt.split(",") if a and a != "."]
+    if not alts:
+        return "no_alt"
+    if any(a.startswith(("<", "*")) or "[" in a or "]" in a for a in alts):
+        return "other"
+    kinds = set()
+    for a in alts:
+        if len(a) != len(ref):
+            kinds.add("indels")
+        elif len(ref) == 1:
+            kinds.add("snps")
+        else:
+            kinds.add("mnps")
+    return kinds.pop() if len(kinds) == 1 else "mixed"
+
+
+def variant_type_counts(path: str) -> dict[str, int]:
+    """Records per class plus ``total``, in a single pass over the file.
+
+    This replaces a plain count rather than adding to it: the total falls out of the same
+    scan, so knowing the breakdown costs nothing over knowing the number.
+    """
+    require("bcftools")
+    proc = subprocess.run(f"bcftools query -f '%REF\\t%ALT\\n' {q(path)}", shell=True,
+                          executable="/bin/bash", stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(f"ERROR: could not read variants from {path}")
+    counts = dict.fromkeys(VARIANT_TYPES, 0)
+    total = 0
+    for line in proc.stdout.splitlines():
+        ref, _, alt = line.partition("\t")
+        counts[classify_record(ref, alt)] += 1
+        total += 1
+    counts["total"] = total
+    return counts
+
+
 def report_counts(before: str, after: str, label: str) -> None:
     """Print a per-step ``before -> after`` variant-count line."""
     nb, na = count_variants(before), count_variants(after)

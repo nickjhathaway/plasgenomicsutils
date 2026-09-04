@@ -238,3 +238,84 @@ def test_bundled_assets_exist():
     assert assets.resolve_bed("/some/plain/path.bed") == "/some/plain/path.bed"
     with pytest.raises(SystemExit):
         assets.asset_path("builtin:does_not_exist")
+
+
+# ---- SNP-ness and allele count are separate questions ------------------------------
+
+def _types_vcf(tmp_path):
+    """One record of each shape the two tests have to tell apart."""
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=c1,length=10000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2"]
+    rows = [(100, "A", "T", "0/1", "1/1"),          # biallelic SNP
+            (200, "A", "T,G", "1/2", "1/1"),        # multiallelic SNP
+            (300, "A", "T,ATT", "1/2", "1/1"),      # mixed SNP + indel
+            (400, "ATT", "A", "0/1", "1/1"),        # indel
+            (500, "A", ".", "0/0", "0/0"),          # no ALT
+            (600, "AT", "GC", "0/1", "1/1")]        # MNP
+    for pos, ref, alt, g1, g2 in rows:
+        hdr.append(f"c1\t{pos}\t.\t{ref}\t{alt}\t.\t.\t.\tGT\t{g1}\t{g2}")
+    p = tmp_path / "types.vcf"
+    p.write_text("\n".join(hdr) + "\n")
+    return str(p)
+
+
+def _kept(path):
+    out = subprocess.run(["bcftools", "query", "-f", "%POS\n", path], stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True)
+    return [int(x) for x in out.stdout.split()]
+
+
+@pytest.mark.parametrize("kw,expected", [
+    ({}, [100]),                                        # the default: biallelic SNPs
+    ({"biallelic": False}, [100, 200]),                 # SNPs, multiallelic allowed
+    ({"snps_only": False}, [100, 400, 600]),            # biallelic anything
+])
+def test_the_two_tests_are_independent(tmp_path, kw, expected):
+    out = str(tmp_path / "o.bcf")
+    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=False, **kw)
+    assert _kept(out) == expected
+
+
+def test_a_mixed_snp_indel_record_is_not_a_snp(tmp_path):
+    """`bcftools view -v snps` keeps a record if ANY allele is a SNP, so `A>T,ATT` passes it.
+    Selecting by exclusion is what makes 'SNPs only' mean every allele."""
+    out = str(tmp_path / "o.bcf")
+    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=False, biallelic=False)
+    assert 300 not in _kept(out)
+
+
+def test_a_record_left_with_no_alt_is_not_kept_by_the_type_test(tmp_path):
+    """With the biallelic test off nothing else drops it, so `ref` has to be excluded too."""
+    out = str(tmp_path / "o.bcf")
+    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=False, biallelic=False)
+    assert 500 not in _kept(out)
+
+
+def test_trimming_still_rescues_a_site_that_becomes_biallelic(tmp_path):
+    """The reason the step runs after re-genotyping, unchanged by the split."""
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=c1,length=10000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2",
+           "c1\t100\t.\tA\tT,G\t.\t.\t.\tGT\t0/1\t1/1"]     # nothing carries the G
+    v = tmp_path / "trim.vcf"
+    v.write_text("\n".join(hdr) + "\n")
+    trimmed, plain = str(tmp_path / "a.bcf"), str(tmp_path / "b.bcf")
+    F.biallelic_snp_filter(str(v), trimmed, trim=True)
+    F.biallelic_snp_filter(str(v), plain, trim=False)
+    assert _kept(trimmed) == [100] and _kept(plain) == []
+
+
+def test_turning_everything_off_is_refused_rather_than_copying_the_input(tmp_path):
+    with pytest.raises(SystemExit, match="drop it from the chain"):
+        F.biallelic_snp_filter(_types_vcf(tmp_path), str(tmp_path / "o.bcf"),
+                               trim=False, snps_only=False, biallelic=False)
+
+
+def test_with_both_tests_off_it_trims_and_says_so(tmp_path, capsys):
+    """Legal, since trimming is real work -- but it must not look like a filter that ran."""
+    out = str(tmp_path / "o.bcf")
+    F.biallelic_snp_filter(_types_vcf(tmp_path), out, trim=True, snps_only=False,
+                           biallelic=False)
+    assert "only trims unused ALT alleles" in capsys.readouterr().out
+    assert set(_kept(out)) == {100, 200, 300, 400, 500, 600}

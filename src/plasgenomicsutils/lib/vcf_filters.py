@@ -314,41 +314,75 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
             os.unlink(prep)
 
 
-def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True) -> None:
-    """Keep biallelic SNPs, optionally trimming unused ALT alleles first.
+#: Every variant type that is not a SNP. Selecting SNPs by exclusion rather than with
+#: ``-v snps`` is deliberate: ``-v snps`` keeps a record if **any** of its alleles is a SNP,
+#: so a mixed ``A>T,ATT`` site passes it. Excluding the rest leaves only records whose every
+#: allele is a substitution. ``ref`` is in the list because a record left with no ALT is not
+#: a variant, and would otherwise survive when the biallelic test is off.
+NON_SNP_TYPES = "indels,mnps,other,ref,bnd"
 
-    When ``trim`` is set (default), ALT alleles absent from every genotype are
-    dropped before the biallelic test (``bcftools view --trim-alt-alleles``). Run
-    this AFTER re-genotyping (``filter_ad_regenotype``): a site that looked
-    multiallelic only because one sample carried a low-level artifact allele —
-    now re-genotyped away — collapses to a genuine biallelic SNP and is kept,
-    instead of being discarded by a naive ``-m2 -M2``. Sites left with no ALT
-    after trimming are dropped by ``-v snps``.
+
+def _snp_select_args(snps_only: bool, biallelic: bool) -> str:
+    parts = []
+    if snps_only:
+        parts.append(f"-V {NON_SNP_TYPES}")
+    if biallelic:
+        parts.append("-m2 -M2")
+    return " ".join(parts)
+
+
+def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True,
+                         snps_only: bool = True, biallelic: bool = True) -> None:
+    """Keep SNPs and/or biallelic sites, optionally trimming unused ALT alleles first.
+
+    The two questions are separate knobs because they are separate questions. ``snps_only``
+    drops anything that is not a substitution; ``biallelic`` drops anything with more than one
+    ALT. Both default on, which is the historical behaviour and what most population-genetic
+    tooling wants. Turning ``biallelic`` off keeps multiallelic SNPs, for downstream tools
+    that can read them -- the site set is otherwise identical.
+
+    ``trim`` (default) drops ALT alleles absent from every genotype before either test
+    (``bcftools view --trim-alt-alleles``). Run this AFTER re-genotyping
+    (:func:`~plasgenomicsutils.lib.regenotype.filter_ad_regenotype`): a site that looked
+    multiallelic only because one sample carried a low-level artifact allele -- now
+    re-genotyped away -- collapses to a genuine biallelic SNP and is kept, instead of being
+    discarded by a naive ``-m2 -M2``. Trimming is also what turns a mixed ``A>T,ATT`` record
+    into a plain SNP when nothing carried the indel, so the type test belongs after it too.
+
+    With both tests off the step only trims, which it says rather than looking like a no-op.
     """
     fmt = out_flag(out)
+    select = _snp_select_args(snps_only, biallelic)
+    if not select:
+        print("     biallelic_snp_filter: no type or allele-count test is on, so this step "
+              "only trims unused ALT alleles")
+        if not trim:
+            raise SystemExit(
+                "biallelic_snp_filter: trim, snps_only and biallelic are all off, so this "
+                "step would copy its input; drop it from the chain instead")
     if not trim:
-        sh(f"bcftools view -m2 -M2 -v snps {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        sh(f"bcftools view {select} {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
         return
     # A genotype-linked Number=G field (e.g. PL) whose length disagrees with the genotypes
     # makes `--trim-alt-alleles` abort. If any are present, surgically null just the
     # inconsistent records first (see strip_stale_format; valid likelihoods are kept), then
-    # trim and keep biallelic SNPs.
-    if any(t in format_tags(inp) for t in GENOTYPE_LINKED_FORMAT):
-        tmp = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
-        try:
+    # trim and select.
+    src = inp
+    tmp = None
+    try:
+        if any(t in format_tags(inp) for t in GENOTYPE_LINKED_FORMAT):
+            tmp = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
             strip_stale_format(inp, tmp, fields=GENOTYPE_LINKED_FORMAT, mode="mismatch")
-            sh(f"bcftools view --trim-alt-alleles {q(tmp)} -Ou "
-               f"| bcftools view -m2 -M2 -v snps - -O{fmt} -o {q(out)}", tools=("bcftools",))
-        finally:
+            src = tmp
+        sh(f"bcftools view --trim-alt-alleles {q(src)} -Ou "
+           f"| bcftools view {select} - -O{fmt} -o {q(out)}", tools=("bcftools",))
+    finally:
+        if tmp:
             for suffix in ("", ".csi"):
                 try:
                     os.remove(tmp + suffix)
                 except OSError:
                     pass
-    else:
-        sh(f"bcftools view --trim-alt-alleles {q(inp)} -Ou "
-           f"| bcftools view -m2 -M2 -v snps - -O{fmt} -o {q(out)}", tools=("bcftools",))
-
 
 
 class _WhitelistTally:
@@ -634,6 +668,44 @@ def locus_missingness_filter(inp: str, out: str, *, f_missing_max: float = 0.05,
             os.unlink(prep)
 
 
+def _maf_expr(maf_min: float, maf_max: float | None) -> str:
+    """The frequency window as a bcftools expression on ``INFO/MAF``.
+
+    ``MAF`` (from ``+fill-tags``) is the frequency of the **second most common** allele --
+    the textbook minor-allele frequency, and the same quantity the grouped path computes, so
+    the two cannot mean different things.
+
+    Neither of the obvious ``bcftools view`` shortcuts says this:
+
+    * ``-q`` defaults to ``nref``, the **sum** of every alternate's frequency. Three
+      alternates at 1% each sum past a 2% floor, so a site whose every allele is below the
+      floor survives it.
+    * ``-q X:minor`` is the **least frequent** allele, not the second most common. On a site
+      at 0.60 / 0.35 / 0.05 that is 0.05, so a 0.10 floor drops a site with a 35% minor
+      allele. It is a far stricter rule than the name suggests, and on a multiallelic
+      callset it removes almost everything.
+
+    On a biallelic site all three coincide, which is why this only surfaced once multiallelic
+    SNPs could reach the step.
+
+    The two bounds ask different questions, so they are spelled differently:
+
+    * ``maf_max`` unset (the usual case) is a **minor-allele floor**: ``MAF >= maf_min``. A
+      floor on the minor allele already implies a ``1 - maf_min`` ceiling on the major one,
+      so the symmetric window needs nothing else.
+    * an explicit ``maf_max`` is an **alternate-frequency band**, which is what asking for an
+      asymmetric window means: ``maf_min <= MAX(AF) <= maf_max``, on the most common
+      alternate. Reading the floor as a minor-allele floor here would quietly make an
+      asymmetric request stricter than it looks -- a site at AF 0.75 has a 0.25 minor allele,
+      and would fail a 0.3 floor despite sitting inside a 0.3-0.8 band.
+
+    Both spellings select exactly what the old ``-q``/``-Q`` pair did on a biallelic site.
+    """
+    if maf_max is None:
+        return f"MAF >= {maf_min}"
+    return f"MAX(AF) >= {maf_min} && MAX(AF) <= {maf_max}"
+
+
 def maf_filter(inp: str, out: str, *, maf_min: float = 0.01, maf_max: float | None = None,
                meta: str | None = None, group_col: str | None = None,
                sample_col: str = "sample", keep_bed: str | None = None) -> int:
@@ -641,11 +713,15 @@ def maf_filter(inp: str, out: str, *, maf_min: float = 0.01, maf_max: float | No
 
     The two bounds are usually symmetric (a 0.02 floor pairs with a 0.98 ceiling), so
     ``maf_max`` defaults to ``1 - maf_min`` when left unset; pass it explicitly for an
-    asymmetric window.
+    asymmetric window. Left unset the test is a minor-allele floor (``INFO/MAF``, the
+    frequency of the second most common allele); given a value it becomes a band on the most
+    common alternate, which is what an asymmetric request means. Either way the window reads
+    the same however many alleles a site has -- see :func:`_maf_expr`.
 
     With ``meta`` + ``group_col`` (a per-sample metadata table with ``sample_col`` and
     ``group_col`` columns), the frequency is judged **per group** and a site is kept if its
-    minor-allele frequency is >= ``maf_min`` in **any** group — computed on the combined VCF
+    minor-allele frequency (``+fill-tags -t MAF``, the same quantity the ungrouped
+    window tests) is >= ``maf_min`` in **any** group — computed on the combined VCF
     (never split-and-merged), so every sample's genotypes are preserved even at a site that
     is monomorphic in its own group but polymorphic elsewhere. ``maf_max`` is not used in
     grouped mode (the criterion is a per-group minor-allele-frequency floor).
@@ -657,18 +733,18 @@ def maf_filter(inp: str, out: str, *, maf_min: float = 0.01, maf_max: float | No
     if meta and group_col:
         return _maf_filter_grouped(inp, out, meta=meta, group_col=group_col,
                                    sample_col=sample_col, maf_min=maf_min, keep_bed=keep_bed)
-    if maf_max is None:
-        maf_max = 1 - maf_min
     fmt = out_flag(out)
+    expr = _maf_expr(maf_min, maf_max)
     if not keep_bed:
-        sh(f"bcftools +fill-tags {q(inp)} -Ou -- -t AC,AN,AF "
-           f"| bcftools view -q {maf_min} -Q {maf_max} -O{fmt} -o {q(out)}",
+        sh(f"bcftools +fill-tags {q(inp)} -Ou -- -t AC,AN,AF,MAF "
+           f"| bcftools view -i {q(expr)} -O{fmt} -o {q(out)}",
            tools=("bcftools",))
         return 0
     prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
     try:
-        sh(f"bcftools +fill-tags {q(inp)} -Ob -o {q(prep)} -- -t AC,AN,AF", tools=("bcftools",))
-        sh(f"bcftools view -q {maf_min} -Q {maf_max} {q(prep)} -O{fmt} -o {q(out)}",
+        sh(f"bcftools +fill-tags {q(inp)} -Ob -o {q(prep)} -- -t AC,AN,AF,MAF",
+           tools=("bcftools",))
+        sh(f"bcftools view -i {q(expr)} {q(prep)} -O{fmt} -o {q(out)}",
            tools=("bcftools",))
         return _rescue_whitelisted(prep, out, keep_bed, "maf_filter")
     finally:

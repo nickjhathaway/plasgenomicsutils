@@ -296,9 +296,119 @@ plasgenomicsutils filter_pipeline --emit-default-config pipeline.json
 plasgenomicsutils filter_pipeline --input in.bcf --config pipeline.json --outdir filtered/
 ```
 
-Each step writes `filtered/NN_<name>.bcf` (indexed) plus a `variant_counts.tsv` tally
-(`step`, `kind`, `count`, `path` — `kind` separates a filter's variant count from a report's
-row count and from a step that was switched off).
+Each step writes `filtered/NN_<name>.bcf` (indexed) plus a `variant_counts.tsv` tally.
+Alongside the total, every row carries the **variant classes** behind it — `snps`, `indels`,
+`mnps`, `mixed`, `other`, `no_alt` — so where the non-SNPs went is a column rather than a
+re-run:
+
+```
+step                      count   snps  indels
+input                     437     241   34
+no_alt_filter             275     241   34
+hard_qc_filter            194     179   15
+singleton_filter_add_ads  175     163   12
+tandem_repeat_mask        167     163   4
+biallelic_snp_filter      160     160   0
+```
+
+A record belongs to exactly one class: `snps` means *every* ALT is a single-base
+substitution, matching what `biallelic_snp_filter --snps-only` keeps. A record carrying both
+a substitution and an indel is `mixed`, not counted under both — calling it a SNP is how a
+mixed record slips through a SNP filter unnoticed. The breakdown costs nothing: the total
+falls out of the same pass.
+
+### The config that actually ran
+
+`filtered/config_used.json` records the run's configuration with **every unset parameter
+filled in from the step's own defaults**, so the thresholds that did the work sit beside the
+results instead of in whichever version of the package was installed that day:
+
+```json
+{ "name": "hard_qc_filter",
+  "params": { "caller": "bcftools", "qd": "auto", "mq": 55, "sor": 3,
+              "read_pos_z": 5.0, "max_bias_z": 5.0, "strand_bias_p": "auto", ... } }
+```
+
+Steps switched off keep their entry and their defaults — what did *not* run is part of the
+record too. A `_meta` block notes the package version, the absolute input path and the start
+time, and is ignored on the way back in: the file is a valid config, so re-running it
+reproduces the run. It is written before the first step, so a run that dies partway still
+leaves the record of what it was attempting.
+
+### Keeping the footprint down
+
+`remove_intermediates` (or `--remove-intermediates`) deletes each step's callset the moment
+the next step has read it, so a long chain over a large cohort costs one intermediate on disk
+rather than all of them:
+
+```bash
+plasgenomicsutils filter_pipeline --input in.bcf --config pipeline.json \
+  --outdir filtered/ --remove-intermediates
+```
+
+The input is never touched, the final callset and its SNP panel stay, and the side tables —
+the tally, the config record, the coverage and Fws tables — are small and are kept whatever
+this says. `variant_counts.tsv` still has a row per step, with `removed` marking the ones
+whose file is gone, so the run is as auditable as it was; only the bytes are missing.
+
+### The default chain
+
+```mermaid
+flowchart TD
+    IN(["input callset — VCF / BCF"])
+    S01["01 · no_alt_filter *"]
+    S02["02 · hard_qc_filter *"]
+    S03["03 · singleton_counts"]
+    S04["04 · singleton_filter_add_ads *"]
+    S05["05 · tandem_repeat_mask *"]
+    S06["06 · core_region_filter *"]
+    S07["07 · paralog_mask *"]
+    S08["08 · filter_ad_regenotype"]
+    S09["09 · biallelic_snp_filter"]
+    S10["10 · sample_coverage_filter"]
+    S11["11 · locus_missingness_filter *"]
+    S12["12 · maf_filter *"]
+    S13["13 · fws_filter"]
+    OUT(["filtered callset + SNP panel BED"])
+
+    IN --> S01 --> S02 --> S03 --> S04 --> S05 --> S06 --> S07 --> S08
+    S08 --> S09 --> S10 --> S11 --> S12 --> S13 --> OUT
+
+    classDef variant stroke:#0f766e,stroke-width:2px
+    classDef genotype stroke:#b45309,stroke-width:2px
+    classDef sample stroke:#6d28d9,stroke-width:2px
+    classDef report stroke:#64748b,stroke-width:1px,stroke-dasharray:2 3
+    classDef disabled stroke:#a16207,stroke-width:2px,stroke-dasharray:6 4
+
+    class S01,S02,S04,S05,S06,S09,S11,S12 variant
+    class S08 genotype
+    class S10 sample
+    class S03 report
+    class S07,S13 disabled
+```
+
+Reading it: a **teal** step removes variants, **amber** rewrites genotypes without removing
+any, **purple** removes samples, and the **dotted grey** one is a report that changes nothing.
+The two **dashed gold** steps ship switched off. A `*` marks the eight steps that honour
+`keep_bed`.
+
+That colouring is the distinction the config itself does not show, and it explains most of the
+chain's shape:
+
+* **08 removes nothing.** It zeroes alleles under the AD floor and re-calls the genotypes; a
+  sample left with no evidence becomes `./.`. Everything below reads the cleaned calls.
+* **09 is the only type-aware step**, so indels ride the whole chain to it. It comes after 08
+  because trimming unused ALT alleles is what collapses a site that looked multiallelic only
+  because of a since-re-genotyped artifact.
+* **10 and 13 remove samples**, so every allele frequency below them is computed over a
+  smaller cohort. `fws_filter` removes no variants at all, which is why re-running 11 and 12
+  after it is worth doing when the site set has to match the samples that remain.
+* **`keep_bed` exempts a variant from one rule, not from the chain.** 09, 10 and 13 judge whole
+  sites or whole samples and cannot be whitelisted — which is how a whitelisted locus can
+  survive hard QC and still disappear at step 10.
+
+A disabled step keeps its number, so the outputs read `01_`, `02_`, `04_` … with 03 missing.
+That keeps a file name pointing at the config entry that produced it.
 
 ### Turning steps on and off
 
