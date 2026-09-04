@@ -15,6 +15,12 @@ dependencies:
   - pysam >=0.21          # record mutation (harmonize) + general VCF/BCF IO
   - cyvcf2 >=0.30         # bulk FORMAT-array read/write (fast filter_ad_regenotype)
   - scikit-allel >=1.3    # rogers_huff_r for the LD scan; pairwise-complete by design
+  # scikit-allel pulls dask in, and nothing in its own metadata stops a solver choosing a
+  # very old one: CI once resolved dask 2023.3.0 beside numpy 2.5, and that dask imports
+  # `numpy.compat`, which numpy 2.0 removed -- so `import allel` died at collection. dask
+  # gained numpy 2 support in the 2024.6 series; this floor is comfortably past it. It is
+  # not a dependency we use directly, only one we have to keep resolvable.
+  - dask >=2024.12
   # --- external CLIs the vcf/ filtering commands shell out to ---
   # bcftools is pinned, not floored. Its behaviour is not stable across releases in ways
   # that change results silently: 1.19 does not classify a record with ALT="." as type
