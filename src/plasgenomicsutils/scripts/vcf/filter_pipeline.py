@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 
 from ...lib import filter_pipeline as P
+from ...lib.bcftools import VARIANT_TYPES
+from ...lib.reporting import LEVELS, say, set_verbosity
 
 
 def get_parser_filter_pipeline() -> argparse.ArgumentParser:
@@ -20,6 +22,18 @@ def get_parser_filter_pipeline() -> argparse.ArgumentParser:
     p.add_argument("--outdir", default="filter_pipeline", help="Output directory")
     p.add_argument("--emit-default-config", metavar="PATH", default=None,
                    help="Write a starting default config to PATH and exit")
+    p.add_argument("--remove-intermediates", action="store_true",
+                   help="Delete each step's callset as soon as the next step has read it, "
+                        "so a long chain over a large cohort costs one intermediate on disk "
+                        "rather than all of them. The input is never touched, the final "
+                        "output stays, and the side tables are kept. Overrides "
+                        "\"remove_intermediates\" in the config.")
+    p.add_argument("--verbosity", choices=list(LEVELS), default="verbose",
+                   help="How much the run narrates. `verbose` (default) gives one line per "
+                        "step plus each report's summary; `very-verbose` adds the "
+                        "per-sample lines behind those summaries, which is unreadable on a "
+                        "large cohort and exactly what you want on a small one; `quiet` "
+                        "prints nothing. Every table and file is written either way.")
     p.add_argument("--no-snp-bed", action="store_true",
                    help="Do not auto-write the final SNP-panel BED (used by the IBD tools)")
     return p
@@ -53,27 +67,42 @@ def filter_pipeline():
     if not args.input or not args.config:
         raise SystemExit("ERROR: --input and --config are required (or use --emit-default-config)")
 
+    set_verbosity(args.verbosity)
     config = P.load_config(args.config)
+    if args.remove_intermediates:
+        config["remove_intermediates"] = True
     tally = P.run_pipeline(args.input, args.outdir, config, emit_snp_bed=not args.no_snp_bed)
 
-    print("\n=== variant counts per step ===")
+    say("\n=== variant counts per step ===")
     for row in tally:
         kind, count, _ = _tally_fields(row)
         shown = "skipped" if kind == "skipped" else f"{count:,}"
         note = " rows" if kind == "report" else ""
         if row.get("rescued"):
             note += f"   (+{row['rescued']:,} whitelisted)"
-        print(f"  {row['step']:<28} {shown:>12}{note}")
+        types = P.type_counts_note(row.get("types") or {})
+        if types:
+            note += types
+        if row.get("removed"):
+            note += "   (removed)"
+        say(f"  {row['step']:<28} {shown:>12}{note}")
 
     # `rescued` records how many of a step's kept variants only survived because the
     # whitelist covered them -- a run artifact rather than something to re-derive from the
     # console, since it is the number that says whether the whitelist did anything
-    lines = ["step\tkind\tcount\trescued\tpath\n"]
+    cols = ["step", "kind", "count", *VARIANT_TYPES, "rescued", "removed", "path"]
+    lines = ["\t".join(cols) + "\n"]
     for row in tally:
         kind, count, path = _tally_fields(row)
-        lines.append(f"{row['step']}\t{kind}\t{count}\t{row.get('rescued', '')}\t{path}\n")
+        types = row.get("types") or {}
+        cells = [row["step"], kind, str(count),
+                 *(str(types[t]) if types else "" for t in VARIANT_TYPES),
+                 str(row.get("rescued", "")),
+                 "True" if row.get("removed") else "",
+                 path]
+        lines.append("\t".join(cells) + "\n")
     Path(args.outdir, "variant_counts.tsv").write_text("".join(lines))
-    print(f"\n  -> {Path(args.outdir, 'variant_counts.tsv')}")
+    say(f"\n  -> {Path(args.outdir, 'variant_counts.tsv')}")
 
 
 if __name__ == "__main__":

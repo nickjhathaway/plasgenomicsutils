@@ -6,10 +6,21 @@ on:
   pull_request:
   workflow_dispatch:
 
+# bcftools is the one dependency whose *behaviour* moves between releases, and the
+# filtering steps shell out to it constantly, so it is covered twice rather than once:
+#
+#   `pytest`  -- whatever the distro ships, because that is what `apt-get install bcftools`
+#                gives people (1.19 on the current Ubuntu runner) and what most installs
+#                will actually be running.
+#   `conda`   -- the exact version `environment.yml` pins, which is the environment we hand
+#                people and the newest release we claim to support.
+#
+# Both jobs print the versions they are testing, so when a release changes semantics again
+# the log says which version did it rather than leaving it to be bisected.
 jobs:
   pytest:
     runs-on: ${{ matrix.os }}
-    name: ${{ matrix.os }} (py${{ matrix.python-version }})
+    name: ${{ matrix.os }} (py${{ matrix.python-version }}, distro bcftools)
     # The suite runs in well under a minute; the ceiling covers a slow brew/apt step.
     # Without it a job that hangs in setup holds a runner for the 6-hour default.
     timeout-minutes: 25
@@ -19,7 +30,11 @@ jobs:
         # pysam / cyvcf2 are htslib-based and have no Windows wheels, so CI covers
         # Linux + macOS across the supported Python versions (requires-python >= 3.10).
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # 3.14 is here to find out early when a new release breaks a dependency, not
+        # because it is required: scikit-allel ships no cp314 wheel yet, so pip builds it
+        # from the sdist there. That works today and is the first thing to look at if a
+        # 3.14 job goes red on install rather than on a test.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -36,8 +51,46 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install bcftools bedtools
 
+      - name: Report the tool versions under test
+        run: |
+          bcftools --version | head -1
+          bedtools --version
+
       - name: Install package
         run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest -q
+
+  # The same suite against the pinned toolchain from environment.yml. This is both the
+  # newest-bcftools test and a check that the environment we document actually installs and
+  # passes -- offering people an environment file nothing verifies is how it rots.
+  conda:
+    runs-on: ubuntu-latest
+    name: environment.yml (pinned bcftools)
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash -el {0}          # micromamba needs a login shell to activate the env
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v2
+        timeout-minutes: 20
+        with:
+          environment-file: environment.yml
+          cache-environment: true
+
+      - name: Report the tool versions under test
+        run: |
+          bcftools --version | head -1
+          bedtools --version
+          python --version
+
+      # environment.yml carries pytest and every runtime dependency, so only the package
+      # itself is left, and it goes in without deps to keep pip from second-guessing conda
+      - name: Install package
+        run: pip install -e . --no-deps
 
       - name: Run tests
         run: pytest -q

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import math
 import os
+import pathlib
 import shutil
 import subprocess
 import tempfile
@@ -189,8 +190,31 @@ def _mpileup_call_cmd(*, ref: str, bams: list[str] | None, bam_list: str | None,
     return " ".join(pile) + " | " + " ".join(call)
 
 
+#: What ``--bam-dir`` picks up. CRAM as well as BAM, because ``--bam`` takes either and a
+#: directory of CRAMs reporting "no alignments" would be a silly way to find that out.
+BAM_DIR_PATTERNS = ("*.bam", "*.cram")
+
+
+def bams_in_dir(directory: str, patterns: tuple[str, ...] = BAM_DIR_PATTERNS) -> list[str]:
+    """Every alignment directly in ``directory``, sorted.
+
+    Sorted because the order decides the sample order of the output callset, and glob order
+    is whatever the filesystem says -- two runs over the same directory should not produce
+    columns in different orders. Not recursive: a directory of alignments is what this is
+    for, and walking a tree would quietly pick up an unrelated subdirectory of BAMs.
+    """
+    if not os.path.isdir(directory):
+        raise SystemExit(f"call_variants: --bam-dir {directory} is not a directory")
+    found = sorted(str(p) for pat in patterns
+                   for p in pathlib.Path(directory).glob(pat))
+    if not found:
+        raise SystemExit(f"call_variants: no {' / '.join(patterns)} in {directory}")
+    return found
+
+
 def call_variants(ref: str, out: str, *, bams: list[str] | None = None,
-                  bam_list: str | None = None, regions: str | None = None,
+                  bam_list: str | None = None, bam_dir: str | None = None,
+                  regions: str | None = None,
                   threads: int = 1, chunk_size: int | None = None,
                   annotations: str = BCFTOOLS_MPILEUP_ANNOTATIONS, ploidy: str = "2",
                   ignore_rg: bool = True, sample_suffix: str | None = ".bam",
@@ -204,9 +228,10 @@ def call_variants(ref: str, out: str, *, bams: list[str] | None = None,
 
     Parameters
     ----------
-    bams, bam_list:
-        The alignments, given either way; ``bam_list`` is a file of paths, one per line,
-        and is what `bcftools mpileup --bam-list` reads.
+    bams, bam_list, bam_dir:
+        The alignments, given one of three ways: ``bams`` as paths, ``bam_list`` as a file
+        of paths one per line (what `bcftools mpileup --bam-list` reads), or ``bam_dir`` as
+        a directory whose alignments are used, sorted -- see :func:`bams_in_dir`.
     regions:
         Optional region file. A ``.bed`` is read 0-based half-open, anything else as
         1-based ``CHROM POS``, which is bcftools' own rule and is preserved when splitting.
@@ -239,10 +264,15 @@ def call_variants(ref: str, out: str, *, bams: list[str] | None = None,
 
     Returns the commands run, in order, so a run can be reproduced or inspected.
     """
-    if not bams and not bam_list:
-        raise SystemExit("call_variants: give --bam (one or more) or --bam-list")
-    if bams and bam_list:
-        raise SystemExit("call_variants: --bam and --bam-list are alternatives, not both")
+    given = [n for n, v in (("--bam", bams), ("--bam-list", bam_list),
+                            ("--bam-dir", bam_dir)) if v]
+    if not given:
+        raise SystemExit("call_variants: give --bam (one or more), --bam-list or --bam-dir")
+    if len(given) > 1:
+        raise SystemExit(f"call_variants: {', '.join(given)} are alternatives, not both")
+    if bam_dir:
+        bams = bams_in_dir(bam_dir)
+        print(f"  {len(bams)} alignment(s) in {bam_dir}")
     if threads < 1:
         raise SystemExit("call_variants: --threads must be at least 1")
     if not dry_run:

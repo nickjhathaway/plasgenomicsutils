@@ -13,22 +13,37 @@ Fws over the **same site set** (every biallelic record carrying `AD`):
 | | value |
 |---|---|
 | samples compared | 60 |
-| max \|moimix − python\| | **4.8 × 10⁻⁵** |
-| mean \|diff\| | 2.5 × 10⁻⁵ |
+| max \|moimix − python\| (6-decimal output) | **4.9 × 10⁻⁷** |
+| max \|moimix − python\| (full precision, via the Python API) | 6.7 × 10⁻¹⁶ |
 
-The residual is entirely the 4-decimal rounding of the earlier output format
-(`0.9289` vs moimix `0.928911`); at full precision the estimator is identical. The
-output now prints 6 decimals.
+The residual in the written table is the 6-decimal output rounding; at full precision the
+estimator is identical. (Re-checked 2026-09-05 after the multiallelic generalisation.)
 
 ### Why the site set has to match
 
 `moimix::getFws` uses the first two `AD` columns (ref, alt) of **every** variant in
 the GDS — it does not filter by allele string, so `bcftools norm -m-` output that
 still contains MNP-encoded SNPs (e.g. `REF=CG ALT=TG`) and indels is all included.
-`read_ad_vcf` therefore also reads every biallelic record with `AD` (not just
-single-base REF/ALT); pass a SNP-filtered VCF if you want SNPs only (or
-`--snps-only`). Restricting one tool but not the other is what produced the initial
+`calculate_fws` scores SNPs only by default, so parity needs `--no-snps-only`; it also
+drops ALTs no sample has reads for, and a split record whose ALT has no reads at all with
+it, whereas moimix keeps such records in its first MAF bin — so parity needs `--no-trim`
+too. (Trimmed, the 60-sample fixture loses 8,427 read-less split records and moves by at
+most 1.8 × 10⁻⁴.) Restricting one tool but not the other is what produced the initial
 spurious ~0.05 differences.
+
+### Multiallelic sites are where the two part company
+
+`calculate_fws` counts every allele at a multiallelic site (`1 − Σ p²`; the default,
+`--multiallelic collapse`) and so wants the **unsplit** callset. moimix reads only the
+first two `AD` columns, and `bcftools norm -m-` discards the other alleles' reads when
+it splits, so on a split callset a sample mixing two different ALTs looks homozygous to
+both. Parity therefore holds on split input, where no multiallelic record survives and
+`collapse` and `skip` are the same thing; on the unsplit fixture the estimates differ by
+design. See [Fws](fws.md#multiallelic-sites).
+
+At biallelic sites the generalised quantities are computed the way moimix computes them
+(`1 − (p² + q²)`; minor-allele fraction as a ratio of read counts, matching
+`min(coverage / sum(coverage))`), so the biallelic path is unchanged.
 
 ## Estimator choice (important)
 
@@ -59,9 +74,9 @@ Rscript -e '
   write.table(data.frame(sample=names(f),fws=as.numeric(f)),
               "fws_moimix.tsv",sep="\t",quote=FALSE,row.names=FALSE)'
 
-# python reimplementation (same site set)
+# python reimplementation (same site set: every split record with AD)
 plasgenomicsutils calculate_fws --input-vcf fws_recon.vcf.gz \
-  --estimator regression --out fws_py.tsv
+  --estimator regression --no-snps-only --no-trim --out fws_py.tsv
 
-# compare columns 2 of each TSV -> max|diff| ~5e-5 (rounding)
+# compare columns 2 of each TSV -> max|diff| ~5e-7 (6-decimal rounding)
 ```

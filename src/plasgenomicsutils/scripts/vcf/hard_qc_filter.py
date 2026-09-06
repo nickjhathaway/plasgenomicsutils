@@ -59,7 +59,8 @@ def get_parser_hard_qc_filter() -> argparse.ArgumentParser:
         "these are the rest. Note the *BZ tags are two-sided, since a read-position "
         "artifact leans either way, and that they are test statistics: a z-score grows "
         "with the reads pooled across samples, so a cutoff that suits 20 samples is "
-        "stricter at 400.")
+        "stricter at 400. Each z test therefore also asks how big the shift behind the z "
+        "is (--bias-eff), which does not move with depth.")
     b.add_argument("--strand-bias-p", type=_threshold, default="auto",
                    help="Strand bias as a significance test instead: drop INFO/FS below "
                         "this p-value. Off by default ('auto'), because FS is a p-value "
@@ -69,7 +70,8 @@ def get_parser_hard_qc_filter() -> argparse.ArgumentParser:
                         "FS > 60 corresponds to, if you want it anyway.")
     b.add_argument("--read-pos-z", type=_threshold, default=5.0,
                    help="Variants sitting at the ends of reads: drop |RPBZ| or |SCBZ| "
-                        "above this (default: 5, mirroring ReadPosRankSum < -5)")
+                        "above this (default: 5, mirroring ReadPosRankSum < -5), provided "
+                        "the shift is also at least --bias-eff")
     b.add_argument("--max-bias-z", type=_threshold, default=5.0,
                    help="Mapping-quality bias: drop |MQBZ| or |MQSBZ| above this "
                         "(default: 5, mirroring MQRankSum < -5)")
@@ -77,6 +79,16 @@ def get_parser_hard_qc_filter() -> argparse.ArgumentParser:
                    help="Optional: drop |BQBZ| (base-quality bias) above this")
     b.add_argument("--mq0f", type=_threshold, default=None,
                    help="Optional: drop MQ0F (fraction of MQ0 reads) above this")
+    b.add_argument("--bias-eff", type=_threshold, default=0.15,
+                   help="How big the shift behind a *BZ z-score has to be before the z "
+                        "counts, for every z test above. Computed from INFO/ADF+ADR as "
+                        "|z|*sqrt((n1+n2+1)/(12*n1*n2)) -- ref vs alt reads for RPBZ/SCBZ/"
+                        "MQBZ/BQBZ, forward vs reverse for MQSBZ -- it is how far P(a read "
+                        "of one group ranks above a read of the other) sits from 0.5. "
+                        "Default 0.15, a 65:35 split (rank-biserial 0.3). This is what "
+                        "stops a z test tightening with cohort size: the same shift scores "
+                        "z=1 in one sample and z=30 pooled over 400. 'none' restores the "
+                        "plain z tests.")
     p.add_argument("--keep-bed", default=None,
                    help="Whitelist BED of regions to keep whatever this filter says "
                         "(0-based half-open, like any BED). Whitelisted variants still "
@@ -95,7 +107,7 @@ def hard_qc_filter():
                      sor=args.sor, mqranksum=args.mqranksum,
                      readposranksum=args.readposranksum, fs=args.fs,
                      strand_bias_p=args.strand_bias_p, read_pos_z=args.read_pos_z,
-                     max_bias_z=args.max_bias_z, bqbz_z=args.bqbz_z, mq0f=args.mq0f,
+                     max_bias_z=args.max_bias_z, bias_eff=args.bias_eff, bqbz_z=args.bqbz_z, mq0f=args.mq0f,
                      keep_bed=args.keep_bed)
     report_counts(args.input, args.output, "hard_qc_filter")
 

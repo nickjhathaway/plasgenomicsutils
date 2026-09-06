@@ -66,6 +66,7 @@ def strip_stale_format(inp: str, out: str, *, fields=("PL",),
         sh(f"bcftools annotate -x {drop} {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
         return -1
 
+    import pysam
     from pysam import VariantFile  # optional dep, imported lazily
 
     # pysam preserves value counts correctly in VCF text, but a BCF can retain the old
@@ -74,7 +75,14 @@ def strip_stale_format(inp: str, out: str, *, fields=("PL",),
     tmp = tempfile.NamedTemporaryFile(suffix=".vcf.gz", delete=False).name
     modified = 0
     try:
-        vin = VariantFile(str(inp))
+        # htslib prints "Could not retrieve index file" on opening an unindexed file, even
+        # though nothing here seeks: the records are read start to finish. Quieten it for
+        # the open and put the level back, so a real htslib error still gets through.
+        _verbosity = pysam.set_verbosity(0)
+        try:
+            vin = VariantFile(str(inp))
+        finally:
+            pysam.set_verbosity(_verbosity)
         numbers = {f: vin.header.formats[f].number for f in fields if f in vin.header.formats}
         vout = VariantFile(tmp, "wz", header=vin.header)
         try:

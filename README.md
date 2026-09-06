@@ -290,11 +290,11 @@ they stay in sync as commands and options change.
 `calculate_fws` computes the per-sample Fws statistic (Manske 2012) — a monoclonal
 infection scores Fws ~ 1, a polyclonal one lower — from per-sample allele depths,
 read from **either a VCF/BCF or a bcftools-query AD table**. It reimplements
-`moimix::getFws`:
+`moimix::getFws`, generalised to multiallelic sites:
 
 ```bash
-plasgenomicsutils calculate_fws --input-vcf cohort.snps.bcf --out fws.tsv
-# or from an AD table (CHROM POS REF ALT then one "ref,alt" per sample):
+plasgenomicsutils calculate_fws --input-vcf cohort.bcf --out fws.tsv
+# or from an AD table (CHROM POS REF ALT then the full "ref,alt[,alt2..]" AD per sample):
 plasgenomicsutils calculate_fws --ad-table ad.tsv --samples samples.txt --out fws.tsv
 ```
 
@@ -307,11 +307,16 @@ across 10 MAF bins. `--estimator ratio` is a simpler summed-binned-mean estimato
 threshold tuned on one with the other's values. moimix parity uses the defaults
 (`--min-depth 0 --min-alt-samples 0`).
 
-`moimix::getFws` uses every biallelic record's `AD` regardless of allele string, so
-the VCF reader does too — pass a SNP-filtered callset (or `--snps-only`) if you want
-SNPs only. `--population-name` tags every row for later cross-cohort merging;
-`--exclude-call-regions` drops CNV windows whose within-sample heterozygosity would
-otherwise depress Fws.
+Only SNPs are scored by default (REF and every ALT a single base; `--no-snps-only` for
+every record with `AD`, as moimix does), after dropping ALTs no sample has reads for, so
+a callset joint-called across a larger cohort is classified on the samples in hand
+(`--no-trim` keeps them). Heterozygosity is `1 − Σ p²` over **every
+allele** at a site, so pass the callset **unsplit**: a sample mixing two different ALTs
+reads as mixed, whereas after `bcftools norm -m-` (or in moimix, which reads only the
+first two `AD` columns) it looks homozygous at both split records. `--multiallelic skip`
+drops such records instead — see [docs/fws.md](docs/fws.md). `--population-name` tags
+every row for later cross-cohort merging; `--exclude-call-regions` drops CNV windows
+whose within-sample heterozygosity would otherwise depress Fws.
 
 ### Which polyclonal samples can still be used
 

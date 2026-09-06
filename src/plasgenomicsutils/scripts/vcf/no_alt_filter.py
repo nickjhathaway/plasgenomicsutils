@@ -27,6 +27,13 @@ def get_parser_no_alt_filter() -> argparse.ArgumentParser:
                    help="Keep the non-variant records instead of dropping them, for a "
                         "fill-in workflow where 'this sample is reference here' is the "
                         "answer being sought. They are counted either way.")
+    p.add_argument("--trim-alt-alleles", dest="trim", action="store_true",
+                   help="First drop ALT alleles no genotype carries. A callset subset from "
+                        "a larger cohort keeps every ALT the full cohort had, now carried "
+                        "by nobody -- `bcftools view -S` removes samples, not alleles -- so "
+                        "without this the counts describe a cohort that is not the one in "
+                        "the file. Reported separately from the no-ALT count, since "
+                        "trimming is what leaves some records with no ALT at all.")
     p.add_argument("--keep-bed", default=None,
                    help="Whitelist BED of regions to keep whatever this filter says "
                         "(0-based half-open). Whitelisted variants still face every other "
@@ -40,7 +47,7 @@ def parse_args_no_alt_filter():
 
 def no_alt_filter():
     args = parse_args_no_alt_filter()
-    F.no_alt_filter(args.input, args.output, keep=args.keep_no_alts,
+    F.no_alt_filter(args.input, args.output, keep=args.keep_no_alts, trim=args.trim,
                     keep_bed=args.keep_bed)
     report_counts(args.input, args.output, "no_alt_filter")
 
