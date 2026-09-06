@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 
 from ...lib.bcftools import report_counts
+from ...lib.fws import MULTIALLELIC_MODES
 from ...lib.fws import fws_filter as _fws_filter
 
 
@@ -37,7 +38,16 @@ def get_parser_fws_filter() -> argparse.ArgumentParser:
     p.add_argument("--min-alt-samples", type=int, default=0,
                    help="Ignore sites with fewer than this many alt-carrying samples")
     p.add_argument("--no-snps-only", dest="snps_only", action="store_false",
-                   help="Score on every biallelic record, not only single-base REF/ALT")
+                   help="Score on every record with AD, not only sites whose REF and every "
+                        "ALT are single bases")
+    p.add_argument("--multiallelic", choices=MULTIALLELIC_MODES, default="collapse",
+                   help="Multiallelic records: 'collapse' (default) counts every allele's "
+                        "depth so a mix of two ALTs reads as mixed; 'skip' drops them. "
+                        "Pass an unsplit callset -- `bcftools norm -m-` has already "
+                        "discarded the other alleles' reads.")
+    p.add_argument("--no-trim", dest="trim", action="store_false",
+                   help="Keep ALT alleles no sample here has reads for (default: drop them "
+                        "before classifying a site, like bcftools view --trim-alt-alleles)")
     p.add_argument("--exclude-call-regions", default=None,
                    help="BED of regions to exclude from the Fws calculation")
     p.add_argument("--dropped-samples", default=None,
@@ -59,6 +69,7 @@ def fws_filter():
         args.input, args.output, fws_min=args.fws_min, estimator=args.estimator,
         min_depth=args.min_depth, n_bins=args.n_bins,
         min_alt_samples=args.min_alt_samples, snps_only=args.snps_only,
+        multiallelic=args.multiallelic, trim=args.trim,
         exclude_call_regions=args.exclude_call_regions,
         dropped_samples_path=args.dropped_samples, fws_table_path=args.fws_table)
     print(f"  dropped {len(dropped)} sample(s) below Fws {args.fws_min:g}"

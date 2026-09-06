@@ -119,14 +119,16 @@ implies an effect of 0.2) and the effect rule where reads are many, and there is
 which it is stricter than the z alone. On a 374-sample sWGA callset the read-position z was
 failing 64–73% of sites above 8,000 pooled reads; with the effect required as well it fails
 18–20%, the same rate as at lower depth. `--bias-eff none` restores the plain z tests.
-The evidence behind this, with figures and the data to regenerate them, is in
-[Read-position bias as an effect size](read_position_bias_effect_size.md).
+The evidence behind this, with figures and the data to regenerate them, is kept outside
+the package (`investigations/bias_eff/` in the project's home directory).
 
-This is a bcftools-mode fix. GATK's `ReadPosRankSum` and `MQRankSum` are the same kind of
-statistic and grow the same way, but GATK computes them from the reads of non-hom-ref
-samples only and writes no pooled counts to size the effect from, so they are still
-thresholded on the z; a large GATK cohort failing on them where a small one did not is the
-same phenomenon.
+This is a bcftools-mode fix, and GATK mode does not need it: in the GVCF workflow
+GenotypeGVCFs combines `ReadPosRankSum` and `MQRankSum` across samples as the **median of
+the per-sample z-scores**, which cannot grow with cohort size (checked against the GATK
+source and two joint-called callsets, where the largest |ReadPosRankSum| over thousands
+of sites was 5.2). `--caller gatk` therefore keeps its plain thresholds. A multi-sample
+VCF from HaplotypeCaller run directly on many BAMs, with no GVCF step, does pool reads and
+would inflate; none of the project's callsets are of that kind.
 
 **`QD` does not carry across.** bcftools QUAL is not on GATK's scale — a clean 40x site
 called at QUAL 222 has `QUAL/DP` of 5.6, so reusing GATK's `QD < 20` would throw away a
