@@ -22,6 +22,22 @@ def format_tags(path: str) -> set[str]:
     return set(re.findall(r"^##FORMAT=<ID=([^,>]+)", proc.stdout, flags=re.M))
 
 
+def info_tags(path: str) -> set[str]:
+    """The INFO tag IDs defined in a VCF/BCF header (e.g. ``{"DP", "RPBZ", "FS"}``)."""
+    require("bcftools")
+    proc = subprocess.run(["bcftools", "view", "-h", str(path)],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return set(re.findall(r"^##INFO=<ID=([^,>]+)", proc.stdout, flags=re.M))
+
+
+def sample_names(path: str) -> list[str]:
+    """The sample names in a VCF/BCF, in file order."""
+    require("bcftools")
+    proc = subprocess.run(["bcftools", "query", "-l", str(path)],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return proc.stdout.split()
+
+
 def require(*tools: str) -> None:
     """Raise unless every named external tool is on PATH."""
     missing = [t for t in tools if shutil.which(t) is None]
@@ -74,6 +90,18 @@ def index_vcf(path: str) -> None:
         pass
 
 
+def count_variants_matching(path: str, expr: str) -> int:
+    """Number of records satisfying a bcftools filtering expression."""
+    require("bcftools")
+    proc = subprocess.run(f"bcftools view -H -i {q(expr)} {q(path)} | wc -l",
+                          shell=True, executable="/bin/bash", stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(f"ERROR: could not count variants in {path}")
+    return int(proc.stdout.strip())
+
+
 def count_variants(path: str) -> int:
     """Number of records via ``bcftools view -H | wc -l``."""
     require("bcftools")
@@ -86,6 +114,69 @@ def count_variants(path: str) -> int:
         sys.stderr.write(proc.stderr)
         raise SystemExit(f"ERROR: could not count variants in {path}")
     return int(proc.stdout.strip() or 0)
+
+
+#: The classes counted per step, in the order they are reported.
+VARIANT_TYPES = ("snps", "indels", "mnps", "mixed", "spanning_del", "other", "no_alt")
+
+
+def classify_record(ref: str, alt: str) -> str:
+    """Which class a record belongs to, from its REF and ALT column.
+
+    A record is one class, not several: ``snps`` means **every** ALT is a single-base
+    substitution, which is the same reading ``biallelic_snp_filter --snps-only`` uses. A
+    record carrying both a substitution and an indel is ``mixed`` rather than being counted
+    under both -- `bcftools view -v snps` would keep it, and calling that a SNP is how a
+    mixed record slips through a SNP filter unnoticed.
+    """
+    alts = [a for a in alt.split(",") if a and a != "."]
+    if not alts:
+        return "no_alt"
+    if any(a.startswith("<") or "[" in a or "]" in a for a in alts):
+        return "other"
+    if "*" in alts:
+        # `*` says an upstream deletion covers this position in some samples. A record
+        # carrying one is not a plain SNP however its other alleles read -- no type filter
+        # will pass it -- and in a joint callset it is routinely the largest class of all,
+        # so it is named rather than left to share `other` with symbolic alleles and
+        # breakends, which are a different problem entirely.
+        return "spanning_del"
+    kinds = set()
+    for a in alts:
+        if len(a) != len(ref):
+            kinds.add("indels")
+        elif len(ref) == 1:
+            kinds.add("snps")
+        else:
+            # Equal length and more than one base is not automatically an MNP. A single
+            # substitution is often written with padding -- REF=TTATA ALT=CTATA differs
+            # only at the first base -- and counting those as MNPs invents a population of
+            # them that is not there. bcftools reads them as SNPs; so does this.
+            kinds.add("snps" if sum(x != y for x, y in zip(ref, a)) == 1 else "mnps")
+    return kinds.pop() if len(kinds) == 1 else "mixed"
+
+
+def variant_type_counts(path: str) -> dict[str, int]:
+    """Records per class plus ``total``, in a single pass over the file.
+
+    This replaces a plain count rather than adding to it: the total falls out of the same
+    scan, so knowing the breakdown costs nothing over knowing the number.
+    """
+    require("bcftools")
+    proc = subprocess.run(f"bcftools query -f '%REF\\t%ALT\\n' {q(path)}", shell=True,
+                          executable="/bin/bash", stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(f"ERROR: could not read variants from {path}")
+    counts = dict.fromkeys(VARIANT_TYPES, 0)
+    total = 0
+    for line in proc.stdout.splitlines():
+        ref, _, alt = line.partition("\t")
+        counts[classify_record(ref, alt)] += 1
+        total += 1
+    counts["total"] = total
+    return counts
 
 
 def report_counts(before: str, after: str, label: str) -> None:

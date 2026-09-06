@@ -123,3 +123,39 @@ def test_every_docs_page_is_in_the_mkdocs_nav():
         f"{', '.join(missing)}")
     stale = sorted(in_nav - on_disk)
     assert not stale, f"mkdocs.yml nav points at pages that do not exist: {', '.join(stale)}"
+
+
+def test_every_command_is_documented_under_its_own_group():
+    """The catalog's groups and the reference's sections have to stay in step: a command
+    filed under one group in `--list` and another in the docs is worse than ungrouped."""
+    import re
+
+    from plasgenomicsutils.cli import REGISTRY
+
+    text = (ROOT / "docs" / "commands.md").read_text()
+    sections = {}
+    for m in re.finditer(r"^## `([a-z0-9_]+)`$", text, re.M):
+        nxt = re.search(r"^## ", text[m.end():], re.M)
+        sections[m.group(1)] = text[m.end(): m.end() + (nxt.start() if nxt else len(text))]
+
+    assert set(REGISTRY) <= set(sections), (
+        f"groups in the catalog with no section in commands.md: "
+        f"{sorted(set(REGISTRY) - set(sections))}")
+    for group, commands in REGISTRY.items():
+        listed = set(re.findall(r"^\| `([a-z0-9_]+)` \|", sections[group], re.M))
+        assert set(commands) == listed, (
+            f"[{group}] differs between the catalog and commands.md: "
+            f"only in catalog {sorted(set(commands) - listed)}, "
+            f"only in docs {sorted(listed - set(commands))}")
+
+
+def test_the_filter_pipeline_group_lists_its_steps_in_chain_order():
+    """That group is ordered by the chain rather than alphabetically, on purpose -- so the
+    order is worth asserting, or a later edit will quietly 'tidy' it."""
+    from plasgenomicsutils.cli import REGISTRY
+    from plasgenomicsutils.lib.filter_pipeline import DEFAULT_CONFIG
+
+    listed = list(REGISTRY["vcf_filter_pipeline"])
+    assert listed[0] == "filter_pipeline"          # the runner, then what it runs
+    chain = [s["name"] for s in DEFAULT_CONFIG["steps"] if not s.get("report")]
+    assert [c for c in listed if c in chain] == chain

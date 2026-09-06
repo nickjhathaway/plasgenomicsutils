@@ -20,6 +20,188 @@ Region masks (`tandem_repeat_mask`, `core_region_filter`, `paralog_mask`) take `
 a plain path or a bundled asset via `builtin:<name>` (`pf3d7_core_regions`,
 `pf3d7_paralog_genes`, `pf3d7_tandem_repeats`).
 
+## Non-variant records come first
+
+Calling a region list reports every position in it, so a callset carries a record wherever
+a sample is simply reference (`ALT` is `.`). `no_alt_filter` removes those in their own
+step, before any QC rule, so `variant_counts.tsv` keeps the two reasons apart — how many
+positions had nothing to call, and how many real variants failed quality:
+
+```
+  input                      437
+  no_alt_filter              275     <- 162 positions were non-variant
+  hard_qc_filter             175     <- 100 variants failed QC
+```
+
+**This is not cosmetic: the bias statistics are computed whether or not an ALT was
+called.** A non-variant record still carries `FS`, `RPBZ`, `MQBZ` and the rest, describing
+the non-reference reads that were present but not called — so a hard QC rule removes
+non-variant records on its own, and without this step those removals are silently mixed in
+with the failing variants. On a real 400-position region list, QC took out 41 of 162
+non-variant records: 31 for strand bias, 22 for read position, a few for mapping quality.
+
+Those are positions where non-reference evidence exists but is biased enough that no ALT
+was called — arguably where a reference call is least safe. `--keep-no-alts` (or
+`"params": {"keep": true}`) passes them through instead, for a fill-in workflow where
+"this sample is reference here" is the answer being sought; they are counted either way.
+In the default chain the end result is the same, since `biallelic_snp_filter` drops
+non-variant records later regardless — what changes is where they go and what the counts
+tell you.
+
+## Hard QC on a bcftools callset
+
+`hard_qc_filter` defaults to GATK's metrics — `QD`, `MQ`, `SOR`, `MQRankSum`,
+`ReadPosRankSum` — none of which a `bcftools mpileup | bcftools call` VCF contains.
+`--caller bcftools` asks the same questions of the tags bcftools writes instead:
+
+| the question | GATK | bcftools |
+|---|---|---|
+| is the variant only on one strand? | `SOR > 3` | `SOR > 3`, computed from `ADF`/`ADR` |
+| does the variant sit at the ends of reads? | `ReadPosRankSum < -5` | `abs(RPBZ) > 5`, `abs(SCBZ) > 5`, each with effect `> 0.15` |
+| are the reads carrying it poorly mapped? | `MQRankSum < -5`, `MQ < 55` | `abs(MQBZ) > 5`, `abs(MQSBZ) > 5`, each with effect `> 0.15`; `MQ < 55` |
+| is the call weak for its depth? | `QD < 20` | `QUAL/INFO/DP` (off by default — see below) |
+| — | — | `abs(BQBZ)` (with effect), `MQ0F` (optional extras) |
+
+```bash
+plasgenomicsutils hard_qc_filter --caller bcftools --input in.bcf --output 01.bcf
+```
+
+As a pipeline step, `caller` is written into `--emit-default-config` at its default so it
+is discoverable rather than something you have to know exists:
+
+```json
+{"name": "hard_qc_filter", "params": {"caller": "bcftools"}}
+```
+
+**The `*BZ` tags are two-sided**, and getting that backwards silently keeps the records it
+should drop. GATK's rank sums are signed so that one direction is the artifact, and the
+usual filter is one-sided; bcftools documents its z-scores as "closer to 0 is better", and
+a variant stacked at read ends turns up as either sign, so these are tested on `abs()`.
+
+### Strand bias is measured, not tested
+
+bcftools writes `FS`, a Fisher p-value for strand bias — but a p-value answers *am I sure
+there is a skew*, and that answer turns yes for any skew at all once enough reads are
+pooled. `FS` is computed over every sample at once, so a fixed cutoff means something
+different in a callset of 20 samples than in one of 400: the same site, called from the
+same reads, moves toward the cutoff purely because more samples carry it.
+
+So the strand-bias test is `SOR`, GATK's strand odds ratio, which measures **how big** the
+skew is and does not move when a cohort grows. bcftools writes no `SOR`, so it is computed
+from the 2×2 table in `INFO/ADF` and `INFO/ADR` and compared at the same `> 3` GATK uses —
+one threshold that means the same thing in either mode.
+
+`--strand-bias-p` adds `FS` back if you want a significance test as well. Two things to
+know before relying on it: at a few hundred samples it rejects sites with no meaningful
+skew at all, and `INFO/FS` is a 32-bit float, so any p below about `1e-38` is stored as
+exactly `0.0` — a genuinely one-strand artifact and a merely deep site become the same
+number in the file.
+
+The same caution applies to the `*BZ` tags, and they get the same treatment. Each is a
+Mann-Whitney z-score comparing two groups of reads pooled over every sample at the site —
+ref against alt for `RPBZ`, `SCBZ`, `MQBZ` and `BQBZ`, forward against reverse for `MQSBZ` —
+and a z-score grows with the reads behind it: the same modest shift in read position
+scores z = 1 in one sample and z = 30 pooled over 400. So a z only counts when the **effect
+size** behind it, which does not move with depth, is also above `--bias-eff` (default 0.15):
+
+    eff = |z| * sqrt((n1 + n2 + 1) / (12 * n1 * n2))
+
+with `n1`, `n2` the two groups' read counts from `INFO/ADF` + `INFO/ADR`. It is how far
+*P(a read from one group ranks above a read from the other)* sits from 0.5, so 0.15 is a
+65:35 split (rank-biserial correlation 0.3). Multiply every count by the same factor and it
+is unchanged, exactly as SOR is.
+
+The effect is a *qualifier* on the z, not a replacement, because it is noisy where the z is
+not: at a single sample's depth a shift of 0.15 is within sampling error, and a threshold on
+the effect alone fails four times as many low-depth sites as the z does, all of them noise.
+Requiring both is the z rule where reads are few (z = 5 at 100 reads per allele already
+implies an effect of 0.2) and the effect rule where reads are many, and there is no depth at
+which it is stricter than the z alone. On a 374-sample sWGA callset the read-position z was
+failing 64–73% of sites above 8,000 pooled reads; with the effect required as well it fails
+18–20%, the same rate as at lower depth. `--bias-eff none` restores the plain z tests.
+The evidence behind this, with figures and the data to regenerate them, is kept outside
+the package (`investigations/bias_eff/` in the project's home directory).
+
+This is a bcftools-mode fix, and GATK mode does not need it: in the GVCF workflow
+GenotypeGVCFs combines `ReadPosRankSum` and `MQRankSum` across samples as the **median of
+the per-sample z-scores**, which cannot grow with cohort size (checked against the GATK
+source and two joint-called callsets, where the largest |ReadPosRankSum| over thousands
+of sites was 5.2). `--caller gatk` therefore keeps its plain thresholds. A multi-sample
+VCF from HaplotypeCaller run directly on many BAMs, with no GVCF step, does pool reads and
+would inflate; none of the project's callsets are of that kind.
+
+**`QD` does not carry across.** bcftools QUAL is not on GATK's scale — a clean 40x site
+called at QUAL 222 has `QUAL/DP` of 5.6, so reusing GATK's `QD < 20` would throw away a
+good callset. It is therefore off by default under `--caller bcftools`; pass `--qd` to set
+it on a scale you have checked. Every threshold takes `none` to switch that test off.
+
+### Calling so the tags are there
+
+`call_variants` runs `bcftools mpileup | bcftools call` asking for exactly what the filter
+reads, so the two cannot drift apart:
+
+```bash
+plasgenomicsutils call_variants --ref Pf3D7.fasta --bam-list bams.txt \
+  --regions crt_region_snps.bed --threads 8 --output crt_snps.bcf
+```
+
+**`--threads` splits the region list, it does not thread bcftools.** `bcftools mpileup
+--threads` only parallelises compression; the pileup itself is one core, so the way to use
+a machine is a job per chunk of regions. With `--threads 8` a 400-region list is split into
+8 chunks of 50, called concurrently, then indexed and `bcftools concat`-ed back into one
+file. `--chunk-size` sets a fixed size instead, which evens out uneven regions at the cost
+of more jobs. Without `--regions` there is nothing to split and it runs a single job.
+
+Splitting is not quite bit-for-bit, and it is worth knowing how. The same positions come
+out, with the same genotypes, depths, allele depths and bias statistics; **QUAL can move by
+a few points at a handful of records** — indels, and the odd SNP beside one — because
+mpileup derives indel likelihoods and BAQ from the reads around a position, and which
+neighbours share a chunk changes with the split. That is `bcftools mpileup -R` itself, not
+this wrapper: cutting a region file in half by hand and concatenating reproduces it exactly.
+Nothing downstream here reads QUAL, but a QUAL cutoff of your own is the one thing affected.
+
+Calling emits **all sites in the regions**, not just variants, since a region list is
+usually a list of positions to fill in and a reference call there is the answer. Pass
+`--variants-only` for whole-genome calling.
+
+Chunks keep the extension of the file they came from, because **bcftools reads the
+coordinate convention off it** — a `.bed` is 0-based half-open, anything else is 1-based
+`CHROM POS`. Splitting a `.bed` into extensionless pieces would silently shift every region
+by one base.
+
+**Samples are named after their files.** One BAM per sample is the usual arrangement, so
+`--ignore-RG` is on by default: each alignment is one sample whatever its read groups say.
+bcftools then names each sample after the *path* it was given, so the last step renames
+them to the file name with `--sample-suffix` removed -- `.bam` by default:
+
+| BAM | default | `--sample-suffix .sorted.dup.pf.bam` |
+|---|---|---|
+| `/tank/wgs/17017-227227.sorted.dup.pf.bam` | `17017-227227.sorted.dup.pf` | `17017-227227` |
+
+Pass the whole trailing part you want gone. A suffix that would leave two samples with the
+same name is an error, raised **before** any calling starts rather than after an hour of
+it. `--no-ignore-rg` reads names from the RG `SM` tags instead, and `--no-rename-samples`
+keeps the path-derived names. `--dry-run` prints the commands without running them.
+
+The equivalent by hand, if you would rather drive it yourself — most of what the filter
+reads is written by default, but `FS`, `ADF`/`ADR` and `SCR` have to be asked for:
+
+```bash
+bcftools mpileup -f REF.fa \
+  -a FORMAT/AD,FORMAT/ADF,FORMAT/ADR,FORMAT/DP,FORMAT/SP,FORMAT/SCR,INFO/AD,INFO/ADF,INFO/ADR,INFO/FS,INFO/SCR \
+  IN.bam -Ou | bcftools call -m -Ob -o OUT.bcf   # add -v for variants only
+```
+
+`RPBZ`, `SCBZ`, `MQBZ`, `MQSBZ`, `BQBZ`, `MQ0F`, `MQ` and `DP` come out of `mpileup`
+anyway and cannot be requested explicitly. If a callset is missing what a threshold reads,
+the step **stops and names the tags** rather than running: a bcftools comparison against an
+absent tag is simply false, so the filter would otherwise keep every record and report
+nothing wrong.
+
+`ADF`/`ADR` are worth having beyond this step — they are what
+[`strand_bias_scan`](commands.md) reads to flag SSE fake-het artifacts per site, and
+`FORMAT/SP` is the per-sample version of the same question.
+
 ### Whitelisting regions from a region filter
 
 All three take `--keep-bed`: a BED of regions to keep whatever that filter says. Use it when a
@@ -65,7 +247,9 @@ Residue numbers are usually how these exceptions are known ("*pfpx1* 1701 and 17
 0-based half-open — the BED convention — so it can be written straight out:
 
 ```r
-cds <- read_gff_cds("PlasmoDB-68_Pfalciparum3D7.gff")
+cds <- read_gff_cds(paste0("https://ftp.ensemblgenomes.ebi.ac.uk/pub/protists/release-63/",
+                           "gff3/plasmodium_falciparum/",
+                           "Plasmodium_falciparum.GCA000002765v3.63.gff3.gz"))
 codons <- aa_intervals(data.frame(transcript_id = "pfpx1", aa_position = c(1701, 1705)), cds)
 write.table(codons[, c("chrom", "start", "end", "name")], "keep_these.bed",
             sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
@@ -139,9 +323,119 @@ plasgenomicsutils filter_pipeline --emit-default-config pipeline.json
 plasgenomicsutils filter_pipeline --input in.bcf --config pipeline.json --outdir filtered/
 ```
 
-Each step writes `filtered/NN_<name>.bcf` (indexed) plus a `variant_counts.tsv` tally
-(`step`, `kind`, `count`, `path` — `kind` separates a filter's variant count from a report's
-row count and from a step that was switched off).
+Each step writes `filtered/NN_<name>.bcf` (indexed) plus a `variant_counts.tsv` tally.
+Alongside the total, every row carries the **variant classes** behind it — `snps`, `indels`,
+`mnps`, `mixed`, `other`, `no_alt` — so where the non-SNPs went is a column rather than a
+re-run:
+
+```
+step                      count   snps  indels
+input                     437     241   34
+no_alt_filter             275     241   34
+hard_qc_filter            194     179   15
+singleton_filter_add_ads  175     163   12
+tandem_repeat_mask        167     163   4
+biallelic_snp_filter      160     160   0
+```
+
+A record belongs to exactly one class: `snps` means *every* ALT is a single-base
+substitution, matching what `biallelic_snp_filter --snps-only` keeps. A record carrying both
+a substitution and an indel is `mixed`, not counted under both — calling it a SNP is how a
+mixed record slips through a SNP filter unnoticed. The breakdown costs nothing: the total
+falls out of the same pass.
+
+### The config that actually ran
+
+`filtered/config_used.json` records the run's configuration with **every unset parameter
+filled in from the step's own defaults**, so the thresholds that did the work sit beside the
+results instead of in whichever version of the package was installed that day:
+
+```json
+{ "name": "hard_qc_filter",
+  "params": { "caller": "bcftools", "qd": "auto", "mq": 55, "sor": 3,
+              "read_pos_z": 5.0, "max_bias_z": 5.0, "strand_bias_p": "auto", ... } }
+```
+
+Steps switched off keep their entry and their defaults — what did *not* run is part of the
+record too. A `_meta` block notes the package version, the absolute input path and the start
+time, and is ignored on the way back in: the file is a valid config, so re-running it
+reproduces the run. It is written before the first step, so a run that dies partway still
+leaves the record of what it was attempting.
+
+### Keeping the footprint down
+
+`remove_intermediates` (or `--remove-intermediates`) deletes each step's callset the moment
+the next step has read it, so a long chain over a large cohort costs one intermediate on disk
+rather than all of them:
+
+```bash
+plasgenomicsutils filter_pipeline --input in.bcf --config pipeline.json \
+  --outdir filtered/ --remove-intermediates
+```
+
+The input is never touched, the final callset and its SNP panel stay, and the side tables —
+the tally, the config record, the coverage and Fws tables — are small and are kept whatever
+this says. `variant_counts.tsv` still has a row per step, with `removed` marking the ones
+whose file is gone, so the run is as auditable as it was; only the bytes are missing.
+
+### The default chain
+
+```mermaid
+flowchart TD
+    IN(["input callset — VCF / BCF"])
+    S01["01 · no_alt_filter *"]
+    S02["02 · hard_qc_filter *"]
+    S03["03 · singleton_counts"]
+    S04["04 · singleton_filter_add_ads *"]
+    S05["05 · tandem_repeat_mask *"]
+    S06["06 · core_region_filter *"]
+    S07["07 · paralog_mask *"]
+    S08["08 · filter_ad_regenotype"]
+    S09["09 · biallelic_snp_filter"]
+    S10["10 · sample_coverage_filter"]
+    S11["11 · locus_missingness_filter *"]
+    S12["12 · maf_filter *"]
+    S13["13 · fws_filter"]
+    OUT(["filtered callset + SNP panel BED"])
+
+    IN --> S01 --> S02 --> S03 --> S04 --> S05 --> S06 --> S07 --> S08
+    S08 --> S09 --> S10 --> S11 --> S12 --> S13 --> OUT
+
+    classDef variant stroke:#0f766e,stroke-width:2px
+    classDef genotype stroke:#b45309,stroke-width:2px
+    classDef sample stroke:#6d28d9,stroke-width:2px
+    classDef report stroke:#64748b,stroke-width:1px,stroke-dasharray:2 3
+    classDef disabled stroke:#a16207,stroke-width:2px,stroke-dasharray:6 4
+
+    class S01,S02,S04,S05,S06,S09,S11,S12 variant
+    class S08 genotype
+    class S10 sample
+    class S03 report
+    class S07,S13 disabled
+```
+
+Reading it: a **teal** step removes variants, **amber** rewrites genotypes without removing
+any, **purple** removes samples, and the **dotted grey** one is a report that changes nothing.
+The two **dashed gold** steps ship switched off. A `*` marks the eight steps that honour
+`keep_bed`.
+
+That colouring is the distinction the config itself does not show, and it explains most of the
+chain's shape:
+
+* **08 removes nothing.** It zeroes alleles under the AD floor and re-calls the genotypes; a
+  sample left with no evidence becomes `./.`. Everything below reads the cleaned calls.
+* **09 is the only type-aware step**, so indels ride the whole chain to it. It comes after 08
+  because trimming unused ALT alleles is what collapses a site that looked multiallelic only
+  because of a since-re-genotyped artifact.
+* **10 and 13 remove samples**, so every allele frequency below them is computed over a
+  smaller cohort. `fws_filter` removes no variants at all, which is why re-running 11 and 12
+  after it is worth doing when the site set has to match the samples that remain.
+* **`keep_bed` exempts a variant from one rule, not from the chain.** 09, 10 and 13 judge whole
+  sites or whole samples and cannot be whitelisted — which is how a whitelisted locus can
+  survive hard QC and still disappear at step 10.
+
+A disabled step keeps its number, so the outputs read `01_`, `02_`, `04_` … with 03 missing.
+That keeps a file name pointing at the config entry that produced it.
 
 ### Turning steps on and off
 
@@ -183,6 +477,56 @@ command.
 
 The table is derived from the same counts as the keep/drop decision, so it always accounts for
 what happened rather than being a second measurement that might disagree.
+
+### Keeping only monoclonal infections
+
+`fws_filter` drops every sample whose Fws falls below a threshold, leaving the ones a single
+clone dominates. It ships in the default config **switched off**, because unlike everything
+else in the chain it is not a quality rule — it changes which infections the callset
+describes, and that is an analysis decision:
+
+```json
+{"name": "fws_filter", "enabled": false, "params": {"fws_min": 0.95}}
+```
+
+```bash
+plasgenomicsutils fws_filter --input 12_maf_filter.bcf --output monoclonal.bcf --fws-min 0.92
+```
+
+Three things about where it goes and what it touches:
+
+**It runs at the end, not as an entry gate.** Fws reads a sample's within-host diversity
+against the cohort's own allele frequencies, so it wants a callset the rest of the chain has
+already filtered and re-genotyped — the AD floor in `filter_ad_regenotype` is what removes
+the minor-allele noise Fws would otherwise score as a second clone.
+
+**It drops samples and no variants.** Removing samples changes every allele frequency, so a
+site that cleared a MAF or missingness bar with the whole cohort may not clear it with the
+one that remains. Deciding what that means for the site set is yours, so nothing is quietly
+removed here; `AC`/`AN`/`AF` are refreshed on the way out, so putting `maf_filter` and
+`locus_missingness_filter` after it re-applies them to the survivors:
+
+```json
+{"name": "fws_filter",  "params": {"fws_min": 0.92}},
+{"name": "maf_filter",  "params": {"maf_min": 0.02}},
+{"name": "locus_missingness_filter"}
+```
+
+**A sample it cannot score is dropped, not kept.** With no usable sites there is no Fws, and
+an unknown sample is not a monoclonal one — keeping it would readmit exactly what the step
+exists to remove. Those are counted and named separately from the polyclonal drops.
+
+Like `sample_coverage_filter`, it writes the table its decision came from beside the step
+(`filtered/13_fws_filter_fws.tsv`, or `--fws-table` from the standalone command) with one row
+per sample — `sample`, `fws`, `n_sites`, `monoclonal`, `dropped` — and prints anything
+dropped or within 0.05 of the threshold to the console, so a sample that missed by a hair is
+visible without opening the file. A threshold that keeps nobody is an error rather than an
+empty callset, since on an unfiltered input that is the likeliest reading.
+
+Neither this nor `sample_coverage_filter` is whitelistable: `keep_bed` names regions, and
+these steps judge samples. Use `calculate_fws` when the scores themselves are what you want
+rather than a filtered callset — it reports the same numbers with
+`--monoclonal-threshold`.
 
 The final callset's **SNP panel BED** is written automatically next to the last step
 (`filtered/NN_<last>.snps.bed`) — this is the panel the IBD tools read, so it feeds straight
