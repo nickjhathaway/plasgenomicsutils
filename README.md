@@ -314,7 +314,10 @@ a callset joint-called across a larger cohort is classified on the samples in ha
 allele** at a site, so pass the callset **unsplit**: a sample mixing two different ALTs
 reads as mixed, whereas after `bcftools norm -m-` (or in moimix, which reads only the
 first two `AD` columns) it looks homozygous at both split records. `--multiallelic skip`
-drops such records instead — see [docs/fws.md](docs/fws.md). `--population-name` tags
+drops such records instead — see [docs/fws.md](docs/fws.md). The same estimator scores
+**microhaplotypes**: `--allele-table` reads a long-format amplicon allele table (one row
+per sample, locus and allele) with each locus as one multiallelic site; pair it with
+`--n-bins 0`, which regresses per locus rather than per MAF bin. `--population-name` tags
 every row for later cross-cohort merging; `--exclude-call-regions` drops CNV windows
 whose within-sample heterozygosity would otherwise depress Fws.
 

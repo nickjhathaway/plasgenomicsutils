@@ -321,3 +321,142 @@ def test_vcf_reader_trims_the_same_way(tmp_path):
     for field in ("ref", "depth", "sumsq", "pop"):
         assert np.array_equal(getattr(d_v, field), getattr(d_t, field))
     assert (d_v.n_multiallelic, d_v.n_alt_trimmed, d_v.n_monomorphic) == (0, 2, 1)
+
+
+# --------------------------------------------------------------------------- #
+#  Microhaplotypes: long-format allele tables and the unbinned estimator      #
+# --------------------------------------------------------------------------- #
+
+# Three loci, three samples. `mono` carries one haplotype everywhere; `mix` is a 50:50 mix
+# of two haplotypes at every locus; `absent` has no row at locus L3 (zero depth there).
+ALLELE_TSV = ("library_sample_name\ttarget_name\tseq\treads\n"
+              "mono\tL1\tAAA\t100\nmix\tL1\tAAA\t50\nmix\tL1\tAAC\t50\nabsent\tL1\tAAC\t80\n"
+              "mono\tL2\tGGG\t120\nmix\tL2\tGGG\t60\nmix\tL2\tGGT\t60\nabsent\tL2\tGGT\t90\n"
+              "mono\tL3\tTTT\t100\nmix\tL3\tTTT\t50\nmix\tL3\tTTA\t50\n"
+              "mono\tL3\tTTT\t10\n")   # a duplicated row is summed, not a fourth allele
+
+
+def test_allele_table_reader_builds_one_record_per_locus(tmp_path):
+    from plasgenomicsutils.lib.fws import read_allele_table
+
+    t = tmp_path / "alleles.tsv"
+    t.write_text(ALLELE_TSV)
+    samples, d = read_allele_table(str(t))
+    assert samples == ["absent", "mix", "mono"]              # sorted
+    assert d.n_sites == 3 and d.n_multiallelic == 3
+    assert d.pop.shape == (3, 2)                             # two haplotypes per locus
+    assert d.depth[2].tolist() == [0, 100, 110]              # L3: absent=0, mix=100, mono=100+10
+    assert d.pop[2].tolist() == [160, 50]                    # TTT 110+50, TTA 50
+    hw = 1 - d.sumsq / np.where(d.depth > 0, d.depth, np.nan) ** 2
+    assert np.allclose(hw[:, 1], 0.5) and np.allclose(hw[:, 2], 0.0)
+
+
+def test_allele_table_columns_can_be_renamed(tmp_path):
+    from plasgenomicsutils.lib.fws import read_allele_table
+
+    t = tmp_path / "alleles.tsv"
+    t.write_text(ALLELE_TSV.replace("library_sample_name", "s").replace("target_name", "loc")
+                 .replace("seq", "hap").replace("reads", "n"))
+    samples, d = read_allele_table(str(t), sample_col="s", locus_col="loc", allele_col="hap",
+                                   reads_col="n")
+    assert samples == ["absent", "mix", "mono"] and d.n_sites == 3
+
+
+def test_unbinned_estimator_is_the_per_site_regression(tmp_path):
+    from plasgenomicsutils.lib.fws import read_allele_table
+
+    t = tmp_path / "alleles.tsv"
+    t.write_text(ALLELE_TSV)
+    samples, d = read_allele_table(str(t))
+    fws, n = compute_fws(d, n_bins=0)
+    assert fws[samples.index("mono")] == pytest.approx(1.0)
+    assert n[samples.index("absent")] == 2                   # no depth at L3
+    # by hand: Fws = 1 - Σ Hs·Hw / Σ Hs² over the sample's usable loci
+    tot = d.pop.sum(1); Hs = 1 - ((d.pop / tot[:, None]) ** 2).sum(1)
+    s = samples.index("mix")
+    Hw = 1 - d.sumsq[:, s] / d.depth[:, s] ** 2
+    assert fws[s] == pytest.approx(1 - (Hs * Hw).sum() / (Hs * Hs).sum())
+    assert fws[s] < 0.6
+    # the ratio flavour is 1 - Σ Hw / Σ Hs
+    fr, _ = compute_fws(d, estimator="ratio", n_bins=0)
+    assert fr[s] == pytest.approx(1 - Hw.sum() / Hs.sum())
+
+
+def test_unbinned_equals_binned_when_population_het_is_constant():
+    # with one Hs everywhere the through-origin slope collapses to mean(Hw)/Hs whether the
+    # points are sites or bins, so n_bins=0 and the moimix binning must agree exactly there;
+    # elsewhere they are different estimators and are documented as such.
+    rng = np.random.default_rng(2)
+    n = 40
+    alt = np.full((n, 8), 3.0)
+    a0 = rng.integers(0, 4, size=n).astype(float)
+    alt[:, 0] = a0
+    alt[:, 1] = 6.0 - a0
+    ref = 10.0 - alt
+    assert np.allclose(alt.sum(axis=1) / (ref + alt).sum(axis=1), 0.30)
+    binned, _ = compute_fws(ref, alt, n_bins=10)
+    unbinned, _ = compute_fws(ref, alt, n_bins=0)
+    assert np.allclose(binned, unbinned, atol=1e-12)
+
+
+# --------------------------------------------------------------------------- #
+#  Population frequencies supplied from outside                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_supplying_the_cohorts_own_frequencies_changes_nothing(tmp_path):
+    from plasgenomicsutils.lib.fws import read_allele_table, read_pop_freqs, write_pop_freqs
+
+    t = tmp_path / "alleles.tsv"
+    t.write_text(ALLELE_TSV)
+    samples, d = read_allele_table(str(t))
+    own = d.population_freqs()
+    assert own["L3"] == {"TTT": pytest.approx(160 / 210), "TTA": pytest.approx(50 / 210)}
+    f = tmp_path / "freqs.tsv"
+    write_pop_freqs(own, str(f))
+    back = read_pop_freqs(str(f))
+    for n_bins in (0, 10):
+        a, _ = compute_fws(d, n_bins=n_bins)
+        b, _ = compute_fws(d, n_bins=n_bins, pop_freqs=back)
+        assert np.allclose(a, b, equal_nan=True, atol=1e-9)
+    assert compute_fws.last_pop_freq_misses == 0
+
+
+def test_external_frequencies_drive_hs_and_unlisted_loci_are_dropped(tmp_path):
+    from plasgenomicsutils.lib.fws import read_allele_table
+
+    t = tmp_path / "alleles.tsv"
+    t.write_text(ALLELE_TSV)
+    samples, d = read_allele_table(str(t))
+    s = samples.index("mix")
+    # a reference population where L1 is nearly fixed, L2 is very diverse (one allele of
+    # ours plus two never seen here), and L3 is not listed at all
+    ref = {"L1": {"AAA": 0.98, "AAC": 0.02},
+           "L2": {"GGG": 0.25, "GGT": 0.25, "GGA": 0.25, "GGC": 0.25},
+           }
+    f, n = compute_fws(d, n_bins=0, pop_freqs=ref)
+    assert compute_fws.last_pop_freq_misses == 1
+    assert n[s] == 2                                       # L3 dropped for everyone
+    Hs = np.array([1 - (0.98**2 + 0.02**2), 1 - 4 * 0.25**2])
+    Hw = np.array([0.5, 0.5])                              # mix is 50:50 at both
+    assert f[s] == pytest.approx(1 - (Hs * Hw).sum() / (Hs * Hs).sum())
+    # frequencies given as counts are renormalised
+    ref_counts = {"L1": {"AAA": 98, "AAC": 2}, "L2": {"GGG": 1, "GGT": 1, "GGA": 1, "GGC": 1}}
+    f2, _ = compute_fws(d, n_bins=0, pop_freqs=ref_counts)
+    assert f2[s] == pytest.approx(f[s])
+
+
+def test_vcf_sites_are_keyed_chrom_pos_for_frequencies(tmp_path):
+    pytest.importorskip("cyvcf2")
+    from plasgenomicsutils.lib.fws import read_ad_vcf
+
+    samples, d = read_ad_vcf(str(_tri_vcf(tmp_path)))
+    assert d.sites == ["chr1:10"] and d.alleles == [["A", "T", "G"]]
+    own = d.population_freqs()["chr1:10"]
+    assert own == {"A": pytest.approx(30 / 80), "T": pytest.approx(15 / 80), "G": pytest.approx(35 / 80)}
+    # a population where the site is biallelic A/T: G carries frequency 0 there, and the
+    # G-only sample is scored against that population rather than its own cohort's
+    f, n = compute_fws(d, n_bins=0, pop_freqs={"chr1:10": {"A": 0.5, "T": 0.5}})
+    assert n.tolist() == [1, 1, 1, 1]
+    assert f[samples.index("pure_alt2")] == pytest.approx(1.0)      # homozygous: Hw = 0
+    assert f[samples.index("mix_alt1_alt2")] == pytest.approx(1 - 0.5 / 0.5)
