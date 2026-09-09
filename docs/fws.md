@@ -73,6 +73,61 @@ dropped. The spanning-deletion placeholder `*` **is** counted: reads carrying a 
 over the site are a distinct haplotype, so a sample split between them and a base is
 mixed (moimix counts them too).
 
+## Microhaplotypes (amplicon allele tables)
+
+Because heterozygosity is written for any number of alleles, a microhaplotype locus is
+just another multiallelic site: its alleles are the haplotypes seen in the cohort and its
+per-sample depths are the read counts. `--allele-table` reads the long format amplicon
+pipelines write (one row per sample, locus and allele; MAD4HATTER's column names are the
+defaults, `--sample-col` and friends rename them):
+
+```bash
+plasgenomicsutils calculate_fws --allele-table allele_data.tsv.gz --n-bins 0 --out fws.tsv
+```
+
+Use `--n-bins 0`. Microhaplotype loci often have no allele above 50%, so the MAF bins over
+[0, 0.5] stop describing them; `--n-bins 0` regresses every locus's own `Hw` on its `Hs`
+instead (`Fws = 1 − Σ Hs·Hw / Σ Hs²`). It is a different estimator from the binned one,
+so do not carry a threshold between the two on SNP data.
+
+On a Ugandan MAD4HATTER cohort (8,637 samples, 239 loci) this agreed with an Fws from the
+biallelic SNPs inside the same amplicons at r = 0.996, and with WGS Fws on the 371 samples
+that had both at the 0.95 gate in 94% of samples, with the same monoclonal fraction (0.962).
+The disagreements were informative rather than noise: WGS is more sensitive to minor
+clones at a few percent, which move a read-fraction statistic very little, and
+microhaplotypes resolve mixtures of closely related strains that SNPs mostly cannot.
+Amplicon read fractions carry PCR and minor-allele-filtering biases that WGS `AD` does not,
+so re-check a threshold rather than assume it transfers.
+
+`--snps-only`, `--multiallelic`, `--no-trim`, `--min-alt-samples` and
+`--exclude-call-regions` do not apply to allele tables: every allele present has reads by
+construction, and loci have no genomic positions or reference allele.
+
+## Population frequencies from elsewhere
+
+By default the population allele frequencies are the input's own pooled read fractions,
+so a small or unusual batch is its own reference. `--pop-freqs` supplies them instead — to
+score a handful of new samples against a reference cohort, or the same population at
+another time — as a TSV with one row per locus and allele (`locus`, `allele`, `freq`;
+rename with `--freq-locus-col` etc.). `--write-pop-freqs` writes that file from any input,
+so the workflow is: run once on the reference cohort with `--write-pop-freqs`, then on the
+new samples with `--pop-freqs`.
+
+```bash
+plasgenomicsutils calculate_fws --allele-table reference.tsv.gz --n-bins 0 \
+  --write-pop-freqs ref_freqs.tsv --out ref_fws.tsv
+plasgenomicsutils calculate_fws --allele-table new_batch.tsv.gz --n-bins 0 \
+  --pop-freqs ref_freqs.tsv --out new_fws.tsv
+```
+
+Loci are keyed by name for `--allele-table` and by `CHROM:POS` for VCF and AD-table input,
+with the allele being the haplotype or the REF/ALT string. Only the population side
+changes: `Hs` and the binning variable come from the supplied frequencies, the
+within-sample `Hw` never needs them. The population is exactly the alleles listed for a
+locus — an allele seen here but not listed has frequency 0 there, one listed but unseen
+here still counts toward `Hs`. A locus with no entry is dropped and the count reported.
+Frequencies are renormalised per locus, so counts work too.
+
 ## When Fws is not enough
 
 Fws says how clonal a sample is, not whether one that fails the gate can still be used. An

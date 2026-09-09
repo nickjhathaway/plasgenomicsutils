@@ -5,7 +5,7 @@
 [![tests](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml/badge.svg)](https://github.com/nickjhathaway/plasgenomicsutils/actions/workflows/tests.yml)
 <!-- badges: end -->
 
-> **Version 0.2.3** — early development; APIs, defaults, and outputs may change
+> **Version 0.3.1** — early development; APIs, defaults, and outputs may change
 > between versions.
 
 A collection of utilities for **post processing Plasmodium genomics data** —
@@ -314,9 +314,17 @@ a callset joint-called across a larger cohort is classified on the samples in ha
 allele** at a site, so pass the callset **unsplit**: a sample mixing two different ALTs
 reads as mixed, whereas after `bcftools norm -m-` (or in moimix, which reads only the
 first two `AD` columns) it looks homozygous at both split records. `--multiallelic skip`
-drops such records instead — see [docs/fws.md](docs/fws.md). `--population-name` tags
-every row for later cross-cohort merging; `--exclude-call-regions` drops CNV windows
-whose within-sample heterozygosity would otherwise depress Fws.
+drops such records instead — see [docs/fws.md](docs/fws.md). The same estimator scores
+**microhaplotypes**: `--allele-table` reads a long-format amplicon allele table (one row
+per sample, locus and allele) with each locus as one multiallelic site; pair it with
+`--n-bins 0`, which regresses per locus rather than per MAF bin.
+
+By default the population allele frequencies are the input's own pooled read fractions.
+`--pop-freqs` uses supplied ones instead — a `locus`, `allele`, `freq` TSV — so a small
+batch can be scored against a reference cohort; `--write-pop-freqs` writes that file from
+a reference run. `--population-name` tags every row for later cross-cohort merging;
+`--exclude-call-regions` drops CNV windows whose within-sample heterozygosity would
+otherwise depress Fws.
 
 ### Which polyclonal samples can still be used
 

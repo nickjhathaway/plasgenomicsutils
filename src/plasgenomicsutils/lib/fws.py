@@ -33,9 +33,15 @@ The two agree in spirit but not to the digit (the regression weights bins by the
 squared population het), so pick deliberately and don't mix a threshold tuned on one
 with values from the other.
 
-AD is read from either a bcftools-query **AD table** (:func:`read_ad_table`) or a
-**VCF/BCF** (:func:`read_ad_vcf`) into an :class:`AlleleDepths`, which feeds
-:func:`compute_fws`.
+Because heterozygosity is written for ``k`` alleles, a **microhaplotype** locus from an
+amplicon panel -- one record whose alleles are the haplotypes and whose depths are the
+per-haplotype read counts -- is just another multiallelic site. Such loci often have no
+allele above 50%, so the MAF bins do not suit them; ``n_bins=0`` regresses per locus
+instead of per bin (see :func:`compute_fws`).
+
+Depths are read from a bcftools-query **AD table** (:func:`read_ad_table`), a **VCF/BCF**
+(:func:`read_ad_vcf`) or a long-format **allele table** (:func:`read_allele_table`) into an
+:class:`AlleleDepths`, which feeds :func:`compute_fws`.
 """
 
 from __future__ import annotations
@@ -110,6 +116,8 @@ class AlleleDepths:
     multiallelic: str = "collapse"
     n_alt_trimmed: int = 0    # records that lost >= 1 ALT for having no reads in the cohort
     n_monomorphic: int = 0    # records dropped because no ALT had any reads in the cohort
+    sites: list | None = None      # one id per site ("CHROM:POS", or the locus name)
+    alleles: list | None = None    # per site, the allele strings in ``pop`` column order
 
     @property
     def n_sites(self) -> int:
@@ -141,7 +149,10 @@ class AlleleDepths:
 
         Allele 0 is REF; a site may have any number of alleles. Missing depths must
         already be zero. ``counts`` are the bookkeeping fields (``n_multiallelic``,
-        ``multiallelic``, ``n_alt_trimmed``, ``n_monomorphic``).
+        ``multiallelic``, ``n_alt_trimmed``, ``n_monomorphic``) plus, optionally,
+        ``sites`` and ``alleles`` -- the ids and allele names that let population
+        frequencies from elsewhere be matched up (:func:`compute_fws` ``pop_freqs``) and
+        this cohort's be written out (:meth:`population_freqs`).
         """
         ref_rows, depth_rows, sq_rows, pop_rows = [], [], [], []
         for ad in records:
@@ -165,6 +176,21 @@ class AlleleDepths:
         z = np.empty((0, n_samples), dtype=float)
         return cls(ref=z, depth=z.copy(), sumsq=z.copy(), pop=np.empty((0, 2), dtype=float),
                    **counts)
+
+    def population_freqs(self):
+        """This cohort's population allele frequencies, as ``{site: {allele: freq}}``.
+
+        Needs ``sites`` and ``alleles``; frequencies are pooled read fractions, the same
+        ones :func:`compute_fws` uses when no ``pop_freqs`` are supplied.
+        """
+        if self.sites is None or self.alleles is None:
+            raise ValueError("these depths carry no site ids / allele names")
+        out = {}
+        for i, (site, names) in enumerate(zip(self.sites, self.alleles)):
+            tot = self.pop[i, :len(names)].sum()
+            if tot > 0:
+                out[site] = {a: float(self.pop[i, k] / tot) for k, a in enumerate(names)}
+        return out
 
     def multiallelic_note(self) -> str:
         """One line on what happened to multiallelic and read-less alleles, or '' if nothing did.
@@ -231,11 +257,15 @@ class _Tally:
     def __init__(self, multiallelic):
         _check_multiallelic(multiallelic)
         self.multiallelic = multiallelic
-        self.records = []
+        self.records, self.sites, self.alleles = [], [], []
         self.n_multi = self.n_alt_trimmed = self.n_monomorphic = 0
 
-    def take(self, ad, cols, trimmed):
-        """Record one site's chosen columns, or account for why it was dropped."""
+    def take(self, ad, cols, trimmed, *, site=None, names=None):
+        """Record one site's chosen columns, or account for why it was dropped.
+
+        ``site`` is the site id and ``names`` the allele strings for *all* of ``ad``'s
+        columns (REF first); the kept ones are stored in column order.
+        """
         if cols is None:
             if trimmed and ad.sum() == ad[:, 0].sum():
                 self.n_monomorphic += 1  # every ALT read-less: nothing to score
@@ -247,12 +277,14 @@ class _Tally:
             if self.multiallelic == "skip":
                 return
         self.records.append(ad[:, cols])
+        self.sites.append(site)
+        self.alleles.append(None if names is None else [names[c] for c in cols])
 
     def finish(self, n_samples):
         return AlleleDepths.from_records(
             self.records, n_samples, n_multiallelic=self.n_multi,
             multiallelic=self.multiallelic, n_alt_trimmed=self.n_alt_trimmed,
-            n_monomorphic=self.n_monomorphic)
+            n_monomorphic=self.n_monomorphic, sites=self.sites, alleles=self.alleles)
 
 
 # --------------------------------------------------------------------------- #
@@ -310,7 +342,8 @@ def read_ad_table(path, samples, exclude=None, snps_only=False, multiallelic="co
                     ok = False
                     break
             if ok:
-                tally.take(ad, *_select_alleles(ad, r, alts, trim=trim, snps_only=snps_only))
+                tally.take(ad, *_select_alleles(ad, r, alts, trim=trim, snps_only=snps_only),
+                           site=f"{chrom}:{pos}", names=[r] + alts)
     if not tally.records and n_mismatch:
         raise ValueError(
             f"AD table has {sorted(seen_counts)} value column(s) per site but "
@@ -351,10 +384,83 @@ def read_ad_vcf(path, exclude=None, snps_only=False, multiallelic="collapse", tr
             if ad is None or ad.shape[1] < 1 + len(alts):
                 continue
             ad = np.where(ad < 0, 0, ad).astype(float)  # cyvcf2 missing sentinel -> 0 depth
-            tally.take(ad, *_select_alleles(ad, v.REF, alts, trim=trim, snps_only=snps_only))
+            tally.take(ad, *_select_alleles(ad, v.REF, alts, trim=trim, snps_only=snps_only),
+                       site=f"{v.CHROM}:{v.POS}", names=[v.REF] + list(alts))
     finally:
         vcf.close()
     return samples, tally.finish(len(samples))
+
+
+def read_allele_table(path, *, sample_col="library_sample_name", locus_col="target_name",
+                      allele_col="seq", reads_col="reads"):
+    """Read a long-format allele table (one row per sample, locus and allele) into depths.
+
+    This is the shape amplicon pipelines write -- the defaults are MAD4HATTER's columns --
+    and it turns each locus into one record whose alleles are the haplotypes seen anywhere
+    in the cohort and whose per-sample depths are the read counts, so microhaplotypes go
+    through the same estimator as SNPs. A sample with no row at a locus has zero depth
+    there. Rows with the same sample, locus and allele are summed. Returns
+    ``(samples, depths)`` with samples in sorted order.
+
+    There is no REF here: allele 0 of every record is whichever haplotype came first, so
+    ``compute_fws(min_alt_samples=...)`` is not meaningful on these depths. Trimming and
+    the SNP rule do not apply either -- every allele present has reads by construction.
+    ``n_multiallelic`` counts loci with more than one allele.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(path, sep="\t", usecols=[sample_col, locus_col, allele_col, reads_col],
+                     dtype={sample_col: str, locus_col: str, allele_col: str})
+    df = df.dropna(subset=[sample_col, locus_col, allele_col])
+    df[reads_col] = pd.to_numeric(df[reads_col], errors="coerce").fillna(0)
+    samples = sorted(df[sample_col].unique())
+    sidx = {s: i for i, s in enumerate(samples)}
+    records, sites, names, n_multi = [], [], [], 0
+    for locus, g in df.groupby(locus_col, sort=True):
+        alleles = {a: k for k, a in enumerate(g[allele_col].unique())}
+        sites.append(str(locus))
+        names.append(list(alleles))
+        ad = np.zeros((len(samples), len(alleles)), dtype=float)
+        np.add.at(ad, (g[sample_col].map(sidx).values, g[allele_col].map(alleles).values),
+                  g[reads_col].values)
+        if len(alleles) > 1:
+            n_multi += 1
+        records.append(ad)
+    depths = AlleleDepths.from_records(records, len(samples), n_multiallelic=n_multi,
+                                       multiallelic="collapse", sites=sites, alleles=names)
+    return samples, depths
+
+
+def read_pop_freqs(path, *, locus_col="locus", allele_col="allele", freq_col="freq"):
+    """Read population allele frequencies from a long-format TSV into ``{site: {allele: freq}}``.
+
+    One row per locus and allele. For VCF / AD-table input the locus is ``CHROM:POS`` and
+    the allele its REF or ALT string; for an allele table it is the locus name and the
+    haplotype. This is the format :func:`write_pop_freqs` writes, so frequencies computed
+    on a reference cohort can be reused. Frequencies are renormalised per locus to sum to
+    1, so counts work too.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(path, sep="\t", usecols=[locus_col, allele_col, freq_col],
+                     dtype={locus_col: str, allele_col: str})
+    df[freq_col] = pd.to_numeric(df[freq_col], errors="coerce").fillna(0.0)
+    out: dict[str, dict[str, float]] = {}
+    for locus, g in df.groupby(locus_col, sort=False):
+        tot = float(g[freq_col].sum())
+        if tot <= 0:
+            continue
+        out[str(locus)] = {a: float(f) / tot for a, f in zip(g[allele_col], g[freq_col])}
+    return out
+
+
+def write_pop_freqs(freqs, path, *, locus_col="locus", allele_col="allele", freq_col="freq"):
+    """Write ``{site: {allele: freq}}`` (see :meth:`AlleleDepths.population_freqs`) as a TSV."""
+    with open(path, "w") as fh:
+        fh.write(f"{locus_col}\t{allele_col}\t{freq_col}\n")
+        for site, d in freqs.items():
+            for a, f in d.items():
+                fh.write(f"{site}\t{a}\t{f:.6g}\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -363,7 +469,7 @@ def read_ad_vcf(path, exclude=None, snps_only=False, multiallelic="collapse", tr
 
 
 def compute_fws(depths, alt=None, *, estimator="regression", min_depth=0, n_bins=10,
-                min_alt_samples=0):
+                min_alt_samples=0, pop_freqs=None):
     """Compute per-sample Fws from an :class:`AlleleDepths`.
 
     ``compute_fws(ref, alt, ...)`` with two ``[n_sites, n_samples]`` biallelic depth
@@ -377,6 +483,23 @@ def compute_fws(depths, alt=None, *, estimator="regression", min_depth=0, n_bins
     ``min_alt_samples`` keeps only sites where a non-reference allele is seen in at least
     that many samples. moimix parity uses ``estimator="regression", min_depth=0,
     min_alt_samples=0``.
+
+    ``pop_freqs`` (``{site: {allele: freq}}``, see :func:`read_pop_freqs`) replaces the
+    cohort's own pooled read fractions as the population allele frequencies -- for
+    scoring a few samples against a reference population, or the same population at a
+    different time. Only the population side (``Hs`` and the binning variable) changes;
+    the within-sample side never needs frequencies. A site with no entry is dropped, and
+    ``compute_fws.last_pop_freq_misses`` says how many were. The population is exactly
+    the alleles listed for a site, so an allele seen here but absent there counts as
+    frequency 0 and one listed there but unseen here still contributes to ``Hs``.
+
+    ``n_bins=0`` skips the MAF binning and works per site: the regression becomes the
+    through-origin slope of every usable site's ``Hw`` on its ``Hs``
+    (``Fws = 1 - Σ Hs·Hw / Σ Hs²``), the ratio ``1 - Σ Hw / Σ Hs``. Use it for
+    microhaplotype loci, where the major allele is often below 50% and the bins over
+    [0, 0.5] stop describing the sites. It is a different estimator from the binned one
+    (every site is weighted by its own Hs², rather than each bin by its mean), so on a SNP
+    callset the two can differ by a tenth; do not carry a threshold from one to the other.
     """
     if alt is not None:
         depths = AlleleDepths.from_ref_alt(depths, alt)
@@ -387,21 +510,60 @@ def compute_fws(depths, alt=None, *, estimator="regression", min_depth=0, n_bins
     depth = depths.depth
     n_samples = depths.n_samples
 
-    # population: allele frequencies over the cohort's pooled reads
-    tot_dp = depths.pop.sum(axis=1)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        freq = np.where(tot_dp[:, None] > 0, depths.pop / tot_dp[:, None], np.nan)
-        # minor-allele fraction as a ratio of counts (moimix: min(coverage / sum(coverage)))
-        maf = np.where(tot_dp > 0, (tot_dp - depths.pop.max(axis=1)) / tot_dp, np.nan)
-    Hs = 1.0 - (freq * freq).sum(axis=1)
+    if pop_freqs is not None:
+        # population from outside: Hs and the minor-allele fraction per site, from the
+        # supplied frequencies; a site without an entry is NaN and so drops out below
+        if depths.sites is None:
+            raise ValueError("pop_freqs needs depths with site ids (a reader built them)")
+        Hs = np.full(depths.n_sites, np.nan)
+        maf = np.full(depths.n_sites, np.nan)
+        for i, site in enumerate(depths.sites):
+            f = pop_freqs.get(site)
+            if not f:
+                continue
+            v = np.asarray(list(f.values()), dtype=float)
+            v = v / v.sum()
+            Hs[i] = 1.0 - float((v * v).sum())
+            maf[i] = 1.0 - float(v.max())
+        compute_fws.last_pop_freq_misses = int(np.isnan(maf).sum())
+    else:
+        # population: allele frequencies over the cohort's pooled reads
+        tot_dp = depths.pop.sum(axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            freq = np.where(tot_dp[:, None] > 0, depths.pop / tot_dp[:, None], np.nan)
+            # minor-allele fraction as a ratio of counts (moimix: min(coverage / sum(coverage)))
+            maf = np.where(tot_dp > 0, (tot_dp - depths.pop.max(axis=1)) / tot_dp, np.nan)
+        Hs = 1.0 - (freq * freq).sum(axis=1)
+        compute_fws.last_pop_freq_misses = 0
     alt_present = (depths.nonref > 0).sum(axis=1)
     # within-sample: Hw = 1 - Σ_k q_k² = 1 - Σ_k ad_k² / depth²
     with np.errstate(invalid="ignore", divide="ignore"):
         Hw = np.where(depth > 0, 1.0 - depths.sumsq / (depth * depth), np.nan)
 
-    edges = np.linspace(0, 0.5, n_bins + 1)
     fws = np.full(n_samples, np.nan)
     n_info = np.zeros(n_samples, dtype=int)
+
+    if n_bins == 0:
+        # per-site, no binning: the same through-origin regression (or ratio) with every
+        # usable site as its own point
+        site_ok = np.isfinite(maf) & np.isfinite(Hs) & (alt_present >= min_alt_samples)
+        if estimator == "ratio":
+            site_ok &= Hs > 0
+        elif estimator != "regression":
+            raise ValueError(f"unknown estimator {estimator!r} (use 'regression' or 'ratio')")
+        usable = site_ok[:, None] & (depth > 0) & (depth >= min_depth) & np.isfinite(Hw)
+        x = np.where(usable, Hs[:, None], 0.0)
+        y = np.where(usable, Hw, 0.0)
+        y = np.where(np.isfinite(y), y, 0.0)
+        denom = (x * x).sum(axis=0) if estimator == "regression" else x.sum(axis=0)
+        numer = (x * y).sum(axis=0) if estimator == "regression" else y.sum(axis=0)
+        ok = denom > 0
+        fws[ok] = 1.0 - numer[ok] / denom[ok]
+        n_info[:] = usable.sum(axis=0)
+        n_info[~ok] = 0
+        return fws, n_info
+
+    edges = np.linspace(0, 0.5, n_bins + 1)
 
     if estimator == "regression":
         # moimix::getFws — 10 MAF bins via findInterval, global per-bin population-het

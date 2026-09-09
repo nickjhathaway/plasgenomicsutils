@@ -212,3 +212,153 @@ def test_absent_sites_become_missing_AD_after_a_merge(tmp_path):
         f"bcftools view -H -e 'FMT/AD=\".\"' | wc -l",
         shell=True, capture_output=True, text=True, executable="/bin/bash").stdout
     assert int(kept.strip()) == 1                 # only site 100 survives
+
+
+# ---- the per-allele fields move with the alleles -----------------------------------
+
+R_HEADER = (
+    "##fileformat=VCFv4.2\n"
+    "##contig=<ID=chr1,length=100000>\n"
+    '##INFO=<ID=AD,Number=R,Type=Integer,Description="x">\n'
+    '##INFO=<ID=AC,Number=A,Type=Integer,Description="x">\n'
+    '##INFO=<ID=DP,Number=1,Type=Integer,Description="x">\n'
+    '##INFO=<ID=RPBZ,Number=1,Type=Float,Description="x">\n'
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
+    '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">\n'
+    '##FORMAT=<ID=ADF,Number=R,Type=Integer,Description="ADF">\n'
+    '##FORMAT=<ID=PL,Number=G,Type=Integer,Description="PL">\n'
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n"
+)
+
+
+def _write_r(path, body, samples="S1\tS2"):
+    path.write_text(R_HEADER.replace("S1\tS2", samples) + body)
+    return str(path)
+
+
+def _first(path):
+    with pysam.VariantFile(path) as vf:
+        return [(r.alleles, dict(r.info), {s: (tuple(r.samples[s]["GT"]), r.samples[s].phased,
+                                             tuple(r.samples[s]["AD"]),
+                                             tuple(r.samples[s]["ADF"]))
+                                        for s in r.samples}) for r in vf]
+
+
+def test_every_number_r_field_is_relaid_on_the_union_and_gt_is_reindexed(tmp_path):
+    """Two files that saw different ALTs at one site. The union is A>C,T; file a's T moves
+    to slot 2 in FORMAT/AD, FORMAT/ADF *and* INFO/AD, C gets a zero, and the genotypes
+    are re-indexed (1/1 for T -> 2/2) rather than re-called, phasing intact. INFO/AC
+    (Number=A) cannot be re-laid and goes."""
+    a = _write_r(tmp_path / "a.vcf",
+                 "chr1\t100\t.\tA\tT\t.\t.\tAD=25,30;AC=2;DP=55;RPBZ=1.5\tGT:AD:ADF:PL\t"
+                 "1|1:0,30:0,16:90,9,0\t0/0:25,0:12,0:0,9,90\n")
+    b = _write_r(tmp_path / "b.vcf",
+                 "chr1\t100\t.\tA\tC\t.\t.\tAD=24,26;AC=2;DP=50;RPBZ=-0.5\tGT:AD:ADF:PL\t"
+                 "1/1:0,26:0,13:90,9,0\t0/0:24,0:11,0:0,9,90\n", samples="S3\tS4")
+    union, _d, _a, _st = H.accumulate_union([a, b], 0, 0.0, 0.2)
+    assert union[("chr1", 100)] == ["A", "C", "T"]
+
+    H.harmonize_file(a, str(tmp_path / "ha.vcf"), union, 0, 0.0, 0.2,
+                     regenotype=False, stale_info=("AC",))
+    (alleles, info, samples), = _first(str(tmp_path / "ha.vcf"))
+    assert alleles == ("A", "C", "T")
+    assert tuple(info["AD"]) == (25, 0, 30) and "AC" not in info
+    assert info["DP"] == 55 and abs(info["RPBZ"] - 1.5) < 1e-6    # Number=1 stays
+    assert samples["S1"] == ((2, 2), True, (0, 0, 30), (0, 0, 16))
+    assert samples["S2"] == ((0, 0), False, (25, 0, 0), (12, 0, 0))
+
+    H.harmonize_file(b, str(tmp_path / "hb.vcf"), union, 0, 0.0, 0.2,
+                     regenotype=False, stale_info=("AC",))
+    (alleles, info, samples), = _first(str(tmp_path / "hb.vcf"))
+    assert tuple(info["AD"]) == (24, 26, 0)
+    assert samples["S3"] == ((1, 1), False, (0, 26, 0), (0, 13, 0))
+
+
+def test_regenotype_false_keeps_the_callers_genotype(tmp_path):
+    """A 27,3 het: the caller said 0/1 from likelihoods. Re-genotyping from AD at
+    het_min_af=0.2 would make it 0/0; regenotype=False re-indexes it and leaves it be."""
+    a = _write_r(tmp_path / "a.vcf",
+                 "chr1\t100\t.\tA\tT\t.\t.\tAD=27,3;DP=30\tGT:AD:ADF\t0/1:27,3:14,2\t0/0:1,0:1,0\n")
+    b = _write_r(tmp_path / "b.vcf",
+                 "chr1\t100\t.\tA\tC\t.\t.\tAD=0,10;DP=10\tGT:AD:ADF\t1/1:0,10:0,5\t0/0:1,0:1,0\n",
+                 samples="S3\tS4")
+    union, _d, _a, _st = H.accumulate_union([a, b], 0, 0.0, 0.2)
+
+    H.harmonize_file(a, str(tmp_path / "recalled.vcf"), union, 0, 0.0, 0.2)
+    (_al, _info, recalled), = _first(str(tmp_path / "recalled.vcf"))
+    assert recalled["S1"][0] == (0, 0)                        # re-called from AD
+
+    H.harmonize_file(a, str(tmp_path / "kept.vcf"), union, 0, 0.0, 0.2, regenotype=False)
+    (_al, _info, kept), = _first(str(tmp_path / "kept.vcf"))
+    assert kept["S1"][0] == (0, 2)                            # 0/1 for T, now slot 2
+
+
+def test_the_same_alts_in_another_order_still_reindex_the_genotypes(tmp_path):
+    """A file listing T,C against a union of C,T gained nothing, but its 0/1 meant T and
+    must come out 0/2 -- whichever way genotypes are otherwise handled."""
+    a = _write_r(tmp_path / "a.vcf",
+                 "chr1\t100\t.\tA\tT,C\t.\t.\tAD=20,10,5;DP=35\tGT:AD:ADF\t"
+                 "0/1:10,10,0:5,5,0\t0/2:10,0,5:5,0,3\n")
+    b = _write_r(tmp_path / "b.vcf",
+                 "chr1\t100\t.\tA\tC,T\t.\t.\tAD=20,5,10;DP=35\tGT:AD:ADF\t"
+                 "0/1:10,5,0:5,3,0\t0/2:10,0,10:5,0,5\n", samples="S3\tS4")
+    union, _d, _a, _st = H.accumulate_union([a, b], 0, 0.0, 0.2)
+    assert union[("chr1", 100)] == ["A", "C", "T"]
+    for regenotype in (True, False):
+        out = str(tmp_path / f"h{regenotype}.vcf")
+        st = H.harmonize_file(a, out, union, 0, 0.0, 0.2, regenotype=regenotype)
+        assert st["alts_added"] == 0
+        (alleles, info, samples), = _first(out)
+        assert alleles == ("A", "C", "T")
+        assert tuple(info["AD"]) == (20, 5, 10)
+        assert samples["S1"][0] == (0, 2) and samples["S1"][2] == (10, 0, 10)
+        assert samples["S2"][0] == (0, 1) and samples["S2"][2] == (10, 5, 0)
+
+
+def test_keep_ref_only_writes_sites_nobody_varies_at(tmp_path):
+    """A callset over a list of positions answers at every position: a site that is
+    reference in every file is written through as REF>. instead of dropped."""
+    a = _write_r(tmp_path / "a.vcf",
+                 "chr1\t100\t.\tA\tT\t.\t.\tAD=25,30;DP=55\tGT:AD:ADF\t1/1:0,30:0,16\t0/0:25,0:12,0\n"
+                 "chr1\t200\t.\tG\t.\t.\t.\tAD=40;DP=40\tGT:AD:ADF\t0/0:20:10\t0/0:20:10\n")
+    b = _write_r(tmp_path / "b.vcf",
+                 "chr1\t100\t.\tA\t.\t.\t.\tAD=50;DP=50\tGT:AD:ADF\t0/0:25:12\t0/0:25:12\n"
+                 "chr1\t200\t.\tG\t.\t.\t.\tAD=40;DP=40\tGT:AD:ADF\t0/0:20:10\t0/0:20:10\n",
+                 samples="S3\tS4")
+    union, _d, _a, st = H.accumulate_union([a, b], 0, 0.0, 0.2)
+    assert set(union) == {("chr1", 100)} and st["union_dropped"] == 1
+
+    union, _d, _a, st = H.accumulate_union([a, b], 0, 0.0, 0.2, keep_ref_only=True)
+    assert union[("chr1", 200)] == ["G"] and st["union_dropped"] == 0
+    assert st["union_with_alts"] == 1
+    r = H.harmonize_file(b, str(tmp_path / "hb.vcf"), union, 0, 0.0, 0.2, regenotype=False)
+    assert r["written"] == 2 and r["dropped_ref_only"] == 0 and r["alts_added"] == 1
+    recs = _first(str(tmp_path / "hb.vcf"))
+    assert recs[0][0] == ("A", "T") and recs[0][2]["S3"] == ((0, 0), False, (25, 0), (12, 0))
+    assert tuple(recs[0][1]["AD"]) == (50, 0)
+    assert recs[1][0][0] == "G" and not [x for x in recs[1][0][1:] if x != "."]
+    assert recs[1][2]["S3"][2] == (20,) and tuple(recs[1][1]["AD"]) == (40,)
+
+
+def test_stale_format_fields_can_keep_the_padded_counts(tmp_path):
+    a = _write_r(tmp_path / "a.vcf", "")
+    assert H.stale_format_fields(a) == ["ADF", "PL"]
+    assert H.stale_format_fields(a, keep=("GT", "AD", "ADF", "ADR")) == ["PL"]
+
+
+def test_dropping_an_unsupported_allele_reshapes_every_per_allele_field(tmp_path):
+    """G>T,A with A unsupported. Cleaning drops A: INFO/AD and FORMAT/ADF lose the slot
+    with it, S1 (0/1 for T) is re-indexed, and only a sample that had called the dropped
+    allele is re-called from AD -- when regenotype=False."""
+    f = _write_r(tmp_path / "m.vcf",
+                 "chr1\t100\t.\tG\tT,A\t.\t.\tAD=10,14,0;AC=2,1;DP=24\tGT:AD:ADF\t"
+                 "0/1:10,5,0:5,3,0\t1/2:0,9,0:0,5,0\n")
+    union, _d, _a, _st = H.accumulate_union([f], 3, 0.005, 0.2)
+    assert union[("chr1", 100)] == ["G", "T"]
+    H.harmonize_file(f, str(tmp_path / "out.vcf"), union, 3, 0.005, 0.2,
+                     regenotype=False, stale_info=("AC",))
+    (alleles, info, samples), = _first(str(tmp_path / "out.vcf"))
+    assert alleles == ("G", "T")
+    assert tuple(info["AD"]) == (10, 14) and "AC" not in info and info["DP"] == 24
+    assert samples["S1"] == ((0, 1), False, (10, 5), (5, 3))     # kept, re-indexed
+    assert samples["S2"] == ((1, 1), False, (0, 9), (0, 5))      # was 1/2, A gone: re-called
