@@ -357,3 +357,200 @@ def test_a_directory_still_gets_its_samples_renamed(tmp_path):
     cmds = C.call_variants("ref.fa", str(tmp_path / "o.bcf"), bam_dir=str(d),
                            sample_suffix=".sorted.bam", dry_run=True)
     assert any("bcftools reheader" in c and ".sorted.bam" in c for c in cmds)
+
+
+# ---- splitting the alignments, for cohorts too big to open all at once ------------
+
+def test_bam_groups_are_contiguous_and_off_below_the_batch():
+    paths = [f"s{i}.bam" for i in range(7)]
+    assert C.bam_groups(paths, None) == [paths]
+    assert C.bam_groups(paths, 0) == [paths]
+    assert C.bam_groups(paths, 7) == [paths]                 # one group: nothing to merge
+    assert C.bam_groups(paths, 3) == [paths[:3], paths[3:6], paths[6:]]
+
+
+def test_group_mode_dry_run_tiles_groups_by_chunks_then_harmonizes_and_merges(tmp_path):
+    bams = [f"s{i}.bam" for i in range(5)]
+    cmds = C.call_variants("ref.fa", str(tmp_path / "out.bcf"), bams=bams,
+                           regions=_bed(tmp_path, 6), threads=3, bam_batch=2, skip_indels=True,
+                           dry_run=True)
+    calls = [c for c in cmds if "mpileup" in c]
+    assert len(calls) == 3 * 3                               # 3 groups x 3 chunks
+    assert all("--bam-list " in c and "group000" in c and ".bams.txt" in c for c in calls)
+    assert not any(" s0.bam" in c for c in calls)            # groups go in via list files
+    assert sum(c.startswith("bcftools concat -a ") for c in cmds) == 3   # one per group
+    assert sum("bcftools index" in c for c in cmds) == 9
+    assert any(c.startswith("# harmonize") for c in cmds)
+    assert sum(c.startswith("bcftools annotate") for c in cmds) == 3
+    merge = [c for c in cmds if c.startswith("bcftools merge")]
+    assert len(merge) == 1 and "AD:sum" in merge[0] and "RPBZ:avg" in merge[0] \
+        and "FS:min" in merge[0] and merge[0].count("h_group") == 3
+    assert cmds.index(merge[0]) > max(i for i, c in enumerate(cmds) if "annotate" in c)
+    assert "reheader" in cmds[-1]                            # naming is still the last step
+
+
+def test_group_mode_without_regions_is_one_job_per_group(tmp_path):
+    cmds = C.call_variants("ref.fa", str(tmp_path / "out.bcf"),
+                           bams=[f"s{i}.bam" for i in range(5)], threads=4, bam_batch=2,
+                           skip_indels=True, dry_run=True)
+    calls = [c for c in cmds if "mpileup" in c]
+    assert len(calls) == 3 and not any("-R " in c for c in calls)
+    assert not any("concat" in c for c in cmds)              # the group file is the tile
+    assert any(c.startswith("bcftools merge") for c in cmds)
+
+
+def test_a_batch_no_smaller_than_the_cohort_changes_nothing(tmp_path):
+    bams = [f"s{i}.bam" for i in range(4)]
+    plain = C.call_variants("ref.fa", str(tmp_path / "o.bcf"), bams=bams,
+                            regions=_bed(tmp_path, 6), threads=2, dry_run=True)
+    batched = C.call_variants("ref.fa", str(tmp_path / "o.bcf"), bams=bams,
+                              regions=_bed(tmp_path, 6), threads=2, bam_batch=4,
+                              dry_run=True)
+    # the chunk files live in a fresh temp dir per call; compare everything but that
+    strip = lambda cs: [c.split("call_variants.")[0] for c in cs]  # noqa: E731
+    assert strip(plain) == strip(batched)
+    assert not any("merge" in c for c in batched)
+
+
+def test_group_mode_needs_the_alignments_listed(tmp_path):
+    with pytest.raises(SystemExit, match="--bam-batch needs the alignments listed"):
+        C.call_variants("ref.fa", "o.bcf", bam_list=str(tmp_path / "missing.txt"),
+                        bam_batch=2, skip_indels=True, dry_run=True)
+    with pytest.raises(SystemExit, match="--bam-batch must be 0"):
+        C.call_variants("ref.fa", "o.bcf", bams=["a.bam"], bam_batch=-1, dry_run=True)
+
+
+def test_group_mode_refuses_to_drop_indels_unannounced(tmp_path):
+    """Harmonizing is SNP-only. Rather than call indels and quietly lose them, a split
+    that is actually in effect demands --skip-indels; a batch the cohort fits in does not,
+    since nothing is harmonized and the indels stay."""
+    bams = [f"s{i}.bam" for i in range(5)]
+    with pytest.raises(SystemExit, match="requires --skip-indels"):
+        C.call_variants("ref.fa", "o.bcf", bams=bams, bam_batch=2, dry_run=True)
+    cmds = C.call_variants("ref.fa", "o.bcf", bams=bams, bam_batch=2, skip_indels=True,
+                           dry_run=True)
+    assert all(" -I " in c for c in cmds if "mpileup" in c)
+    fits = C.call_variants("ref.fa", "o.bcf", bams=bams, bam_batch=5, dry_run=True)
+    assert not any(" -I " in c for c in fits if "mpileup" in c)
+
+
+def _cohort(tmp_path):
+    """Six BAMs whose ALTs are unevenly spread, so a 2-BAM group misses alleles others
+    carry: the situation group mode has to get right. Returns (fasta, bams, bed)."""
+    pysam = pytest.importorskip("pysam")
+    import random
+    random.seed(11)
+    ref = "".join(random.choice("ACGT") for _ in range(4000))
+    fa = tmp_path / "ref.fa"
+    fa.write_text(">chr1\n" + "\n".join(ref[i:i + 60] for i in range(0, len(ref), 60)) + "\n")
+    pysam.faidx(str(fa))
+    sites = [1000, 1500, 2000, 2500, 3000]
+    alt = lambda b, k: [x for x in "ACGT" if x != b][k]  # noqa: E731
+    # sample -> site -> (which alt, fraction of reads carrying it)
+    plan = {"s1": {1000: (0, 0.5), 1500: (0, 1.0), 2000: (0, 0.1)},
+            "s2": {1000: (0, 0.5), 2500: (1, 1.0)},
+            "s3": {1000: (1, 0.5), 3000: (0, 0.5)},
+            "s4": {1500: (0, 0.5)},
+            "s5": {2500: (0, 0.3), 3000: (0, 1.0)},
+            "s6": {}}
+    bams = []
+    for s, p in plan.items():
+        hdr = {"HD": {"VN": "1.6", "SO": "coordinate"},
+               "SQ": [{"LN": len(ref), "SN": "chr1"}],
+               "RG": [{"ID": "rg1", "SM": s, "PL": "ILLUMINA"}]}
+        path = tmp_path / f"{s}.bam"
+        with pysam.AlignmentFile(str(path), "wb", header=hdr) as out:
+            for site in sites:
+                for i in range(30):
+                    st = site - 80 + i * 2
+                    seq = list(ref[st:st + 120])
+                    if site in p:
+                        k, frac = p[site]
+                        if i < int(30 * frac):
+                            seq[site - st] = alt(ref[site], k)
+                    a = pysam.AlignedSegment()
+                    a.query_name = f"r{site}_{i}"; a.query_sequence = "".join(seq)
+                    a.flag = 16 if i % 4 in (2, 3) else 0
+                    a.reference_id = 0; a.reference_start = st
+                    a.mapping_quality = 60 if i % 5 else 40
+                    a.cigarstring = "120M"
+                    a.query_qualities = pysam.qualitystring_to_array("I" * 120)
+                    a.set_tag("RG", "rg1")
+                    out.write(a)
+        pysam.index(str(path))
+        bams.append(str(path))
+    bed = tmp_path / "sites.bed"
+    bed.write_text("".join(f"chr1\t{s}\t{s + 1}\n" for s in sites))
+    return str(fa), bams, str(bed)
+
+
+def _by_allele(path):
+    """Each record keyed by position, with every per-allele value keyed by the allele's
+    base rather than its index, so the ALT order (bcftools' by evidence, the harmonized
+    union's alphabetical) does not count as a difference."""
+    import pysam
+    out = {}
+    with pysam.VariantFile(path) as vf:
+        for r in vf:
+            alleles = list(r.alleles)
+            per = {"alts": set(r.alts or ()), "DP": r.info["DP"], "DP4": tuple(r.info["DP4"]),
+                   "INFO": {f: dict(zip(alleles, r.info[f])) for f in ("AD", "ADF", "ADR")}}
+            for s in r.samples:
+                gt = r.samples[s]["GT"]
+                per[s] = (tuple(sorted(alleles[g] for g in gt)),
+                          {f: dict(zip(alleles, r.samples[s][f])) for f in ("AD", "ADF", "ADR")},
+                          r.samples[s]["DP"])
+            out[(r.chrom, r.pos)] = per
+    return out
+
+
+@needs_bcftools
+def test_splitting_the_alignments_gives_the_joint_calls(tmp_path):
+    """The property group mode has to have: genotypes, per-sample and per-site allele
+    depths and the read counts come out as the joint call had them, for every sample,
+    including at sites where a group saw no ALT at all (s6's group at 1001) or a
+    different one (C vs G at 2501). Sample order and names are kept; PL is gone."""
+    from plasgenomicsutils.lib.bcftools import format_tags, sample_names as names_of
+    fa, bams, bed = _cohort(tmp_path)
+    joint = str(tmp_path / "joint.bcf")
+    grouped = str(tmp_path / "grouped.bcf")
+    C.call_variants(fa, joint, bams=bams, regions=bed, threads=2, skip_indels=True)
+    C.call_variants(fa, grouped, bams=bams, regions=bed, threads=2, bam_batch=2,
+                    skip_indels=True)
+
+    assert names_of(grouped) == names_of(joint) == [f"s{i}" for i in range(1, 7)]
+    j, g = _by_allele(joint), _by_allele(grouped)
+    assert set(j) == set(g) and len(j) == 5
+    assert j == g
+    # the union really was needed: no group carried both alleles at 2501, and s6's group
+    # had nothing at 1001 -- yet its AD there has a zero for every ALT, not a missing value
+    assert g[("chr1", 2501)]["alts"] == {"C", "G"}
+    assert g[("chr1", 1001)]["s6"][1]["AD"] == {"A": 30, "C": 0, "G": 0}
+    assert "PL" in format_tags(joint) and "PL" not in format_tags(grouped)
+    for tag in ("RPBZ", "MQBZ", "FS", "MQ"):          # the by-rule statistics are present
+        assert tag in C.info_tags(grouped)
+
+
+@needs_bcftools
+def test_group_mode_is_the_same_with_or_without_region_chunks(tmp_path):
+    fa, bams, bed = _cohort(tmp_path)
+    a = str(tmp_path / "a.bcf")
+    b = str(tmp_path / "b.bcf")
+    C.call_variants(fa, a, bams=bams, regions=bed, threads=3, bam_batch=4,
+                    skip_indels=True)                                    # 2 x 3 tiles
+    C.call_variants(fa, b, bams=bams, regions=bed, threads=1, bam_batch=4,
+                    skip_indels=True)                                    # 2 jobs
+    assert _by_allele(a) == _by_allele(b)
+
+
+@needs_bcftools
+def test_merge_rules_only_name_tags_the_header_has(tmp_path):
+    fa, bams, bed = _cohort(tmp_path)
+    out = str(tmp_path / "o.bcf")
+    C.call_variants(fa, out, bams=bams[:2], regions=bed)
+    rules = C.merge_info_rules(out)
+    assert "AD:sum" in rules and "FS:min" in rules and "RPBZ:avg" in rules
+    plain = str(tmp_path / "plain.bcf")
+    C.call_variants(fa, plain, bams=bams[:2], regions=bed, annotations="FORMAT/AD")
+    assert "ADF" not in C.merge_info_rules(plain) and "FS" not in C.merge_info_rules(plain)
+    assert "DP:sum" in C.merge_info_rules(plain)

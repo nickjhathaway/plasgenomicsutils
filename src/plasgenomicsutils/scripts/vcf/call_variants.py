@@ -28,7 +28,10 @@ def get_parser_call_variants() -> argparse.ArgumentParser:
                "      --threads 8 --output crt_snps.bcf\n\n"
                "The region list is split into 8 chunks, one job each; the parts are "
                "concatenated and indexed, and\nthe samples are named after their BAM "
-               "files rather than their paths.\n",
+               "files rather than their paths.\n\n"
+               "Hundreds of BAMs on a network filesystem: add --bam-batch 100 "
+               "--skip-indels, so no more\nthan 8 x 100 alignments are open at once (see "
+               "--bam-batch's help for what the split changes).\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--ref", required=True, help="Reference FASTA (indexed)")
@@ -54,9 +57,26 @@ def get_parser_call_variants() -> argparse.ArgumentParser:
                    help="Regions per chunk. Default splits the list into --threads "
                         "pieces; set this for fixed-size chunks instead, which evens out "
                         "uneven regions at the cost of more jobs.")
+    r.add_argument("--bam-batch", type=int, default=0,
+                   help="Alignments per group (default: 0 = off, every job opens every "
+                        "alignment). Hundreds of BAMs on NFS need this: 600 BAMs over 5 "
+                        "jobs is 6,000 open files at once and the run stalls in I/O. With "
+                        "--bam-batch 100 the alignments are cut into contiguous groups of "
+                        "100, one job runs per group and region chunk, and at most "
+                        "threads x 100 are open. The group callsets are harmonized (an ALT "
+                        "one group did not see gets AD 0 for its samples) and merged. "
+                        "Genotypes, AD/ADF/ADR and the INFO read counts (AD, ADF, ADR, DP, "
+                        "DP4) come out as the joint call would give them; the per-site bias "
+                        "statistics (RPBZ, MQBZ, MQSBZ, SCBZ, BQBZ, MQ, MQ0F: averaged; FS: "
+                        "min; QUAL: bcftools merge's) are combined across groups rather "
+                        "than computed over all reads. The output is SNP-only, so "
+                        "--skip-indels is required with it (an error otherwise, so indel "
+                        "records never vanish unannounced), and it has no PL. A cohort no "
+                        "larger than the batch is one group and is unaffected.")
     r.add_argument("--keep-chunks", default=None,
-                   help="Directory to keep the per-chunk region files and BCFs in "
-                        "(default: a temporary directory, removed after concatenating)")
+                   help="Directory to keep the per-chunk region files and BCFs in, and with "
+                        "--bam-batch the per-group callsets (default: a temporary "
+                        "directory, removed after concatenating)")
 
     c = p.add_argument_group("calling")
     c.add_argument("--ploidy", default="2",
@@ -84,7 +104,8 @@ def get_parser_call_variants() -> argparse.ArgumentParser:
                         "produced. SNP records are unaffected -- reads spanning an indel "
                         "still count toward the pileup at every other position -- so this "
                         "is not the same as filtering indels out afterwards only in that "
-                        "the indel likelihoods are never computed.")
+                        "the indel likelihoods are never computed. Required with "
+                        "--bam-batch, whose output is SNP-only.")
     c.add_argument("--max-depth", type=int, default=None,
                    help="mpileup -d: per-file depth cap for the pileup (bcftools default "
                         "250). Raise it for deep data, or positions are downsampled.")
@@ -125,7 +146,8 @@ def call_variants():
         skip_indels=args.skip_indels, max_depth=args.max_depth, min_mapq=args.min_mapq,
         min_baseq=args.min_baseq, variants_only=args.variants_only,
         extra_mpileup=args.extra_mpileup,
-        extra_call=args.extra_call, keep_chunks=args.keep_chunks, dry_run=args.dry_run)
+        extra_call=args.extra_call, keep_chunks=args.keep_chunks,
+        bam_batch=args.bam_batch, dry_run=args.dry_run)
 
     if args.dry_run:
         for c in cmds:
