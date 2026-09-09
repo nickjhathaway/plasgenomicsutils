@@ -32,6 +32,22 @@ split.
 One BAM per sample is the usual arrangement here, so ``--ignore-RG`` is the default. That
 names each sample after the *path* it was called from, which nothing downstream wants, so
 the samples are renamed to the file name with ``sample_suffix`` removed as the last step.
+
+**Hundreds of BAMs on a network filesystem need splitting the other way too.** Every
+region job opens every alignment, so 600 BAMs over 5 jobs is 6,000 concurrent file
+handles (BAM plus index) against one NFS server, and the run stalls in I/O rather than
+computing. ``bam_batch`` caps that the way the CNV pipeline's Fws step does: the
+alignments are cut into contiguous groups of at most that many, one job runs per (group x
+region chunk), and the peak is ``threads x bam_batch`` handles whatever the cohort size.
+The price is that the groups are called separately: a group where no sample carries an
+ALT does not emit it, so the group callsets disagree on alleles. :mod:`.harmonize` puts
+them back on one allele set -- an allele a group never saw gets AD 0 for its samples,
+which is what that group's pileup found -- and ``bcftools merge`` joins them. Genotypes,
+AD, ADF, ADR and the per-site read counts (INFO/AD, ADF, ADR, DP, DP4) come out exactly
+as the joint call would have them; what cannot be recovered are the per-site *statistics*
+bcftools computes over the pooled reads -- the ``*BZ`` z-scores, ``FS``, ``MQ``, QUAL --
+which are combined across groups by rule instead (:data:`GROUP_MERGE_RULES`). Harmonizing
+is SNP-only, so indel records are dropped in this mode, and PL goes with them.
 """
 
 from __future__ import annotations
@@ -44,7 +60,8 @@ import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
-from .bcftools import index_vcf, out_flag, q, require, sample_names, sh
+from . import harmonize as H
+from .bcftools import index_vcf, info_tags, out_flag, q, require, sample_names, sh
 from .vcf_filters import BCFTOOLS_MPILEUP_ANNOTATIONS
 
 
@@ -212,6 +229,113 @@ def bams_in_dir(directory: str, patterns: tuple[str, ...] = BAM_DIR_PATTERNS) ->
     return found
 
 
+def bam_groups(paths: list[str], bam_batch: int | None) -> list[list[str]]:
+    """Cut the alignments into contiguous groups of at most ``bam_batch``.
+
+    Contiguous, so the merged callset keeps the input sample order (``bcftools merge``
+    appends the files' samples in order). One group -- ``bam_batch`` off, or at least as
+    large as the cohort -- means nothing to harmonize, and calling runs as it would have
+    without it.
+    """
+    if not bam_batch or bam_batch >= len(paths):
+        return [list(paths)]
+    size = int(bam_batch)
+    return [list(paths[i:i + size]) for i in range(0, len(paths), size)]
+
+
+#: How ``bcftools merge -i`` combines each INFO tag across the per-group callsets. The
+#: counts are sums, which is exactly what the joint call would have counted. The
+#: statistics are a stand-in: ``FS`` is a p-value, so the smallest (most significant) is
+#: kept; the Mann-Whitney z-scores and the quality summaries are averaged. A z pooled over
+#: all the reads would grow with the number of groups (~sqrt(G) for the same effect), so
+#: these are conservative in the *keep* direction for ``hard_qc_filter`` -- its effect-size
+#: guard (``bias_eff``, from ADF/ADR) is on the exact counts and unaffected. Any tag not in
+#: the header is left out of the rule at run time; the merge default for the rest is the
+#: first group's value.
+GROUP_MERGE_RULES = {
+    "DP": "sum", "DP4": "sum", "AD": "sum", "ADF": "sum", "ADR": "sum", "SCR": "sum",
+    "FS": "min",
+    "RPBZ": "avg", "MQBZ": "avg", "MQSBZ": "avg", "BQBZ": "avg", "SCBZ": "avg",
+    "MQ": "avg", "MQ0F": "avg", "VDB": "avg", "SGB": "avg",
+}
+
+#: INFO fields dropped before the groups are merged: ``Number=A`` and count-of-alleles
+#: fields ``bcftools merge`` recomputes from the merged genotypes anyway.
+GROUP_STALE_INFO = ("AC", "AN", "AF")
+
+#: FORMAT fields kept through harmonizing in group mode. The ``Number=R`` counts are
+#: re-laid-out on the union allele set with zeros; everything else per-allele (PL, which is
+#: ``Number=G``) is dropped, since a likelihood for a genotype the group never scored does
+#: not exist.
+GROUP_KEEP_FORMAT = ("GT", "AD", "ADF", "ADR")
+
+
+def merge_info_rules(path: str, rules: dict = GROUP_MERGE_RULES) -> str:
+    """The ``bcftools merge -i`` argument for a file, restricted to tags its header has."""
+    present = info_tags(path)
+    return ",".join(f"{t}:{r}" for t, r in rules.items() if t in present)
+
+
+def _merge_cmd(harmonized: list[str], out: str, rules: str) -> str:
+    return (f"bcftools merge -i {q(rules)} {' '.join(q(p) for p in harmonized)} "
+            f"-O{out_flag(out)} -o {q(out)}")
+
+
+def _harmonize_groups(group_files: list[str], workdir: str, *,
+                      keep_ref_only: bool) -> tuple[list[str], list[str]]:
+    """Put the per-group callsets on one allele set so ``bcftools merge`` can join them.
+
+    No cleaning (``min_ad=0``, ``min_af=0``): the alleles are what bcftools called, and
+    the only edit is adding, with zero depth, the ones a group did not see. Genotypes are
+    re-indexed, not re-called. Returns the harmonized BCF paths and the commands run.
+    """
+    union, _dups, ambiguous, st = H.accumulate_union(
+        group_files, 0, 0.0, 0.2, drop_indels=True, keep_ref_only=keep_ref_only)
+    if ambiguous:
+        print(f"  WARNING: {len(ambiguous)} position(s) carried more than one record with "
+              f"ALTs in a group callset; the one with most ALTs was kept")
+    stale_fmt = sorted(set().union(
+        *(set(H.stale_format_fields(f, keep=GROUP_KEEP_FORMAT)) for f in group_files)))
+    strip = ("-x " + q(",".join("FORMAT/" + f for f in stale_fmt)) + " ") if stale_fmt else ""
+    n_indel = sum(v["indel_context"] for v in st["per_file"].values())
+    print(f"  harmonizing {len(group_files)} group callsets: {st['union_sites']} site(s), "
+          f"{st['union_with_alts']} with an ALT in some group"
+          + (f", {n_indel} indel-context record(s) dropped" if n_indel else "")
+          + (f"; dropping FORMAT/{','.join(stale_fmt)}" if stale_fmt else ""))
+    out_files, cmds, absent = [], [], 0
+    for i, f in enumerate(group_files):
+        tmp = os.path.join(workdir, f"h_group{i:04d}.tmp.vcf")
+        h = os.path.join(workdir, f"h_group{i:04d}.bcf")
+        r = H.harmonize_file(f, tmp, union, 0, 0.0, 0.2, drop_indels=True,
+                             regenotype=False, stale_info=GROUP_STALE_INFO)
+        absent = max(absent, r["absent"])
+        cmd = f"bcftools annotate {strip}-Ob -o {q(h)} {q(tmp)}"
+        sh(cmd, tools=("bcftools",))
+        cmds.append(cmd)
+        os.remove(tmp)
+        index_vcf(h)
+        out_files.append(h)
+    if absent:
+        print(f"  NOTE: up to {absent} site(s) were emitted by some groups but not others "
+              f"(--variants-only), so those samples get missing genotypes after the merge")
+    return out_files, cmds
+
+
+def _harmonize_dry_run_cmds(group_files: list[str], workdir: str) -> list[str]:
+    hs = [os.path.join(workdir, f"h_group{i:04d}.bcf") for i in range(len(group_files))]
+    lines = [f"# harmonize (in-process): union the ALTs of {' '.join(q(g) for g in group_files)}, "
+             f"zero-fill AD/ADF/ADR for alleles a group did not see, re-index GT, "
+             f"drop indel records and INFO/{','.join(GROUP_STALE_INFO)}"]
+    lines += [f"bcftools annotate -x <per-genotype FORMAT fields, e.g. FORMAT/PL> -Ob "
+              f"-o {q(h)} {q(h[:-4] + '.tmp.vcf')}" for h in hs]
+    return lines
+
+
+def _read_bam_list(bam_list: str) -> list[str]:
+    with open(bam_list) as fh:
+        return [ln.strip() for ln in fh if ln.strip()]
+
+
 def call_variants(ref: str, out: str, *, bams: list[str] | None = None,
                   bam_list: str | None = None, bam_dir: str | None = None,
                   regions: str | None = None,
@@ -223,6 +347,7 @@ def call_variants(ref: str, out: str, *, bams: list[str] | None = None,
                   min_baseq: int | None = None, variants_only: bool = False,
                   extra_mpileup: str = "",
                   extra_call: str = "", keep_chunks: str | None = None,
+                  bam_batch: int | None = None,
                   dry_run: bool = False) -> list[str]:
     """Call variants, splitting a region list over ``threads`` concurrent jobs.
 
@@ -256,9 +381,23 @@ def call_variants(ref: str, out: str, *, bams: list[str] | None = None,
         list of known positions is usually about filling them in: a reference call at a
         target position is the answer "this sample is reference here", and `-v` would drop
         it. Turn it on for whole-genome calling, where the non-variant sites are just bulk.
+    bam_batch:
+        Alignments per group. Off (``None``/0) calls every alignment in every job. Set it
+        -- 100 is what the CNV pipeline uses -- and the alignments are cut into contiguous
+        groups of at most that many, one job runs per group and region chunk, and the
+        group callsets are harmonized (:mod:`.harmonize`, no cleaning, genotypes
+        re-indexed rather than re-called) and ``bcftools merge``-d with
+        :data:`GROUP_MERGE_RULES`. That caps concurrently open alignments at
+        ``threads x bam_batch``, which is what keeps a large cohort on NFS from stalling.
+        A cohort no larger than the batch is one group and calls exactly as without it.
+        See the module docstring for what the split changes: SNP-only output, no PL, and
+        per-site bias statistics combined by rule rather than computed over all reads.
+        Because it is SNP-only, ``skip_indels`` is required whenever the split is in
+        effect -- an error rather than a note, so indel records never vanish unannounced.
     keep_chunks:
-        Directory to leave the per-chunk BCFs and region files in. They go to a temporary
-        directory otherwise, and are removed once concatenated.
+        Directory to leave the per-chunk BCFs and region files in -- and in group mode the
+        per-group callsets, harmonized and not. They go to a temporary directory
+        otherwise, and are removed once concatenated.
     dry_run:
         Return the commands without running any of them.
 
@@ -278,16 +417,34 @@ def call_variants(ref: str, out: str, *, bams: list[str] | None = None,
     if not dry_run:
         require("bcftools")
 
+    paths = bams
+    if paths is None:
+        if os.path.exists(bam_list):
+            paths = _read_bam_list(bam_list)
+        elif not dry_run:
+            raise SystemExit(f"call_variants: --bam-list {bam_list} does not exist")
     # fail on a naming clash before spending an hour calling, not after
-    if ignore_rg and sample_suffix is not None:
-        paths = bams
-        if paths is None:
-            if os.path.exists(bam_list):
-                paths = [ln.strip() for ln in open(bam_list) if ln.strip()]
-            elif not dry_run:
-                raise SystemExit(f"call_variants: --bam-list {bam_list} does not exist")
-        if paths:
-            sample_rename_map(paths, sample_suffix)
+    if ignore_rg and sample_suffix is not None and paths:
+        sample_rename_map(paths, sample_suffix)
+
+    if bam_batch is not None and bam_batch < 0:
+        raise SystemExit("call_variants: --bam-batch must be 0 (off) or a positive number")
+    if bam_batch and paths is None:
+        raise SystemExit(f"call_variants: --bam-batch needs the alignments listed, and "
+                         f"--bam-list {bam_list} does not exist")
+    if bam_batch and paths and len(paths) > bam_batch and not skip_indels:
+        # Harmonizing the groups is SNP-only, so indel records would be called and then
+        # silently dropped. Make the caller say so, so nobody wonders where they went.
+        raise SystemExit(
+            "call_variants: --bam-batch output is SNP-only (indel records are dropped when "
+            "the group callsets are harmonized), so it requires --skip-indels: pass it to "
+            "confirm, and the groups do not spend time computing indels either")
+    groups = bam_groups(paths, bam_batch) if paths else [None]
+    if len(groups) == 1 and paths and not bam_batch and len(paths) * threads > 1000:
+        print(f"  NOTE: {len(paths)} alignments x {threads} jobs = "
+              f"{len(paths) * threads} concurrently open alignments (plus indexes). On a "
+              f"network filesystem that can stall; --bam-batch 100 caps it at "
+              f"{100 * threads}. See --help.")
 
     common = dict(ref=ref, bams=bams, bam_list=bam_list, annotations=annotations,
                   ploidy=ploidy, ignore_rg=ignore_rg, skip_indels=skip_indels,
@@ -304,6 +461,11 @@ def call_variants(ref: str, out: str, *, bams: list[str] | None = None,
         if regions and threads > 1:
             chunks = split_regions(regions, workdir, n_chunks=threads,
                                    chunk_size=chunk_size)
+        if len(groups) > 1:
+            return _call_in_groups(
+                groups, chunks, regions=regions, out=out, workdir=workdir,
+                threads=threads, common=common, ignore_rg=ignore_rg,
+                sample_suffix=sample_suffix, variants_only=variants_only, dry_run=dry_run)
         if not chunks:
             cmd = _mpileup_call_cmd(out=out, regions=regions, **common)
             if dry_run:
@@ -338,6 +500,81 @@ def call_variants(ref: str, out: str, *, bams: list[str] | None = None,
     finally:
         if not keep_chunks and os.path.isdir(workdir):
             shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _call_in_groups(groups: list[list[str]], chunks: list[str], *, regions: str | None,
+                    out: str, workdir: str, threads: int, common: dict, ignore_rg: bool,
+                    sample_suffix: str | None, variants_only: bool,
+                    dry_run: bool) -> list[str]:
+    """Group mode: a job per (alignment group x region chunk), then harmonize and merge.
+
+    Jobs are ordered group-major, so the ``threads`` running at any moment are mostly
+    over the same ``bam_batch`` files rather than ``threads`` different sets of them --
+    the gentlest pattern for a network filesystem's cache.
+    """
+    region_files = chunks or [regions]
+    n_bams = sum(len(g) for g in groups)
+    print(f"  {n_bams} alignment(s) in {len(groups)} group(s) of <= {max(map(len, groups))} "
+          f"x {len(region_files)} region chunk(s) = {len(groups) * len(region_files)} "
+          f"job(s) over {threads} thread(s); at most ~{threads * max(map(len, groups))} "
+          f"alignments open at once")
+    print("  group mode: SNP-only output, no PL; per-site bias statistics are combined "
+          "across groups by rule, not computed over all reads -- see call_variants --help")
+
+    common = {k: v for k, v in common.items() if k not in ('bams', 'bam_list')}
+    list_files, group_files, tiles, cmds = [], [], [], []
+    for gi, group in enumerate(groups):
+        lst = os.path.join(workdir, f"group{gi:04d}.bams.txt")
+        list_files.append(lst)
+        if not dry_run:
+            with open(lst, "w") as fh:
+                fh.writelines(p + "\n" for p in group)
+        gout = os.path.join(workdir, f"group{gi:04d}.bcf")
+        group_files.append(gout)
+        if len(region_files) == 1:
+            tiles.append((gi, None, gout))
+        else:
+            for ci in range(len(region_files)):
+                tiles.append((gi, ci, os.path.join(workdir, f"group{gi:04d}.part{ci:04d}.bcf")))
+    tile_cmds = [_mpileup_call_cmd(out=p, regions=region_files[ci or 0], bams=None,
+                                   bam_list=list_files[gi], **common)
+                 for gi, ci, p in tiles]
+    cmds += tile_cmds
+    concat_cmds = []
+    if len(region_files) > 1:
+        for gi, gout in enumerate(group_files):
+            parts = [p for g, _c, p in tiles if g == gi]
+            cmds += [f"bcftools index {q(p)}" for p in parts]
+            concat_cmds.append(f"bcftools concat -a {' '.join(q(p) for p in parts)} "
+                               f"-Ob -o {q(gout)}")
+        cmds += concat_cmds
+    harmonized = [os.path.join(workdir, f"h_group{gi:04d}.bcf") for gi in range(len(groups))]
+    if dry_run:
+        rules = ",".join(f"{t}:{r}" for t, r in GROUP_MERGE_RULES.items())
+        return (cmds + _harmonize_dry_run_cmds(group_files, workdir)
+                + [_merge_cmd(harmonized, out, rules)]
+                + _rename_cmds(ignore_rg, sample_suffix, out))
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        list(pool.map(lambda c: sh(c, tools=("bcftools",)), tile_cmds))
+    if len(region_files) > 1:
+        for _gi, _ci, p in tiles:
+            index_vcf(p)
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            list(pool.map(lambda c: sh(c, tools=("bcftools",)), concat_cmds))
+    for gout in group_files:
+        index_vcf(gout)
+
+    harmonized, hcmds = _harmonize_groups(group_files, workdir,
+                                          keep_ref_only=not variants_only)
+    cmds += hcmds
+    merge = _merge_cmd(harmonized, out, merge_info_rules(harmonized[0]))
+    sh(merge, tools=("bcftools",))
+    cmds.append(merge)
+    index_vcf(out)
+    if ignore_rg and sample_suffix is not None:
+        _rename_samples(out, sample_suffix)
+    return cmds
 
 
 def n_regions(path: str) -> int:

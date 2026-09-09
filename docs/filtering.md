@@ -164,6 +164,50 @@ Calling emits **all sites in the regions**, not just variants, since a region li
 usually a list of positions to fill in and a reference call there is the answer. Pass
 `--variants-only` for whole-genome calling.
 
+**Hundreds of BAMs on a network filesystem need `--bam-batch`.** Every region job opens
+every alignment, so 600 BAMs over 5 jobs is 6,000 open files (BAM plus index) against one
+NFS server at once, and the run stalls in I/O rather than computing. `--bam-batch 100`
+caps that the way the CNV pipeline's Fws step does: the alignments are cut into contiguous
+groups of at most 100, one job runs per group and region chunk, and no more than
+`--threads` x 100 are open whatever the cohort size.
+
+```bash
+plasgenomicsutils call_variants --ref Pf3D7.fasta --bam-list bams.txt \
+  --regions crt_region_snps.bed --threads 8 --bam-batch 100 --skip-indels \
+  --output crt_snps.bcf
+```
+
+The groups are called separately, so a group where no sample carries an ALT does not
+emit it and the group callsets disagree on alleles. `harmonize_bcf`'s machinery puts them
+back on one allele set -- an allele a group never saw gets AD 0 for that group's samples,
+which is what its pileup found, and genotypes are re-indexed rather than re-called -- and
+`bcftools merge` joins them. What comes out is checked against the joint call in the
+tests: **the same genotypes, AD/ADF/ADR and INFO read counts (AD, ADF, ADR, DP, DP4) for
+every sample**, in the same sample order, with the ALTs in alphabetical rather than
+bcftools' order. What the split does change:
+
+* **The per-site statistics are combined by rule, not computed over all reads.** bcftools
+  computes `RPBZ`, `MQBZ`, `MQSBZ`, `SCBZ`, `BQBZ`, `FS`, `MQ` and QUAL over the reads it
+  has, and with the reads in different groups there is no recovering the pooled value.
+  The merge keeps the smallest `FS` (a p-value, so the most significant) and averages the
+  z-scores and quality summaries. A z pooled over all the reads would grow with the number
+  of groups (roughly sqrt(G) for the same effect), so these lean towards *keeping* a site
+  under `hard_qc_filter`; the effect-size guard (`--bias-eff`, from ADF/ADR) is on the
+  exact counts and unaffected, as is SOR.
+* **SNP-only output, and `--skip-indels` is required.** Harmonizing is SNP-only, so
+  indel records could only be called and then dropped. Rather than let them vanish
+  unannounced, `--bam-batch` on a cohort larger than the batch is an error without
+  `--skip-indels`; passing it is the acknowledgement, and the groups do not spend time
+  computing indels either.
+* **No PL.** A likelihood for a genotype a group never scored does not exist, so the field
+  is dropped. Nothing in this package reads it.
+* **With `--variants-only`**, a site that is variant in one group and reference in another
+  is emitted only by the first, so the other group's samples come out with missing
+  genotypes there. Calling a region list without `--variants-only` (the default) is exact.
+
+A cohort no larger than the batch is one group and calls exactly as without the option.
+`--keep-chunks` keeps the per-group callsets, harmonized and not, for inspection.
+
 Chunks keep the extension of the file they came from, because **bcftools reads the
 coordinate convention off it** — a `.bed` is 0-based half-open, anything else is 1-based
 `CHROM POS`. Splitting a `.bed` into extensionless pieces would silently shift every region
