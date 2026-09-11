@@ -458,6 +458,11 @@ def effective_config(config: dict, **meta) -> dict:
         if name in WHITELISTABLE:
             params["keep_bed"] = config.get("keep_bed")
         params.update(step.get("params") or {})
+        # "auto" is a rule, not a value, and the point of this file is the values that ran
+        if name == "hard_qc_filter":
+            params["qd"], params["strand_bias_p"] = F.resolve_qc_auto(
+                params.get("caller", "gatk"), qd=params.get("qd", "auto"),
+                strand_bias_p=params.get("strand_bias_p", "auto"))
         entry = {"name": name}
         for key in ("report", "ext", "enabled"):
             if key in step:

@@ -441,6 +441,30 @@ def _no_alt_filter(inp: str, out: str, fmt: str, *, keep: bool, keep_bed: str | 
             os.unlink(prep)
 
 
+def resolve_qc_auto(caller: str, *, qd, strand_bias_p) -> tuple:
+    """What ``"auto"`` means for the two caller-dependent thresholds.
+
+    ``qd="auto"`` is 10 for GATK and **off** for bcftools. 10 for GATK: on this package's
+    own sWGA and Pf7 callsets it sits in the valley between what VQSR passes and fails on
+    clean biallelic sites, and drops almost nothing at adequate depth -- the earlier 20 was
+    mostly removing thinly covered sWGA sites by proxy, which the missingness and coverage
+    filters do directly (``investigations/qd_threshold`` in the project home). Off for
+    bcftools because QUAL/DP on its output is not the same quantity.
+
+    ``strand_bias_p="auto"`` is off in both modes, for the reason given in
+    :func:`_sor_from_ad_expr`: FS is a p-value, so a fixed cutoff tightens as a cohort
+    grows, and ``sor`` asks the same question of the skew itself.
+
+    One function so that the filter and ``config_used.json`` cannot disagree about what
+    ran: the recorded config carries the resolved numbers, not the word.
+    """
+    if qd == "auto":
+        qd = 10.0 if caller == "gatk" else None
+    if strand_bias_p == "auto":
+        strand_bias_p = None
+    return qd, strand_bias_p
+
+
 def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None | str = "auto",
                    mq: float | None = 55, sor: float | None = 3, mqranksum: float = -5.0,
                    readposranksum: float = -5.0, fs: float | None = None,
@@ -488,19 +512,7 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
     """
     if caller not in ("gatk", "bcftools"):
         raise SystemExit(f"hard_qc_filter: caller must be gatk or bcftools, not {caller!r}")
-    # "auto" means "whatever suits this caller". QD 10 for GATK: on this package's own
-    # sWGA and Pf7 callsets it sits in the valley between what VQSR passes and fails on
-    # clean biallelic sites, and drops almost nothing at adequate depth -- the earlier 20
-    # was mostly removing thinly covered sWGA sites by proxy, which the missingness and
-    # coverage filters do directly (investigations/qd_threshold in the project home). QUAL/DP on bcftools output is
-    # not the same quantity, so it is left off there rather than reused.
-    if qd == "auto":
-        qd = 10.0 if caller == "gatk" else None
-    # FS is off by default for the reason given in _sor_from_ad_expr: it is a p-value, so
-    # a fixed cutoff tightens as a cohort grows, and `sor` asks the same question of the
-    # skew itself. Pass a number to switch it back on.
-    if strand_bias_p == "auto":
-        strand_bias_p = None
+    qd, strand_bias_p = resolve_qc_auto(caller, qd=qd, strand_bias_p=strand_bias_p)
 
     if caller == "bcftools":
         # the effect size only reads ADF/ADR on behalf of a z test, so with every z test
@@ -1481,6 +1493,154 @@ def vcf_to_bed(inp: str, out: str | None = None, *, snps_only: bool = False,
     src = "-" if snps_only else q(inp)
     redirect = f" > {q(out)}" if out else ""
     sh(f"{pipe}bcftools query -f '{fields}' {src}{redirect}", tools=("bcftools",))
+
+
+def _read_group_map(meta: str, present: set[str], *, group_col: str,
+                    sample_col: str) -> tuple[dict[str, str], list[str]]:
+    """``{sample: group}`` for the VCF's samples, plus the VCF samples in no group.
+
+    The metadata columns are resolved case-insensitively (:meth:`Utils.resolve_column`),
+    exactly as :func:`_maf_filter_grouped` does, so ``Sample`` / ``sample`` and
+    ``Country`` / ``country`` all land. A sample the metadata does not name, or names with
+    an empty group cell, is returned in the ``ungrouped`` list: it belongs to no output and
+    would otherwise vanish silently.
+    """
+    sample_group: dict[str, str] = {}
+    with open(meta) as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        fields = reader.fieldnames or []
+        s_col = Utils.resolve_column(fields, sample_col, source=f"metadata ({meta})")
+        g_col = Utils.resolve_column(fields, group_col, source=f"metadata ({meta})")
+        for got, want in ((s_col, sample_col), (g_col, group_col)):
+            if got != want:
+                print(f"  note: metadata column '{got}' read as '{want}'")
+        for row in reader:
+            s, g = row[s_col], (row[g_col] or "").strip()
+            if s in present and g:
+                sample_group[s] = g
+    ungrouped = sorted(present - set(sample_group))
+    return sample_group, ungrouped
+
+
+def split_by_meta(inp: str, outdir: str, *, meta: str, group_col: str,
+                  sample_col: str = "sample", maf_min: float | None = None,
+                  refill: bool = True, trim_alts: bool = False,
+                  output_type: str = "b") -> dict[str, str]:
+    """Split a callset into one VCF per metadata group (e.g. per country).
+
+    ``bcftools +split`` already partitions samples by a groups file; this wraps it so the
+    grouping is read straight from a per-sample metadata table with the same
+    ``--meta`` / ``--group-col`` / ``--sample-col`` arguments as :func:`maf_filter`, and so
+    the per-group outputs come out with their allele-count tags made right rather than
+    inherited stale from the parent. For each group the pipeline is, in order:
+
+    1. **subset** the samples of that group (``bcftools +split -G``);
+    2. **trim** ALT alleles no genotype in the group uses (``--trim-alt-alleles``), only if
+       ``trim_alts`` — off by default, because keeping the full ALT set lets the pieces be
+       ``bcftools merge``-d back losslessly;
+    3. **refill** ``AC,AN,AF,MAF`` on the subset (``+fill-tags``), if ``refill`` (default on
+       — after subsetting, the parent's counts are wrong);
+    4. **MAF floor**: keep sites whose per-group minor-allele frequency is ``>= maf_min``,
+       if given. Because each output is already one group, this *is* a per-group MAF filter,
+       judged on the group's own frequencies (contrast :func:`maf_filter`, which keeps a
+       site passing in *any* group on the combined VCF). ``maf_min`` implies ``refill``: a
+       frequency has to be computed to filter on it, and leaving stale tags beside a
+       freshly-computed one would contradict.
+
+    Trim precedes refill so the refilled counts describe the alleles that remain. Samples
+    the metadata does not place in a group are reported and written to no output.
+
+    ``output_type`` is a bcftools ``-O`` letter (``b`` BCF default, ``z`` bgzipped VCF,
+    ``v`` VCF). Returns ``{group: output_path}``.
+    """
+    require("bcftools")
+    if maf_min is not None and not refill:
+        say("NOTE: --maf-min needs allele frequencies; refilling tags despite --no-refill")
+        refill = True
+    ext = {"b": ".bcf", "z": ".vcf.gz", "v": ".vcf"}.get(output_type, ".bcf")
+
+    present = _vcf_samples(inp)
+    sample_group, ungrouped = _read_group_map(meta, present,
+                                              group_col=group_col, sample_col=sample_col)
+    if not sample_group:
+        raise SystemExit(f"ERROR: no samples in {meta} overlap the VCF")
+    groups = sorted(set(sample_group.values()))
+    sizes = ", ".join(f"{g} {sum(v == g for v in sample_group.values())}" for g in groups)
+    say(f"NOTE: splitting {len(present)} sample(s) by '{group_col}' into {len(groups)} "
+        f"group(s): {sizes}"
+        + (f"; {len(ungrouped)} in no group, written nowhere: "
+           f"{', '.join(ungrouped[:5])}{', ...' if len(ungrouped) > 5 else ''}"
+           if ungrouped else "; every sample is placed"))
+
+    os.makedirs(outdir, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="split_by_meta_")
+    out_paths: dict[str, str] = {}
+    try:
+        # bcftools +split -G: one row per sample -> `sample <tab> - <tab> group`; the group
+        # name (third column) becomes the output basename. `-` keeps sample names unchanged.
+        gfile = os.path.join(tmp, "groups.tsv")
+        with open(gfile, "w") as gf:
+            for s, g in sample_group.items():
+                gf.write(f"{s}\t-\t{g}\n")
+        raw = os.path.join(tmp, "raw")
+        os.makedirs(raw, exist_ok=True)
+        sh(f"bcftools +split {q(inp)} -G {q(gfile)} -Ob -o {q(raw)}", tools=("bcftools",))
+
+        for g in groups:
+            src = os.path.join(raw, g + ".bcf")
+            if not os.path.exists(src):  # +split sanitizes [ \t:/\\] in names to '_'
+                san = "".join("_" if c in " \t:/\\" else c for c in g)
+                src = os.path.join(raw, san + ".bcf")
+            out = os.path.join(outdir, g + ext)
+            _finish_group_split(src, out, maf_min=maf_min, refill=refill,
+                                 trim_alts=trim_alts, output_type=output_type)
+            index_vcf(out)
+            out_paths[g] = out
+            say(f"  [{g}] {count_variants(out):,} variant(s), "
+                f"{sum(v == g for v in sample_group.values())} sample(s) -> {out}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return out_paths
+
+
+def _finish_group_split(src: str, out: str, *, maf_min: float | None,
+                        refill: bool, trim_alts: bool, output_type: str) -> None:
+    """Trim -> refill -> MAF-floor one group's raw split file into its final output."""
+    fmt = output_type
+    cur = src
+    tmps: list[str] = []
+    try:
+        if trim_alts:
+            # A genotype-linked Number=G field (e.g. PL) whose length disagrees with the
+            # genotypes makes --trim-alt-alleles abort; null just those records first, the
+            # same guard biallelic_snp_filter/no_alt_filter use.
+            if any(t in format_tags(cur) for t in GENOTYPE_LINKED_FORMAT):
+                stripped = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+                tmps.append(stripped)
+                strip_stale_format(cur, stripped, fields=GENOTYPE_LINKED_FORMAT,
+                                   mode="mismatch")
+                cur = stripped
+            trimmed = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+            tmps.append(trimmed)
+            sh(f"bcftools view --trim-alt-alleles {q(cur)} -Ob -o {q(trimmed)}",
+               tools=("bcftools",))
+            cur = trimmed
+        # Refill and the MAF floor share one pipeline: fill first so MAF is the group's own.
+        parts = [f"bcftools view {q(cur)} -Ou"]
+        if refill:
+            parts.append("bcftools +fill-tags -Ou -- -t AC,AN,AF,MAF")
+        if maf_min is not None:
+            parts.append(f"bcftools view -i 'MAF>={maf_min}' -Ou")
+        # last stage writes the real output in the requested format
+        parts[-1] = parts[-1].rsplit(" -Ou", 1)[0] + f" -O{fmt} -o {q(out)}"
+        sh(" | ".join(parts), tools=("bcftools",))
+    finally:
+        for t in tmps:
+            for suffix in ("", ".csi"):
+                try:
+                    os.remove(t + suffix)
+                except OSError:
+                    pass
 
 
 def snp_bed(inp: str, bed: str) -> None:

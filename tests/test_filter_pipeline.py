@@ -891,3 +891,18 @@ def test_the_grouped_maf_floor_says_how_the_samples_were_grouped(tmp_path, capsy
     assert "judged per 'country' in any group (2): A 30, B 28" in text
     assert f"2 VCF sample(s) in no group, counted in none of the frequencies: {samples[58]}, {samples[59]}" in text or \
            f"2 VCF sample(s) in no group, counted in none of the frequencies: {samples[59]}, {samples[58]}" in text
+
+
+def test_the_recorded_config_carries_resolved_thresholds_not_the_word_auto(tmp_path):
+    """config_used.json is the answer to "what cutoffs were these?", so a caller-dependent
+    'auto' is written out as the number it resolved to."""
+    import json
+    from plasgenomicsutils.lib.filter_pipeline import effective_config
+    for caller, qd in (("gatk", 10.0), ("bcftools", None)):
+        cfg = effective_config({"steps": [{"name": "hard_qc_filter", "params": {"caller": caller}}]})
+        p = cfg["steps"][0]["params"]
+        assert p["qd"] == qd and p["strand_bias_p"] is None
+        assert "auto" not in json.dumps(cfg)
+    # a written value wins over the rule
+    cfg = effective_config({"steps": [{"name": "hard_qc_filter", "params": {"qd": 20}}]})
+    assert cfg["steps"][0]["params"]["qd"] == 20

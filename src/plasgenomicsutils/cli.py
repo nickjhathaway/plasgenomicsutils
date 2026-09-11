@@ -63,6 +63,7 @@ from .scripts.vcf.filter_pipeline import filter_pipeline
 from .scripts.vcf.strand_bias_scan import strand_bias_scan
 from .scripts.vcf.variant_spacing import variant_spacing
 from .scripts.vcf.vcf_to_bed import vcf_to_bed
+from .scripts.vcf.split_by_meta import split_by_meta
 from .scripts.vcf.strand_read_check import strand_read_check
 
 
@@ -112,6 +113,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Harmonize ALT sets of separately-called cohorts for bcftools merge"),
         "vcf_to_bed": Command(vcf_to_bed,
             "Convert a VCF/BCF to 0-based BED (stdout by default)"),
+        "split_by_meta": Command(split_by_meta,
+            "Split a callset into per-group VCFs by a metadata column; refill AC/AF, optional per-group MAF and ALT trim"),
     },
     # The filtering chain: the runner, then its steps **in the order the default
     # config runs them** rather than alphabetically -- the order is the point, and a
