@@ -403,6 +403,72 @@ def validate_config(config: dict) -> None:
                        else f"\n  {name} takes no params"))
 
 
+#: Step params that name an **input file** the step reads, so every one can be checked to
+#: exist and open before the run starts rather than only when its step is reached. Output
+#: paths (``cov_table_path``, ``fws_table_path``, ``dropped_samples_path``) are not here --
+#: they are written, not read -- nor is ``regions`` (bcftools region *strings*, not a file).
+#: ``bed`` and ``keep_bed`` may be a ``builtin:`` reference, so they are resolved through
+#: :func:`resolve_bed` before the existence check, the same expansion the step itself does.
+INPUT_FILE_PARAMS = ("bed", "keep_bed", "meta")
+
+
+def _readable_file_error(path: str) -> str | None:
+    """``None`` if ``path`` is a file that opens for reading, else why it does not."""
+    if not os.path.exists(path):
+        return "no such file"
+    if os.path.isdir(path):
+        return "is a directory, not a file"
+    try:
+        with open(path, "rb"):
+            return None
+    except OSError as e:
+        return e.strerror or "cannot be opened"
+
+
+def check_input_paths(config: dict) -> None:
+    """Verify every input file the config points at exists and opens, before anything runs.
+
+    Structural validation (:func:`validate_config`) catches typos in step and param names;
+    this catches the other up-front mistake -- a path handed to a late step (a wrong
+    ``meta`` for ``maf_filter``, a moved whitelist BED) that would otherwise only surface
+    after the earlier steps had already written their output. Only enabled steps are
+    checked; a step switched off with ``"enabled": false`` will not run, so its paths do
+    not matter. ``builtin:`` bed references are resolved the way the steps resolve them, so
+    an unknown builtin name is caught here too.
+    """
+    top_keep = config.get("keep_bed")
+    for i, step in enumerate(config.get("steps", []), start=1):
+        if not isinstance(step, dict) or step.get("enabled", True) is False:
+            continue
+        name = step.get("name", "?")
+        params = step.get("params") or {}
+        if not isinstance(params, dict):
+            continue                       # validate_config already rejected this
+        # keep_bed follows the same override rule the runner uses: a step's own value wins,
+        # an explicit null opts the step out, and otherwise a whitelistable step inherits
+        # the top-level keep_bed. So the effective value is what actually gets opened.
+        effective = dict(params)
+        if ("keep_bed" not in params and top_keep is not None
+                and name in WHITELISTABLE):
+            effective["keep_bed"] = top_keep
+        for param in INPUT_FILE_PARAMS:
+            raw = effective.get(param)
+            if not raw or not isinstance(raw, str):
+                continue
+            try:
+                path = resolve_bed(raw) if param in ("bed", "keep_bed") else raw
+            except (SystemExit, FileNotFoundError, KeyError, ValueError) as e:
+                raise SystemExit(
+                    f"ERROR: step {i} ({name}): {param}={raw!r} could not be resolved: {e}")
+            why = _readable_file_error(path)
+            if why is not None:
+                shown = f"{raw!r}" + (f" (resolved to {path})" if path != raw else "")
+                raise SystemExit(
+                    f"ERROR: step {i} ({name}): {param} {shown}: {why}.\n"
+                    f"  Fix the path in the config before rerunning -- the pipeline writes "
+                    f"no output until every step's input files are readable.")
+
+
 def _jsonable(v):
     """A default rendered for JSON, so a config record is a config you can run again."""
     if isinstance(v, (str, int, float, bool)) or v is None:
@@ -520,6 +586,13 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
     nothing to rescue is the normal case and most steps are that.
     """
     validate_config(config)
+    # Every path the run depends on, checked before a single output is written: the input
+    # callset and every input file a step names. A wrong path to a late step should cost
+    # nothing, not eight steps of output (the failure that prompted this).
+    if _readable_file_error(input_path) is not None:
+        raise SystemExit(f"ERROR: input {input_path!r}: "
+                         f"{_readable_file_error(input_path)}.")
+    check_input_paths(config)
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     used = out / "config_used.json"

@@ -66,7 +66,7 @@ Making a callset, merging one, converting one.
 | `spanning_del_filter` | Recode `*` calls as missing and drop the allele, leaving the non-deleted strains' variants |
 | `biallelic_snp_filter` | Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping |
 | `sample_coverage_filter` | Drop low-coverage samples; refresh AC/AN/AF |
-| `locus_missingness_filter` | Keep loci with low missingness and high per-sample coverage |
+| `locus_missingness_filter` | Keep loci with low missingness and enough samples covered (80% at ADS 5) |
 | `maf_filter` | Keep variants within a minor-allele-frequency window |
 | `fws_filter` | Keep only monoclonal samples (Fws >= a threshold); refresh AC/AN/AF |
 | `strip_stale_format` | Strip stale genotype-linked FORMAT fields (e.g. `PL`) that no longer match the genotypes |

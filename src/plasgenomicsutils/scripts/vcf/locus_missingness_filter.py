@@ -18,9 +18,14 @@ def get_parser_locus_missingness_filter() -> argparse.ArgumentParser:
     p.add_argument("--output", required=True)
     p.add_argument("--f-missing-max", type=float, default=0.05,
                    help="Maximum fraction of missing genotypes (default: 0.05)")
-    p.add_argument("--ads-min", type=int, default=10, help="Per-sample coverage threshold (default: 10)")
-    p.add_argument("--sample-frac-min", type=float, default=0.95,
-                   help="Minimum fraction of samples at ADS >= --ads-min (default: 0.95)")
+    p.add_argument("--ads-min", type=int, default=5,
+                   help="Per-sample coverage a sample must have for the site to count it as "
+                        "covered (default: 5; was 10 before v0.3.2)")
+    p.add_argument("--sample-frac-min", type=float, default=0.80,
+                   help="Minimum fraction of samples at ADS >= --ads-min (default: 0.80; was "
+                        "0.95 before v0.3.2, which on a mixed-depth cohort failed half the "
+                        "sites the caller passed). A floor, not a uniformity requirement: "
+                        "thin samples are sample_coverage_filter's job.")
     p.add_argument("--keep-bed", default=None,
                    help="Whitelist BED of regions to keep whatever this filter says "
                         "(0-based half-open, like any BED). Whitelisted variants still "

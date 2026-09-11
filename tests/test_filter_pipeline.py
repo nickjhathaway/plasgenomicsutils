@@ -509,6 +509,75 @@ def test_validation_happens_before_any_output_is_written(tmp_path):
     assert not out.exists() or not list(out.iterdir())
 
 
+def test_a_bad_input_file_path_on_a_late_step_is_caught_before_any_output(tmp_path):
+    """The failure that prompted the preflight: a wrong `meta` path handed to `maf_filter`,
+    the last step, used to fail only after every earlier step had written its output."""
+    from plasgenomicsutils.lib.filter_pipeline import run_pipeline
+
+    out = tmp_path / "run"
+    cfg = {"steps": [{"name": "no_alt_filter"},
+                     {"name": "maf_filter",
+                      "params": {"maf_min": 0.02, "meta": str(tmp_path / "nope.tsv"),
+                                 "group_col": "country"}}]}
+    with pytest.raises(SystemExit) as e:
+        run_pipeline(str(BCF), str(out), cfg, emit_snp_bed=False)
+    msg = str(e.value)
+    assert "maf_filter" in msg and "meta" in msg and "no such file" in msg
+    assert not out.exists() or not list(out.iterdir())   # nothing written
+
+
+def test_an_existing_input_file_passes_the_preflight(tmp_path):
+    """A meta that exists lets the run proceed (the check is existence, not correctness)."""
+    from plasgenomicsutils.lib.filter_pipeline import run_pipeline
+
+    meta = tmp_path / "meta.tsv"
+    meta.write_text("sample\tcountry\n")               # header only is enough to open
+    cfg = {"steps": [{"name": "maf_filter",
+                      "params": {"maf_min": 0.02, "meta": str(meta),
+                                 "group_col": "country"}}]}
+    # must not raise the preflight error; grouped MAF with no overlapping samples then
+    # exits on its own, which is a different, later failure -- the preflight let it run.
+    with pytest.raises(SystemExit) as e:
+        run_pipeline(str(BCF), str(tmp_path / "run"), cfg, emit_snp_bed=False)
+    assert "no such file" not in str(e.value)
+
+
+def test_a_disabled_step_with_a_bad_path_is_not_checked(tmp_path):
+    """A step switched off will not run, so a stale path on it must not block the pipeline."""
+    from plasgenomicsutils.lib.filter_pipeline import check_input_paths
+
+    cfg = {"steps": [
+        {"name": "no_alt_filter"},
+        {"name": "tandem_repeat_mask", "enabled": False,
+         "params": {"bed": str(tmp_path / "gone.bed")}}]}
+    check_input_paths(cfg)                              # does not raise
+
+
+def test_a_top_level_keep_bed_is_checked_once_up_front(tmp_path):
+    from plasgenomicsutils.lib.filter_pipeline import check_input_paths
+
+    cfg = {"keep_bed": str(tmp_path / "missing.bed"),
+           "steps": [{"name": "maf_filter", "params": {"maf_min": 0.02}}]}
+    with pytest.raises(SystemExit, match="keep_bed.*no such file"):
+        check_input_paths(cfg)
+
+
+def test_an_unknown_builtin_bed_is_caught_up_front(tmp_path):
+    from plasgenomicsutils.lib.filter_pipeline import check_input_paths
+
+    cfg = {"steps": [{"name": "core_region_filter",
+                      "params": {"bed": "builtin:not_a_real_asset"}}]}
+    with pytest.raises(SystemExit, match="bed .*could not be resolved|not_a_real_asset"):
+        check_input_paths(cfg)
+
+
+def test_the_default_config_passes_the_input_path_preflight(tmp_path):
+    """DEFAULT_CONFIG's builtin beds must all resolve to shipped assets that exist."""
+    from plasgenomicsutils.lib.filter_pipeline import DEFAULT_CONFIG, check_input_paths
+
+    check_input_paths(DEFAULT_CONFIG)                  # does not raise
+
+
 def test_a_malformed_config_is_refused(tmp_path):
     from plasgenomicsutils.lib.filter_pipeline import validate_config
 

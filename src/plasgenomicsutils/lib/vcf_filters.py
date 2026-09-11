@@ -1263,9 +1263,19 @@ def sample_coverage_filter(inp: str, out: str, *, ads_min: int = 10,
 
 
 def locus_missingness_filter(inp: str, out: str, *, f_missing_max: float = 0.05,
-                             ads_min: int = 10, sample_frac_min: float = 0.95,
+                             ads_min: int = 5, sample_frac_min: float = 0.80,
                              keep_bed: str | None = None) -> int:
     """Keep loci with < f_missing_max missing AND >= sample_frac_min at ADS >= ads_min.
+
+    The coverage clause is a floor against sites only a few samples can speak for, not a
+    uniformity requirement. It was 95% of samples at 10 reads until v0.3.2, and on a
+    cohort of mixed depth that failed half the sites the caller itself passed: on a
+    351-sample Pf7 chromosome 1 subset, where 237 samples had under 90% of loci at 10x, it
+    removed 625 of the 1,324 Pf7-PASS SNPs reaching it, none of them on missingness, and
+    the panel came out at a third of Pf7's own density. 80% at 5 reads keeps sites the
+    thin samples happen to cluster at, which by this step have already been genotyped on
+    their own AD (``filter_ad_regenotype``) and whose thin *samples* are
+    ``sample_coverage_filter``'s job.
 
     ``keep_bed`` whitelists regions from this rule, for a locus worth keeping even where it
     is thinly covered.
