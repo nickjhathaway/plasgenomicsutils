@@ -3,7 +3,7 @@
 A pipeline config is JSON::
 
     {"steps": [
-        {"name": "hard_qc_filter",         "params": {"qd": 20, "mq": 55}},
+        {"name": "hard_qc_filter",         "params": {"qd": 10, "mq": 55}},
         {"name": "singleton_filter_add_ads"},
         {"name": "tandem_repeat_mask",     "params": {"bed": "tandems.bed"}, "ext": "vcf.gz"},
         {"name": "filter_ad_regenotype",   "params": {"min_reads": 2, "min_freq": 0.01}},
@@ -123,6 +123,7 @@ _fws.target_ref = (".fws", "fws_filter")
 # name -> callable(input_path, output_path, **params)
 STEPS = {
     "no_alt_filter": _whitelisted(F.no_alt_filter, "no_alt_filter"),
+    "caller_pass_filter": _whitelisted(F.caller_pass_filter, "caller_pass_filter"),
     "hard_qc_filter": _whitelisted(F.hard_qc_filter, "hard_qc_filter"),
     "singleton_filter_add_ads": _whitelisted(F.singleton_add_ads, "singleton_filter_add_ads"),
     "tandem_repeat_mask": _region(F.tandem_repeat_mask),
@@ -165,7 +166,8 @@ def _singleton_report(inp, out, **kw):
 #: rather than filtering it on quality (``biallelic_snp_filter`` -- letting a whitelisted
 #: multiallelic record through would break every downstream reader's assumption).
 WHITELISTABLE = {
-    "no_alt_filter", "hard_qc_filter", "singleton_filter_add_ads", "tandem_repeat_mask",
+    "no_alt_filter", "caller_pass_filter", "hard_qc_filter", "singleton_filter_add_ads",
+    "tandem_repeat_mask",
     "core_region_filter", "paralog_mask", "locus_missingness_filter", "maf_filter",
 }
 
@@ -187,8 +189,36 @@ WARN_WHITELIST_DROPS = {"biallelic_snp_filter"}
 _singleton_report.target_ref = (".singletons", "count_singletons")
 _singleton_report.extra_params = ("mad_cutoff", "duplicate_frac")
 
+def _sample_summary(inp, out, **kw):
+    """Per-sample coverage and Fws on the callset as it stands; drops nothing."""
+    from .callset_summary import (sample_summary_note, sample_summary_table,
+                                  write_sample_summary)
+
+    rows, n_sites = sample_summary_table(inp, **kw)
+    write_sample_summary(rows, out)
+    say("     " + sample_summary_note(rows, n_sites, frac_min=kw.get("frac_min", 0.80),
+                                      fws_min=kw.get("fws_min", 0.95)))
+    return len(rows)
+
+
+def _variant_summary(inp, out, **kw):
+    """Records by class and ALT-allele count, as counts and fractions."""
+    from .callset_summary import (variant_summary_note, variant_summary_table,
+                                  write_variant_summary)
+
+    rows = variant_summary_table(inp, **kw)
+    write_variant_summary(rows, out)
+    say("     " + variant_summary_note(rows))
+    return len(rows)
+
+
+_sample_summary.target_ref = (".callset_summary", "sample_summary_table")
+_variant_summary.target_ref = (".callset_summary", "variant_summary_table")
+
 REPORTS = {
     "singleton_counts": _singleton_report,
+    "sample_summary": _sample_summary,
+    "variant_summary": _variant_summary,
 }
 
 DEFAULT_CONFIG = {
@@ -197,6 +227,13 @@ DEFAULT_CONFIG = {
     # comments, and a resistance locus that a MAF floor or a coverage rule would otherwise
     # remove is exactly the thing worth keeping. A step's own params.keep_bed overrides it.
     "keep_bed": None,
+    # Clear the caller's FILTER column before anything runs, as a step 00 that reports what
+    # it cleared by flag. For when the caller-side verdicts are not wanted at all -- a VQSR
+    # model trained on the wrong data, region classes this chain re-derives from its own
+    # BEDs, a contig the caller never scored. caller_pass_filter then has nothing to act on.
+    # The finer tool is that step's "allow" list, which tolerates named flags and removes
+    # the rest.
+    "reset_filter": False,
     "steps": [
         # Non-variant records first, and in their own step: the bias statistics are
         # computed whether or not an ALT was called, so hard_qc_filter does remove them --
@@ -204,6 +241,14 @@ DEFAULT_CONFIG = {
         # trim first, so every count below describes the alleles this cohort actually
         # carries rather than the ones the callset it was subset from did
         {"name": "no_alt_filter", "params": {"keep": False, "trim": True}},
+        # The caller's own FILTER column -- VQSR tranches, Low_VQSLOD, the region classes,
+        # MissingVQSLOD on contigs VQSR never scored -- acted on in its own step, so what it
+        # removes is counted by flag rather than folded into "failed QC". hard_qc_filter
+        # judges on its metrics alone. `allow` lists flags to tolerate: the organelle
+        # records a nuclear VQSR model could not score, for instance --
+        # ["MissingVQSLOD", "Mitochondrion", "Apicoplast"]. Set "enabled": false to keep
+        # everything the caller flagged and let the metric thresholds decide.
+        {"name": "caller_pass_filter", "params": {"allow": []}},
         # `caller` is written out at its default for the same reason as keep_bed: a
         # bcftools callset carries none of GATK's metrics, and "bcftools" here is what
         # makes this step read the ones it does carry (FS/RPBZ/SCBZ/MQBZ/MQSBZ).
@@ -261,6 +306,11 @@ DEFAULT_CONFIG = {
         # survivors no longer support is still there, which is why re-running maf_filter and
         # locus_missingness_filter after it is worth doing when the frequencies matter.
         {"name": "fws_filter", "enabled": False, "params": {"fws_min": 0.95}},
+        # What the callset looks like when the chain is done, as two tables that change
+        # nothing. The filters that would say so -- sample_coverage_filter, fws_filter -- are
+        # the ones most often off, and they only speak for the samples they drop.
+        {"name": "sample_summary", "report": True, "ext": "tsv"},
+        {"name": "variant_summary", "report": True, "ext": "tsv"},
     ]
 }
 
@@ -276,7 +326,7 @@ def load_config(path: str) -> dict:
 STEP_KEYS = ("name", "params", "ext", "enabled", "report")
 
 #: Keys a config may carry at the top level.
-CONFIG_KEYS = ("steps", "keep_bed", "remove_intermediates", "_meta")
+CONFIG_KEYS = ("steps", "keep_bed", "remove_intermediates", "reset_filter", "_meta")
 
 
 def _accepted_params(step) -> set[str] | None:
@@ -392,9 +442,11 @@ def effective_config(config: dict, **meta) -> dict:
     Steps switched off keep their entry and their defaults: what did **not** run is part of
     the record too. The result is a valid config -- run it again and you get this run.
     """
-    out = {k: config[k] for k in ("keep_bed", "remove_intermediates") if k in config}
+    out = {k: config[k] for k in ("keep_bed", "remove_intermediates", "reset_filter")
+           if k in config}
     out.setdefault("keep_bed", None)
     out.setdefault("remove_intermediates", False)
+    out.setdefault("reset_filter", False)
     if meta:
         out["_meta"] = {k: _jsonable(v) for k, v in meta.items()}
     steps = []
@@ -477,12 +529,25 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
               "types": counts}]
     prev = input_path
     seen: list[str] = []
+    prev_row: dict | None = None
+    prune = bool(config.get("remove_intermediates", False))
+    # Step 00, when asked for: the caller's FILTER column cleared before the chain sees it.
+    # A real step with a real output and a tally row, so that what it did is in the run's
+    # record and not only in the config.
+    if config.get("reset_filter"):
+        out_path = str(out / "00_reset_filter.bcf")
+        say(f"[00] reset_filter -> {out_path}")
+        F.reset_filter(prev, out_path)
+        index_vcf(out_path)
+        counts = variant_type_counts(out_path)
+        prev_row = {"step": "reset_filter", "path": out_path, "variants": counts["total"],
+                    "types": counts}
+        tally.append(prev_row)
+        prev = out_path
     # `remove_intermediates` deletes each step's callset as soon as the next one has read it,
     # so a long chain over a large cohort costs one intermediate on disk rather than all of
     # them. The input is never touched, the final output stays, and the side tables -- the
     # record of what happened -- are small and are kept whatever this says.
-    prune = bool(config.get("remove_intermediates", False))
-    prev_row: dict | None = None
     # One "the whitelist rescued nothing" warning for the run, not one per step: most
     # steps have nothing for a whitelist to do, and saying so each time reads as an error.
     with F.deferred_whitelist_warnings():
@@ -545,8 +610,21 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
                 _remove_intermediate(prev_row)
             prev_row = row
             prev = out_path
+            # Nothing left means nothing for the later steps to judge -- and some of them
+            # cannot run on nothing: a sample-coverage rule over zero loci drops every
+            # sample, and a callset with no samples has lost the FORMAT tags the next step
+            # reads. Stop here, say so, and record the rest as not run.
+            if n == 0:
+                rest = config["steps"][i:]
+                say(f"     no variants remain after [{i:02d}] {name}; "
+                    f"{len(rest)} later step(s) not run")
+                for j, later in enumerate(rest, start=i + 1):
+                    say(f"[{j:02d}] {later['name']} -- not run (no variants remain)")
+                    tally.append({"step": later["name"], "skipped": True,
+                                  "reason": "no variants remain"})
+                break
 
-    if emit_snp_bed and len(tally) > 1:
+    if emit_snp_bed and len(tally) > 1 and (prev_row is None or prev_row["variants"] > 0):
         bed_path = str(out / (Path(prev).stem + ".snps.bed"))
         F.snp_bed(prev, bed_path)
         n_snps = sum(1 for _ in open(bed_path))

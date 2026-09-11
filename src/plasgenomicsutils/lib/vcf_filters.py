@@ -246,6 +246,7 @@ def _check_qc_tags(inp: str, wanted: dict, needs: dict, label: str, advice: str)
             if t not in have:
                 missing[t].add("--" + k.replace("_", "-"))
     if not missing:
+        _check_qc_tags_populated(inp, wanted, needs, label)
         return
     # naming the threshold beside the tag, since which flag to reach for is the next
     # question and the mapping from tag to flag is not obvious from either end
@@ -256,6 +257,51 @@ def _check_qc_tags(inp: str, wanted: dict, needs: dict, label: str, advice: str)
         "  A comparison against a tag that is not there is simply false, so the filter "
         "would keep\n  everything and say nothing. " + advice
     )
+
+
+def _check_qc_tags_populated(inp: str, wanted: dict, needs: dict, label: str) -> None:
+    """A tag the header declares but no record carries is the header check's trap again.
+
+    The same falsehood -- a comparison against a missing value is simply false -- applies
+    per record: a record without ``MQ`` passes ``MQ < 55`` untested. That is acceptable on
+    a record, since a caller can have its reasons for leaving one value blank, and it is
+    said out loud as a count so it is not invisible (GATK's ``MQ=NaN`` counts as missing:
+    a comparison against NaN is false too). It is not acceptable across the whole
+    file: a tag present in the header and absent from every record means the threshold
+    reading it does nothing at all, and that is an error naming the tag, as the header
+    check would have been.
+    """
+    tags = sorted({t for k, v in wanted.items() if v is not None for t in needs[k]})
+    if not tags:
+        return
+    fmt = "\t".join(f"%INFO/{t}" for t in tags) + "\n"
+    proc = subprocess.run(["bcftools", "query", "-f", fmt, str(inp)], stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, text=True)
+    total = 0
+    present = dict.fromkeys(tags, 0)
+    for line in proc.stdout.splitlines():
+        total += 1
+        for t, v in zip(tags, line.split("\t")):
+            # GATK writes a mapping quality it could not compute as NaN rather than
+            # missing, and a comparison against NaN is false exactly as one against `.`
+            if v not in (".", "nan", "-nan", "NaN"):
+                present[t] += 1
+    if not total:
+        return
+    empty = [t for t in tags if present[t] == 0]
+    if empty:
+        flags = {t: ", ".join(sorted("--" + k.replace("_", "-") for k, v in wanted.items()
+                                     if v is not None and t in needs[k])) for t in empty}
+        named = ", ".join(f"INFO/{t} (read by {flags[t]})" for t in empty)
+        raise SystemExit(
+            f"{label}: the header declares " + named + f", but none of the {total:,} "
+            "record(s) carries a value.\n  A comparison against a missing value is simply "
+            "false, so that threshold would test nothing and keep everything.\n  Fill the "
+            "tag in, or set the threshold that reads it to none.")
+    partial = {t: total - present[t] for t in tags if present[t] < total}
+    if partial:
+        shown = ", ".join(f"INFO/{t} {n:,}" for t, n in sorted(partial.items(), key=lambda kv: -kv[1]))
+        say(f"NOTE: record(s) without a value pass that test untested -- {shown} of {total:,}")
 
 
 def _check_bcftools_qc_tags(inp: str, wanted: dict) -> None:
@@ -409,7 +455,7 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
     `bcftools mpileup` writes -- see :func:`_bcftools_qc_expr` for what maps to what, and
     where the mapping is not a straight rename.
 
-    ``qd="auto"`` resolves per caller: 20 for GATK, and **off** for bcftools, whose QUAL is
+    ``qd="auto"`` resolves per caller: 10 for GATK, and **off** for bcftools, whose QUAL is
     not on the same scale -- a 40x site called at QUAL 222 has QUAL/DP of 5.6, so carrying
     GATK's 20 across would discard a perfectly good callset. Pass a number to set it
     anyway, or ``None`` to switch it off.
@@ -435,13 +481,21 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
 
     ``keep_bed`` whitelists regions from this rule; a rescued record keeps its ``FAIL``
     FILTER, so a variant kept despite failing QC still says that it failed.
+
+    Only this step's own verdict is acted on. A FILTER the caller set (a VQSR tranche, a
+    region class, ``MissingVQSLOD``) stays on the record and is reported, not enforced;
+    :func:`caller_pass_filter` is the step that enforces those.
     """
     if caller not in ("gatk", "bcftools"):
         raise SystemExit(f"hard_qc_filter: caller must be gatk or bcftools, not {caller!r}")
-    # "auto" means "whatever suits this caller": QD 20 is GATK's, and QUAL/DP on bcftools
-    # output is not the same quantity, so it is left off there rather than reused.
+    # "auto" means "whatever suits this caller". QD 10 for GATK: on this package's own
+    # sWGA and Pf7 callsets it sits in the valley between what VQSR passes and fails on
+    # clean biallelic sites, and drops almost nothing at adequate depth -- the earlier 20
+    # was mostly removing thinly covered sWGA sites by proxy, which the missingness and
+    # coverage filters do directly (investigations/qd_threshold in the project home). QUAL/DP on bcftools output is
+    # not the same quantity, so it is left off there rather than reused.
     if qd == "auto":
-        qd = 20.0 if caller == "gatk" else None
+        qd = 10.0 if caller == "gatk" else None
     # FS is off by default for the reason given in _sor_from_ad_expr: it is a p-value, so
     # a fixed cutoff tightens as a cohort grows, and `sor` asks the same question of the
     # skew itself. Pass a number to switch it back on.
@@ -477,20 +531,136 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
                 "copy its input; drop it from the chain instead")
         expr = " || ".join(parts)
     fmt = out_flag(out)
+    # The verdict is FAIL appended to the FILTER column, and the selection is "no FAIL" --
+    # not "PASS". A caller's own flags (Pf7's Low_VQSLOD, MissingVQSLOD;Mitochondrion, the
+    # VQSR tranches) stay on the record and are not acted on: selecting PASS would enforce
+    # them here, silently, as if they were this step's metrics -- and a contig VQSR never
+    # scored would lose every record however clean. `caller_pass_filter` is the step that
+    # acts on those, and says which.
     if not keep_bed:
         sh(f"bcftools filter -m + -s FAIL -e {q(expr)} {q(inp)} -Ou "
-           f"| bcftools view -f PASS -O{fmt} -o {q(out)}", tools=("bcftools",))
+           f"| bcftools view -e 'FILTER~\"FAIL\"' -O{fmt} -o {q(out)}", tools=("bcftools",))
+        _note_caller_filters(out, "hard_qc_filter")
         return 0
     # flagged first, selected second, so the whitelist has a header-compatible source
     prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
     try:
         sh(f"bcftools filter -m + -s FAIL -e {q(expr)} {q(inp)} -Ob -o {q(prep)}",
            tools=("bcftools",))
-        sh(f"bcftools view -f PASS {q(prep)} -O{fmt} -o {q(out)}", tools=("bcftools",))
-        return _rescue_whitelisted(prep, out, keep_bed, "hard_qc_filter")
+        sh(f"bcftools view -e 'FILTER~\"FAIL\"' {q(prep)} -O{fmt} -o {q(out)}",
+           tools=("bcftools",))
+        n = _rescue_whitelisted(prep, out, keep_bed, "hard_qc_filter")
+        _note_caller_filters(out, "hard_qc_filter")
+        return n
     finally:
         if os.path.exists(prep):
             os.unlink(prep)
+
+
+def _filter_ids(path: str) -> list[str]:
+    """The FILTER ids the header declares, PASS excluded."""
+    hdr = subprocess.run(["bcftools", "view", "-h", str(path)], stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True).stdout
+    ids = []
+    for line in hdr.splitlines():
+        if line.startswith("##FILTER=<ID="):
+            fid = line[len("##FILTER=<ID="):].split(",", 1)[0].split(">", 1)[0]
+            if fid != "PASS":
+                ids.append(fid)
+    return ids
+
+
+def _filter_value_counts(path: str, include: str) -> dict[str, int]:
+    """How many records carry each FILTER string, over the records matching ``include``."""
+    out = subprocess.run(["bcftools", "query", "-i", include, "-f", "%FILTER\n", str(path)],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
+    counts: dict[str, int] = defaultdict(int)
+    for line in out.splitlines():
+        if line and line != "." and line != "PASS":
+            counts[line] += 1
+    return dict(counts)
+
+
+def _note_caller_filters(path: str, label: str) -> None:
+    """Say how many kept records still carry a FILTER the caller set, and which.
+
+    Silence here is the trap this exists to avoid: a callset whose every record the caller
+    had flagged used to come out of ``hard_qc_filter`` empty with no word as to why.
+    """
+    # FAIL is this package's own verdict; a rescued record keeps it, and that is not the
+    # caller's doing
+    counts = {k: v for k, v in _filter_value_counts(path, 'FILTER!="PASS" && FILTER!="."').items()
+              if k != "FAIL"}
+    if not counts:
+        return
+    n = sum(counts.values())
+    top = sorted(counts.items(), key=lambda kv: -kv[1])
+    shown = ", ".join(f"{k}: {v:,}" for k, v in top[:4]) + (", ..." if len(top) > 4 else "")
+    say(f"NOTE: {n:,} kept record(s) carry a FILTER set by the caller ({shown}); {label} "
+        f"judges on its own metrics and does not act on those -- caller_pass_filter does")
+
+
+def reset_filter(inp: str, out: str) -> dict[str, int]:
+    """Clear the FILTER column -- every record to ``.`` -- saying what was there, by flag.
+
+    For a callset whose caller-side verdicts are not wanted at all: a VQSR model trained on
+    the wrong data, region classes the chain re-derives from its own BEDs, a contig the
+    caller never scored. Everything downstream then judges on its own terms alone, and
+    ``caller_pass_filter`` has nothing to act on. What was cleared is reported so the
+    decision leaves a trace in the log; the FILTER header lines go with the values.
+
+    Returns the per-flag counts that were cleared.
+    """
+    require("bcftools")
+    fmt = out_flag(out)
+    counts = _filter_value_counts(inp, 'FILTER!="PASS" && FILTER!="."')
+    sh(f"bcftools annotate -x FILTER {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+    n = sum(counts.values())
+    if n:
+        top = sorted(counts.items(), key=lambda kv: -kv[1])
+        shown = ", ".join(f"{k}: {v:,}" for k, v in top[:6]) + (", ..." if len(top) > 6 else "")
+        say(f"NOTE: FILTER cleared on every record; {n:,} carried a caller flag ({shown})")
+    else:
+        say("NOTE: FILTER cleared on every record; none carried a caller flag")
+    return counts
+
+
+def caller_pass_filter(inp: str, out: str, *, allow: tuple[str, ...] | list[str] = (),
+                       keep_bed: str | None = None) -> int:
+    """Keep the records the caller itself passed: FILTER is PASS or ``.``, or only ``allow``.
+
+    A joint callset arrives with the caller's own verdicts in the FILTER column -- Pf7's
+    VQSR tranches and ``Low_VQSLOD``, its region classes (``SubtelomericHypervariable``,
+    ``Mitochondrion``, ...), ``MissingVQSLOD`` on the contigs VQSR never scored. Those are a
+    different question from the metric thresholds ``hard_qc_filter`` applies, and this
+    step asks it on its own, counting what it removes by flag so "the caller had already
+    flagged all of it" is something the log says rather than something to discover.
+
+    ``allow`` names flags to tolerate: a record whose flags are all in ``allow`` is kept.
+    ``("MissingVQSLOD", "Mitochondrion")`` keeps the organelle records a nuclear VQSR model
+    could not score, for instance. Any flag not allowed removes the record.
+
+    ``keep_bed`` whitelists regions from this rule; a rescued record keeps its flags.
+    """
+    require("bcftools")
+    fmt = out_flag(out)
+    allowed = set(allow or ())
+    acting = [f for f in _filter_ids(inp) if f not in allowed]
+    if not acting:
+        sh(f"bcftools view {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        say("NOTE: the header declares no FILTER this step acts on; nothing removed")
+        return 0
+    expr = " || ".join(f'FILTER~"{f}"' for f in acting)
+    dropped = _filter_value_counts(inp, expr)
+    sh(f"bcftools view -e {q(expr)} {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+    n = sum(dropped.values())
+    if n:
+        top = sorted(dropped.items(), key=lambda kv: -kv[1])
+        shown = ", ".join(f"{k}: {v:,}" for k, v in top[:6]) + (", ..." if len(top) > 6 else "")
+        say(f"NOTE: {n:,} record(s) removed on the caller's own FILTER ({shown})")
+    else:
+        say("NOTE: no record carried a FILTER this step acts on")
+    return _rescue_whitelisted(inp, out, keep_bed, "caller_pass_filter")
 
 
 def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
@@ -1027,6 +1197,13 @@ def sample_coverage_filter(inp: str, out: str, *, ads_min: int = 10,
     """
     require("bcftools")
     rows = sample_coverage_table(inp, ads_min=ads_min, frac_min=frac_min)
+    # An empty callset covers nobody at any locus; that is not a verdict on the samples.
+    # Without this every sample scores 0/0 and the whole cohort goes, and a callset with no
+    # samples loses its FORMAT header, so the next step fails on a tag that "is not defined".
+    if not any(r["n_loci"] for r in rows):
+        say("NOTE: no variants to measure coverage on; no sample dropped")
+        for r in rows:
+            r["dropped"] = False
     dropped = sorted(r["sample"] for r in rows if r["dropped"])
 
     if cov_table_path:
@@ -1081,6 +1258,12 @@ def locus_missingness_filter(inp: str, out: str, *, f_missing_max: float = 0.05,
     ``keep_bed`` whitelists regions from this rule, for a locus worth keeping even where it
     is thinly covered.
     """
+    if not _has_format_tag(inp, "ADS"):
+        raise SystemExit(
+            f"ERROR: {inp} has no FORMAT/ADS, which is what per-sample coverage is measured "
+            "on. Run singleton_filter_add_ads first (it adds ADS as "
+            "int(smpl_sum(FORMAT/AD))), or add the tag with: bcftools +fill-tags -- -t "
+            "'FORMAT/ADS=int(smpl_sum(FORMAT/AD))'.")
     fmt = out_flag(out)
     expr = (f"F_MISSING < {f_missing_max} & "
             f"COUNT(FMT/ADS>={ads_min})/N_SAMPLES >= {sample_frac_min}")
@@ -1210,6 +1393,16 @@ def _maf_filter_grouped(inp: str, out: str, *, meta: str, group_col: str,
                 groups[g].append(s)
     if not groups:
         raise SystemExit(f"ERROR: no samples in {meta} overlap the VCF")
+    # Said out loud, because a grouped floor is only as good as the grouping: a sample the
+    # metadata does not name, or names with an empty group, is in no group's frequency and
+    # its alleles count for nothing here -- and nothing else in the run would mention it.
+    grouped = {s for ss in groups.values() for s in ss}
+    ungrouped = sorted(present - grouped)
+    sizes = ", ".join(f"{g} {len(ss)}" for g, ss in sorted(groups.items(), key=lambda kv: -len(kv[1])))
+    say(f"NOTE: MAF >= {maf_min:g} judged per '{g_col}' in any group ({len(groups)}): {sizes}"
+        + (f"; {len(ungrouped)} VCF sample(s) in no group, counted in none of the "
+           f"frequencies: {', '.join(ungrouped[:5])}{', ...' if len(ungrouped) > 5 else ''}"
+           if ungrouped else "; every VCF sample is in a group"))
 
     tmp = tempfile.mkdtemp(prefix="maf_grouped_")
     try:

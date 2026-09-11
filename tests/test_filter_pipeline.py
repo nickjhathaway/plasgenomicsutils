@@ -870,3 +870,24 @@ def test_a_multiallelic_snp_survives_the_default_chain(tmp_path):
     with pysam.VariantFile(final) as vf:
         rec, = list(vf)
         assert rec.alts == ("C", "G"), "both alternates must still be there"
+
+
+def test_the_grouped_maf_floor_says_how_the_samples_were_grouped(tmp_path, capsys):
+    """A grouped floor is only as good as the grouping, so the step reports the groups and
+    their sizes, and names any VCF sample the metadata left in no group -- its alleles count
+    for nothing in a per-group frequency."""
+    from plasgenomicsutils.lib import vcf_filters as F
+    import subprocess
+    samples = subprocess.run(["bcftools", "query", "-l", str(BCF)], capture_output=True,
+                             text=True).stdout.split()
+    meta = tmp_path / "meta.tsv"
+    lines = ["sample\tcountry"] + [f"{s}\tA" for s in samples[:30]] + [f"{s}\tB" for s in samples[30:58]]
+    lines.append(f"{samples[58]}\t")                         # named, but with an empty group
+    meta.write_text("\n".join(lines) + "\n")                  # samples[59] is not named at all
+    F.maf_filter(str(BCF), str(tmp_path / "o.bcf"), maf_min=0.02, meta=str(meta),
+                 group_col="country")
+    cap = capsys.readouterr()
+    text = cap.out + cap.err
+    assert "judged per 'country' in any group (2): A 30, B 28" in text
+    assert f"2 VCF sample(s) in no group, counted in none of the frequencies: {samples[58]}, {samples[59]}" in text or \
+           f"2 VCF sample(s) in no group, counted in none of the frequencies: {samples[59]}, {samples[58]}" in text

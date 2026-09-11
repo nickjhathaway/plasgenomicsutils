@@ -38,8 +38,10 @@ def get_parser_hard_qc_filter() -> argparse.ArgumentParser:
     p.add_argument("--output", required=True)
     p.add_argument("--qd", type=_threshold, default="auto",
                    help="Drop QD < this (gatk), or QUAL/INFO/DP < this (bcftools). "
-                        "'auto' = 20 for gatk and off for bcftools, whose QUAL is not on "
-                        "the same scale; 'none' switches it off.")
+                        "'auto' = 10 for gatk (was 20 before v0.3.2: on sWGA data that "
+                        "was mostly a depth filter by proxy, see investigations/qd_threshold in the project home) "
+                        "and off for bcftools, whose QUAL is not on the same scale; "
+                        "'none' switches it off.")
     p.add_argument("--mq", type=_threshold, default=55.0,
                    help="Drop MQ < this (default: 55; 'none' to switch off)")
     p.add_argument("--sor", type=_threshold, default=3.0,

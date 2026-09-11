@@ -126,8 +126,8 @@ def test_mapping_quality_bias_and_the_optional_extras(tmp_path):
 
 # ---- QD does not carry across ----------------------------------------------------
 
-def test_qd_is_off_by_default_for_bcftools_but_20_for_gatk(tmp_path):
-    # QUAL 222 over DP 40 is 5.6: GATK's QD >= 20 would discard a good bcftools callset,
+def test_qd_is_off_by_default_for_bcftools_but_10_for_gatk(tmp_path):
+    # QUAL 222 over DP 40 is 5.6: GATK-mode's QD >= 10 would discard a good bcftools callset,
     # so "auto" leaves it off there
     vcf = _vcf(tmp_path, [(1000, CLEAN)])
     out = str(tmp_path / "auto.vcf")
@@ -135,7 +135,7 @@ def test_qd_is_off_by_default_for_bcftools_but_20_for_gatk(tmp_path):
     assert _kept(out) == [1000]
     # asking for it explicitly still works, and does drop the record
     out2 = str(tmp_path / "qd.vcf")
-    F.hard_qc_filter(vcf, out2, caller="bcftools", qd=20)
+    F.hard_qc_filter(vcf, out2, caller="bcftools", qd=10)
     assert _kept(out2) == []
     # and a modest threshold on the right scale keeps it
     out3 = str(tmp_path / "qd2.vcf")
@@ -563,3 +563,58 @@ def test_a_biallelic_record_is_judged_exactly_as_before(tmp_path):
                               src], stdout=subprocess.PIPE, text=True,
                              stderr=subprocess.PIPE)
         assert got.stdout.split() == ["100"], f"{expr} should be {want}: {got.stderr[:120]}"
+
+
+# ---- a declared tag nobody carries ------------------------------------------------------
+
+def test_a_tag_declared_but_missing_on_every_record_is_an_error_naming_it(tmp_path):
+    """The header check's trap in another form: `MQ < 55` against a file where every MQ is
+    `.` tests nothing and keeps everything."""
+    rows = [(1000, {k: v for k, v in CLEAN.items() if k != "MQ"}),
+            (2000, {k: v for k, v in CLEAN.items() if k != "MQ"})]
+    vcf = _vcf(tmp_path, rows)
+    with pytest.raises(SystemExit) as e:
+        F.hard_qc_filter(vcf, str(tmp_path / "o.bcf"), caller="bcftools")
+    assert "INFO/MQ (read by --mq)" in str(e.value) and "none of the 2 record(s)" in str(e.value)
+    # switching that threshold off is enough to proceed
+    out = str(tmp_path / "ok.bcf")
+    F.hard_qc_filter(vcf, out, caller="bcftools", mq=None)
+    assert _kept(out) == [1000, 2000]
+
+
+def test_a_tag_missing_on_some_records_passes_them_untested_and_is_counted(tmp_path, capsys):
+    rows = [(1000, CLEAN), (2000, {k: v for k, v in CLEAN.items() if k != "MQ"}),
+            (3000, _with(MQ=30))]
+    out = str(tmp_path / "o.bcf")
+    F.hard_qc_filter(_vcf(tmp_path, rows), out, caller="bcftools")
+    assert _kept(out) == [1000, 2000]                        # 2000 untested on MQ, 3000 failed it
+    cap = capsys.readouterr()
+    assert "record(s) without a value pass that test untested -- INFO/MQ 1 of 3" in cap.out + cap.err
+
+
+def test_a_nan_value_counts_as_missing(tmp_path, capsys):
+    """GATK writes MQ=NaN where it could not compute one; `MQ < 55` is false against NaN
+    exactly as against `.`, so it is counted the same way."""
+    rows = [(1000, CLEAN), (2000, _with(MQ="nan"))]
+    out = str(tmp_path / "o.bcf")
+    F.hard_qc_filter(_vcf(tmp_path, rows), out, caller="bcftools")
+    assert _kept(out) == [1000, 2000]
+    cap = capsys.readouterr()
+    assert "INFO/MQ 1 of 2" in cap.out + cap.err
+
+
+def test_gatk_mode_qd_default_is_10(tmp_path):
+    """QD 20 was mostly a depth filter by proxy on sWGA data; 10 sits in the valley between
+    what VQSR passes and fails on clean biallelic sites (docs/qd_threshold.md)."""
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100000>"]
+    for t in ("QD", "MQ", "SOR", "MQRankSum", "ReadPosRankSum"):
+        hdr.append(f'##INFO=<ID={t},Number=1,Type=Float,Description="{t}">')
+    hdr.append('##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">')
+    hdr.append("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1")
+    for pos, qd in ((1000, 9.9), (2000, 10.0), (3000, 15.0), (4000, 30.0)):
+        hdr.append(f"chr1\t{pos}\t.\tA\tT\t222\t.\tQD={qd};MQ=60;SOR=1;MQRankSum=0;ReadPosRankSum=0\tGT\t0/1")
+    v = tmp_path / "g.vcf"
+    v.write_text("\n".join(hdr) + "\n")
+    out = str(tmp_path / "o.vcf")
+    F.hard_qc_filter(str(v), out)
+    assert _kept(out) == [2000, 3000, 4000]

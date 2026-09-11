@@ -105,7 +105,8 @@ Individual, parameterized filtering steps (each reports before/after variant
 counts), backed by `bcftools`/`bedtools`:
 
 ```bash
-plasgenomicsutils hard_qc_filter --input in.bcf --output 01.bcf          # QD/MQ/SOR/RankSums, keep PASS
+plasgenomicsutils caller_pass_filter --input in.bcf --output 01.bcf       # drop what the caller's FILTER column flagged
+plasgenomicsutils hard_qc_filter --input 01.bcf --output 02.bcf          # QD/MQ/SOR/RankSums (or bcftools' *BZ)
 plasgenomicsutils singleton_filter_add_ads --input 01.bcf --output 02.bcf # drop singletons, add FORMAT/ADS
 plasgenomicsutils tandem_repeat_mask --input 02.bcf --output 03.bcf      # --bed defaults to builtin:pf3d7_tandem_repeats
 plasgenomicsutils core_region_filter  --input 03.bcf --output 04.bcf      # keep core genome (builtin:pf3d7_core_regions)
@@ -461,6 +462,7 @@ warns if a custom config puts it after, where every sample scores zero):
 
 ```json
 {"steps": [
+  {"name": "caller_pass_filter", "params": {"allow": []}},
   {"name": "hard_qc_filter"},
   {"name": "singleton_counts", "report": true, "ext": "tsv",
    "params": {"min_depth": 5, "max_missing_frac": 0.2}},

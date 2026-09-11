@@ -56,7 +56,8 @@ Making a callset, merging one, converting one.
 |---|---|
 | `filter_pipeline` | Run an ordered, config-driven chain of filtering steps, tallying counts |
 | `no_alt_filter` | Drop records with no ALT allele (non-variant positions), counted separately |
-| `hard_qc_filter` | GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS |
+| `caller_pass_filter` | Keep records the caller itself passed (FILTER `PASS` or `.`), counting removals by flag |
+| `hard_qc_filter` | Hard filter on the caller's INFO metrics (QD/MQ/SOR/RankSums, or bcftools' *BZ) |
 | `singleton_filter_add_ads` | Drop near-private variants and add the `FORMAT/ADS` summed-depth tag |
 | `tandem_repeat_mask` | Remove variants overlapping a tandem-repeat BED |
 | `core_region_filter` | Keep only variants inside the core-genome BED |
@@ -77,6 +78,8 @@ Reads a callset and writes a table; never changes the data.
 | Command | Description |
 |---|---|
 | `singleton_counts` | Per-sample count of variants where it is the only non-reference carrier |
+| `sample_summary` | Per-sample coverage and Fws for a callset as it stands (a table, nothing dropped) |
+| `variant_summary` | Records by class and ALT-allele count, as counts and fractions |
 | `strand_bias_scan` | Flag strand-bias (SSE) fake-het artifacts from `FORMAT/ADF+ADR`; emit a blacklist BED |
 | `strand_read_check` | Read-level strand-bias diagnostic at one site (+ optional ALT-read extraction) |
 | `variant_spacing` | Per-chromosome gaps between consecutive variants, and density per cM |

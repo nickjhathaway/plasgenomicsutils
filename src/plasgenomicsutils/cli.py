@@ -43,9 +43,12 @@ from .scripts.vcf.filter_ad_regenotype import filter_ad_regenotype
 from .scripts.vcf.fws_filter import fws_filter
 from .scripts.vcf.harmonize_bcf import harmonize_bcf
 from .scripts.vcf.no_alt_filter import no_alt_filter
+from .scripts.vcf.caller_pass_filter import caller_pass_filter
 from .scripts.vcf.hard_qc_filter import hard_qc_filter
 from .scripts.vcf.singleton_filter_add_ads import singleton_filter_add_ads
 from .scripts.vcf.singleton_counts import singleton_counts
+from .scripts.vcf.sample_summary import sample_summary
+from .scripts.vcf.variant_summary import variant_summary
 from .scripts.vcf.wsaf_profile import wsaf_profile
 from .scripts.vcf.biallelic_snp_filter import biallelic_snp_filter
 from .scripts.vcf.spanning_del_filter import spanning_del_filter
@@ -119,8 +122,10 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Run an ordered, config-driven chain of filtering steps, tallying counts"),
         "no_alt_filter": Command(no_alt_filter,
             "Drop records with no ALT allele (non-variant positions), counted separately"),
+        "caller_pass_filter": Command(caller_pass_filter,
+            "Keep records the caller itself passed (FILTER PASS or '.'), counting removals by flag"),
         "hard_qc_filter": Command(hard_qc_filter,
-            "GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS"),
+            "Hard filter on the caller's INFO metrics (QD/MQ/SOR/RankSums, or bcftools' *BZ)"),
         "singleton_filter_add_ads": Command(singleton_filter_add_ads,
             "Drop near-private variants and add the FORMAT/ADS summed-depth tag"),
         "tandem_repeat_mask": Command(tandem_repeat_mask,
@@ -150,6 +155,10 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
     "vcf_reporting": {
         "singleton_counts": Command(singleton_counts,
             "Per-sample count of variants where it is the only non-reference carrier"),
+        "sample_summary": Command(sample_summary,
+            "Per-sample coverage and Fws for a callset as it stands (a table, nothing dropped)"),
+        "variant_summary": Command(variant_summary,
+            "Records by class and ALT-allele count, as counts and fractions"),
         "strand_bias_scan": Command(strand_bias_scan,
             "Flag strand-bias (SSE) fake-het artifacts from FORMAT/ADF+ADR; emit a blacklist BED"),
         "strand_read_check": Command(strand_read_check,
