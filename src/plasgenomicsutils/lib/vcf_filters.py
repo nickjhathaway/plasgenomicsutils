@@ -494,7 +494,7 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
 
 
 def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
-                     keep_bed: str | None = None) -> int:
+                     keep_bed: str | None = None, per_allele: bool = False) -> int:
     """Drop variants seen as ALT in <= min_samples samples; add FORMAT/ADS.
 
     ADS (summed allelic depth, the reads actually used to genotype) is a more
@@ -503,14 +503,32 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
     ``AD[*:0]+AD[*:1]`` form counted only ref + first ALT and silently
     undercounted anything with a second ALT allele.
 
-    The test itself is **per ALT**: a record survives when some single alternate is carried
-    by more than ``min_samples`` samples. Counting samples that are merely not homozygous
-    reference gives the same answer at a biallelic site, and the wrong one as soon as there
-    are two alternates -- a record where each ALT is private to a different sample has two
-    singletons and no well-supported allele, but between them the alternates have two
-    carriers, so it used to survive a singleton filter. The counts come from
+    The test is **per ALT**: a record survives when some single alternate is carried by more
+    than ``min_samples`` samples. Counting samples that are merely not homozygous reference
+    gives the same answer at a biallelic site, and the wrong one as soon as there are two
+    alternates -- a record where each ALT is private to a different sample has two singletons
+    and no well-supported allele, but between them the alternates have two carriers, so it
+    used to survive a singleton filter. The counts come from
     :func:`~plasgenomicsutils.lib.allele_counts.add_alt_sample_counts`, which also leaves
     them in ``INFO/AC_SAMP`` so the decision is inspectable afterwards.
+
+    ``per_allele`` decides what happens to a record that carries a singleton alternate
+    **and** a well-supported one. By default the whole record is kept, singleton allele and
+    all -- the well-supported allele is what a record-level test is for. With
+    ``per_allele=True`` the singleton alternate's calls are recoded to missing and the allele
+    is trimmed off (:func:`~plasgenomicsutils.lib.singletons.singleton_to_missing` then
+    ``--trim-alt-alleles``), so only the supported alternates remain.
+
+    ``*`` is never recoded here -- a spanning deletion is not a variant allele, and a
+    singleton one is ``spanning_del_filter``'s business. This has a consequence worth naming:
+    a record whose only real alternate was a singleton is trimmed to whatever ``*`` it also
+    carried. If that ``*`` is common the record survives as a spanning-deletion-only record
+    -- the deletion is real, and per-allele mode preserves it where the record-level default
+    *drops the site entirely* for want of a supported real allele. So per-allele mode can
+    keep **more** records than the default, not fewer: it is trading a leaked singleton SNP
+    for a preserved deletion, and the deletion is then ``spanning_del_filter``'s call. A
+    record left with no allele at all (no supported real alternate, no ``*``) is ref-only and
+    dropped by the same record-level keep.
     """
     from .allele_counts import ALT_SAMPLE_MAX_TAG, add_alt_sample_counts
 
@@ -522,8 +540,21 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
     # and leaves a tagged source for the whitelist to rescue from.
     prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
     tagged = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    recoded = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    trimmed = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
     try:
-        add_alt_sample_counts(inp, tagged)
+        # Per allele: blank the singleton alternates' calls and trim them off first, so what
+        # AC_SAMP is then computed on -- and what the record-level keep sees -- is the
+        # record reduced to its supported alternates. A record left with no real allele is
+        # ref-only after the trim and falls to `AC_SAMP_MAX > min_samples` like any other.
+        if per_allele:
+            from .singletons import singleton_to_missing
+            singleton_to_missing(inp, recoded, min_samples=min_samples)
+            _trim_alt_alleles(recoded, trimmed)
+            source = trimmed
+        else:
+            source = inp
+        add_alt_sample_counts(source, tagged)
         sh(f"bcftools +fill-tags {q(tagged)} -Ob -o {q(prep)} -- -t {q(ads)}",
            tools=("bcftools",))
         sh(f"bcftools view -i {q(keep)} {q(prep)} -O{fmt} -o {q(out)}", tools=("bcftools",))
@@ -531,7 +562,7 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
             return 0
         return _rescue_whitelisted(prep, out, keep_bed, "singleton_filter_add_ads")
     finally:
-        for t in (prep, tagged):
+        for t in (prep, tagged, recoded, trimmed):
             if os.path.exists(t):
                 os.unlink(t)
 
