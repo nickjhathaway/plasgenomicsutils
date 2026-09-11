@@ -34,7 +34,7 @@ from pathlib import Path
 from . import vcf_filters as F
 from .assets import resolve_bed
 from .. import __version__
-from .bcftools import VARIANT_TYPES, index_vcf, variant_type_counts
+from .bcftools import EXTRA_COUNTS, VARIANT_TYPES, index_vcf, variant_type_counts
 from .regenotype import filter_ad_regenotype
 from .reporting import detail, listing, say
 from .strip_format import strip_stale_format
@@ -101,6 +101,21 @@ def _fws(inp, out, **kw):
     return dropped
 
 
+def _spanning_del(inp, out, **kw):
+    """Recode `*` calls to missing, saying how many samples that cost.
+
+    Said out loud because nothing else in the run would mention it: the samples a site loses
+    here do not show up as dropped records, only as missingness at sites that still look
+    perfectly healthy in the variant counts.
+    """
+    from .spanning_del import spanning_del_note
+
+    st = F.spanning_del_filter(inp, out, **kw)
+    say(spanning_del_note(st))
+    return st
+
+
+_spanning_del.target = F.spanning_del_filter
 _sample_coverage.target = F.sample_coverage_filter
 _fws.target_ref = (".fws", "fws_filter")
 
@@ -115,6 +130,7 @@ STEPS = {
     "paralog_mask": _region(F.paralog_mask),
     "filter_ad_regenotype": filter_ad_regenotype,
     "strip_stale_format": strip_stale_format,
+    "spanning_del_filter": _spanning_del,
     "biallelic_snp_filter": F.biallelic_snp_filter,
     "sample_coverage_filter": _sample_coverage,
     "fws_filter": _fws,
@@ -152,6 +168,14 @@ WHITELISTABLE = {
     "no_alt_filter", "hard_qc_filter", "singleton_filter_add_ads", "tandem_repeat_mask",
     "core_region_filter", "paralog_mask", "locus_missingness_filter", "maf_filter",
 }
+
+#: Steps that do **not** honour the whitelist but say what it would have saved. A whitelist
+#: that silently does nothing is worse than no whitelist: it reads as a guarantee. So for
+#: these the whitelist becomes a diagnostic instead -- you learn that the resistance codon you
+#: asked to protect was multiallelic at the moment it is removed, rather than weeks later when
+#: it is missing from a table. See
+#: :func:`~plasgenomicsutils.lib.vcf_filters.report_whitelisted_drops`.
+WARN_WHITELIST_DROPS = {"biallelic_snp_filter"}
 
 #: name -> callable(input_path, output_path, **params). A report reads the callset and
 #: writes a table; it never changes the data.
@@ -198,10 +222,36 @@ DEFAULT_CONFIG = {
         {"name": "paralog_mask", "enabled": False,
          "params": {"bed": "builtin:pf3d7_paralog_genes"}},
         {"name": "filter_ad_regenotype"},
-        # both tests written out at their defaults so the split is discoverable: `biallelic`
-        # off keeps multiallelic SNPs for downstream tools that can read them.
+        # Off by default, and written out so the choice is discoverable. `*` says a deletion
+        # called elsewhere covers this position, and recoding it to missing throws away a
+        # real, confident observation: a site with 20 deleted samples and 5 carrying a
+        # variant comes out looking as though 20 samples could not be called there, which is
+        # not what the data says. In P. falciparum that matters more than usual -- the
+        # dimorphic regions mean a deletion is often the other haplotype rather than a
+        # dropout, and which samples carry it is a result, not noise.
+        #
+        # Turn it on when the question is about the variants of the *non-deleted* strains
+        # and the deletion itself is not the subject -- then the recode is what stops a `*`
+        # being scored as a third allele. Its position here is the point: it must run BEFORE
+        # the biallelic test, or the records it would rescue are already gone. With it on,
+        # 312 records in the shipped Pf7 fixture come back as ordinary biallelic SNPs and the
+        # genuine multiallelic count falls from 544 to 232.
+        {"name": "spanning_del_filter", "enabled": False},
+        # `snps_only` on, `biallelic` OFF: the callset keeps multiallelic SNPs.
+        #
+        # The two tests are separate on purpose and both are written out so the choice is
+        # discoverable. A site with three alleles is where independent origins sit -- at
+        # pfpx1 codon 384, D384A, D384G and D384Y arose separately -- and `-M2` deletes
+        # exactly those. Everything this pipeline feeds can now read them: hmmibd-rs models
+        # per-allele frequencies, Fws is `1 - sum(p^2)` over all alleles, `maf_filter` uses
+        # the second-most-common allele, and the QC arithmetic here counts every ALT.
+        #
+        # Set `biallelic: true` when the consumer genuinely requires one ALT per record --
+        # and note that the R package's `load_genotypes()` still does, until its backend is
+        # replaced. It says how many records it skipped, so the loss is visible rather than
+        # silent, but it is a loss.
         {"name": "biallelic_snp_filter",
-         "params": {"snps_only": True, "biallelic": True, "mnp_handling": "split"}},
+         "params": {"snps_only": True, "biallelic": False, "mnp_handling": "split"}},
         {"name": "sample_coverage_filter"},
         {"name": "locus_missingness_filter"},
         {"name": "maf_filter", "params": {"maf_min": 0.02}},  # maf_max defaults to 1 - maf_min
@@ -373,7 +423,10 @@ def type_counts_note(counts: dict) -> str:
         return ""
     named = [f"snps {counts.get('snps', 0):,}"]
     named += [f"{n} {counts[n]:,}" for n in VARIANT_TYPES if n != "snps" and counts.get(n)]
-    return "   (" + ", ".join(named) + ")"
+    # after a "+", because these are counted on top of the classes rather than beside them
+    extra = [f"{n} {counts[n]:,}" for n in EXTRA_COUNTS if counts.get(n)]
+    body = ", ".join(named) + ("; + " + ", ".join(extra) if extra else "")
+    return "   (" + body + ")"
 
 
 def _types_note(counts: dict) -> str:
@@ -455,9 +508,17 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
                     raise SystemExit(f"ERROR: unknown pipeline report '{name}'. "
                                      f"Known: {', '.join(REPORTS)}")
                 if name == "singleton_counts" and "singleton_filter_add_ads" in seen:
+                    # Not "every sample scores zero" any more: the filter is a RECORD-level
+                    # test (keep the record when some alternate has enough carriers) and the
+                    # count is a per-ALLELE one, so a singleton alternate sitting beside a
+                    # well-supported one survives the filter and is still counted. What is
+                    # lost either way is every singleton whose record was dropped, which is
+                    # most of them -- the number that comes out is not the cohort's.
                     say(f"[{i:02d}] WARNING: singleton_counts runs after "
-                          f"singleton_filter_add_ads, which drops the variants it counts -- "
-                          f"every sample will score zero. Move it earlier.")
+                          f"singleton_filter_add_ads, which has already dropped most of the "
+                          f"variants it counts -- the counts will be a fraction of the "
+                          f"cohort's and are not comparable with a run that counts first. "
+                          f"Move it earlier.")
                 say(f"[{i:02d}] {name} (report) -> {out_path}")
                 n = REPORTS[name](prev, out_path, **params)
                 tally.append({"step": name, "path": out_path, "report": True, "rows": n})
@@ -469,6 +530,8 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
                                  f"Known: {', '.join(STEPS)}")
             say(f"[{i:02d}] {name} -> {out_path}")
             rescued = STEPS[name](prev, out_path, **params)
+            if config.get("keep_bed") and name in WARN_WHITELIST_DROPS:
+                F.report_whitelisted_drops(prev, out_path, config["keep_bed"], name)
             seen.append(name)
             index_vcf(out_path)   # keep intermediates indexed (quiets pysam, enables region queries)
             counts = variant_type_counts(out_path)

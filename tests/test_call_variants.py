@@ -554,3 +554,61 @@ def test_merge_rules_only_name_tags_the_header_has(tmp_path):
     C.call_variants(fa, plain, bams=bams[:2], regions=bed, annotations="FORMAT/AD")
     assert "ADF" not in C.merge_info_rules(plain) and "FS" not in C.merge_info_rules(plain)
     assert "DP:sum" in C.merge_info_rules(plain)
+
+
+def test_dp4_pools_every_alternate_so_summing_it_across_groups_is_sound(tmp_path):
+    """Why ``GROUP_MERGE_RULES["DP4"] = "sum"`` is right, and ``STALE_INFO_FIELDS`` differs.
+
+    ``DP4`` is ``Number=4`` — ref-forward, ref-reverse, alt-forward, alt-reverse — and the
+    audit of 2026-09-10 first read "alt" as meaning ALT1, which would make summing it
+    across groups add different alleles' counts together once harmonize reorders the ALTs.
+    It does not: bcftools pools **every** non-reference base into the alt pair, so DP4 is
+    invariant to ALT order and a sum over groups is the total non-reference depth, which is
+    what the merged record means.
+
+    The cross-cohort ``STALE_INFO_FIELDS`` drops DP4 for a different reason: that path
+    cleans AD and re-genotypes, so the counts stop matching the edited depths. Group mode
+    passes ``min_ad=0, min_af=0`` and ``regenotype=False``, so nothing is edited and DP4
+    stays true. Both lists are right for their own path; this test is what keeps them from
+    being "harmonised" into agreement by someone reading only one of them.
+    """
+    pysam = pytest.importorskip("pysam")
+    fa, bams, bed = _cohort(tmp_path)
+    out = str(tmp_path / "joint.bcf")
+    C.call_variants(fa, out, bams=bams, regions=bed, threads=1)
+
+    seen_multiallelic = 0
+    with pysam.VariantFile(out) as vf:
+        for r in vf:
+            if not r.alts or len(r.alts) < 2:
+                continue
+            seen_multiallelic += 1
+            ad = dict(zip(r.alleles, r.info["AD"]))
+            dp4 = tuple(r.info["DP4"])
+            assert dp4[0] + dp4[1] == ad[r.ref]
+            assert dp4[2] + dp4[3] == sum(v for k, v in ad.items() if k != r.ref)
+            # and specifically NOT the ALT1-only reading
+            assert dp4[2] + dp4[3] != ad[r.alts[0]]
+    assert seen_multiallelic >= 1, "the cohort fixture must produce a multiallelic record"
+
+
+def test_dp4_survives_group_mode_and_still_pools_every_alternate(tmp_path):
+    """The property has to hold after harmonize reorders ALTs, not just at call time."""
+    pysam = pytest.importorskip("pysam")
+    fa, bams, bed = _cohort(tmp_path)
+    grouped = str(tmp_path / "grouped.bcf")
+    C.call_variants(fa, grouped, bams=bams, regions=bed, threads=1, bam_batch=2,
+                    skip_indels=True)
+
+    seen = 0
+    with pysam.VariantFile(grouped) as vf:
+        assert "DP4" in vf.header.info, "DP4 must not be stripped in group mode"
+        for r in vf:
+            if not r.alts or len(r.alts) < 2:
+                continue
+            seen += 1
+            ad = dict(zip(r.alleles, r.info["AD"]))
+            dp4 = tuple(r.info["DP4"])
+            assert dp4[0] + dp4[1] == ad[r.ref]
+            assert dp4[2] + dp4[3] == sum(v for k, v in ad.items() if k != r.ref)
+    assert seen >= 1

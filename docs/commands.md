@@ -62,6 +62,7 @@ Making a callset, merging one, converting one.
 | `core_region_filter` | Keep only variants inside the core-genome BED |
 | `paralog_mask` | Remove variants overlapping paralogous/multigene-family genes |
 | `filter_ad_regenotype` | Clean within-sample AD artifacts by depth/frequency, then re-genotype |
+| `spanning_del_filter` | Recode `*` calls as missing and drop the allele, leaving the non-deleted strains' variants |
 | `biallelic_snp_filter` | Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping |
 | `sample_coverage_filter` | Drop low-coverage samples; refresh AC/AN/AF |
 | `locus_missingness_filter` | Keep loci with low missingness and high per-sample coverage |

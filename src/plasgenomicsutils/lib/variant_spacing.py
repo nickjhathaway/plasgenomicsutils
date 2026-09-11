@@ -141,6 +141,15 @@ def _positions(path: str, locus: str | None, bed: str | None,
     for line in p.stdout.splitlines():
         chrom, pos = line.split("\t")
         by.setdefault(chrom, []).append(int(pos))
+    # A split callset (`bcftools norm -m-`, one record per ALT at one position) would read
+    # here as a run of zero-length gaps, and every density and gap statistic would be wrong
+    # by however many alternates the callset carries. This is the same refusal
+    # `SnpPanel.from_vcf` makes, for the same reason: the merged record is the interchange
+    # form, and de-duplicating quietly would let a wrong number through.
+    from .vcf_io import _reject_duplicate_positions
+    import pandas as pd
+    frame = pd.DataFrame({"snp_id": [f"{c}:{x}" for c, v in by.items() for x in v]})
+    _reject_duplicate_positions(frame, path, col="snp_id")
     return {c: np.asarray(v, dtype=np.int64) for c, v in by.items()}
 
 

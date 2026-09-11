@@ -36,8 +36,11 @@ with values from the other.
 Because heterozygosity is written for ``k`` alleles, a **microhaplotype** locus from an
 amplicon panel -- one record whose alleles are the haplotypes and whose depths are the
 per-haplotype read counts -- is just another multiallelic site. Such loci often have no
-allele above 50%, so the MAF bins do not suit them; ``n_bins=0`` regresses per locus
-instead of per bin (see :func:`compute_fws`).
+allele above 50%, so ``1 - max(p)`` runs past the biallelic grid's top of 0.5; the grid
+extends upward in the same bin width to hold them, so they bin with sites of similar
+heterozygosity rather than being clipped in with the 0.45-0.5 biallelic ones. For a panel
+that is mostly such loci ``n_bins=0`` regresses per locus instead of per bin (see
+:func:`compute_fws`).
 
 Depths are read from a bcftools-query **AD table** (:func:`read_ad_table`), a **VCF/BCF**
 (:func:`read_ad_vcf`) or a long-format **allele table** (:func:`read_allele_table`) into an
@@ -563,7 +566,19 @@ def compute_fws(depths, alt=None, *, estimator="regression", min_depth=0, n_bins
         n_info[~ok] = 0
         return fws, n_info
 
-    edges = np.linspace(0, 0.5, n_bins + 1)
+    # Bins of width 0.5 / n_bins over [0, 0.5] -- moimix's grid, built for a biallelic
+    # site whose minor-allele fraction cannot exceed 0.5. A site with k alleles has
+    # `maf = 1 - max(p)` up to 1 - 1/k, and used to fall off the top of that grid: the
+    # regression estimator gave every such site one shared overflow bin (findInterval's
+    # n_bins + 1), the ratio estimator clipped them into the 0.45-0.5 bin beside biallelic
+    # sites of half their heterozygosity. Neither is a bin of *similar* sites, which is what
+    # the binning is for. So keep the biallelic grid exactly as it was -- nothing biallelic
+    # moves -- and extend it upward in the same width as far as the data reach.
+    width = 0.5 / n_bins
+    maf_top = np.nanmax(maf) if np.isfinite(maf).any() else 0.5
+    n_extra = int(np.ceil(max(0.0, maf_top - 0.5) / width - 1e-9)) if maf_top > 0.5 else 0
+    edges = np.linspace(0, 0.5 + n_extra * width, n_bins + n_extra + 1)
+    n_bins_eff = n_bins + n_extra
 
     if estimator == "regression":
         # moimix::getFws — 10 MAF bins via findInterval, global per-bin population-het
@@ -604,13 +619,13 @@ def compute_fws(depths, alt=None, *, estimator="regression", min_depth=0, n_bins
         # Fws = 1 - Σ_bins mean(Hw) / Σ_bins mean(Hs), over polymorphic sites, with
         # per-sample bin means.
         site_ok = (Hs > 0) & (alt_present >= min_alt_samples) & np.isfinite(maf)
-        bin_idx = np.clip(np.digitize(maf, edges[1:-1]), 0, n_bins - 1)
+        bin_idx = np.clip(np.digitize(maf, edges[1:-1]), 0, n_bins_eff - 1)
         for s in range(n_samples):
             usable = site_ok & (depth[:, s] >= min_depth)
             if not usable.any():
                 continue
             sum_hw = sum_hs = 0.0
-            for b in range(n_bins):
+            for b in range(n_bins_eff):
                 sel = usable & (bin_idx == b)
                 if sel.any():
                     sum_hw += np.nanmean(Hw[sel, s])

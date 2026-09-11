@@ -401,9 +401,15 @@ def test_split_leaves_multiallelic_sites_whole(tmp_path):
                          ("300", "A", "G"), ("301", "T", "C")]
 
 
-def test_a_record_whose_only_alt_is_a_spanning_deletion_is_dropped(tmp_path):
-    """`T > *` says an upstream deletion covers this position and nothing else: two alleles
-    by count, no variant to call. `A > *,T` is a real SNP that merely sits under one."""
+def test_snps_only_drops_every_record_carrying_a_spanning_deletion(tmp_path):
+    """A `*` disqualifies the record from `--snps-only`, whatever its other alleles read.
+
+    `--snps-only` asks for sites where every sample has a base to compare, and a `*` says
+    part of the cohort has no sequence there. `T > *` is the easy case; `A > *,T` is the one
+    that matters, and it goes too. Turning the type test off keeps it, because "biallelic" is
+    a claim about the allele count rather than about having a base -- only a record with no
+    real allele at all is dropped there.
+    """
     hdr = ["##fileformat=VCFv4.2", "##contig=<ID=c1,length=10000>",
            '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2",
@@ -412,13 +418,16 @@ def test_a_record_whose_only_alt_is_a_spanning_deletion_is_dropped(tmp_path):
            "c1\t300\t.\tA\t*,T\t.\t.\t.\tGT\t1/2\t1/1"]
     v = tmp_path / "star.vcf"
     v.write_text("\n".join(hdr) + "\n")
-    strict, loose = str(tmp_path / "a.bcf"), str(tmp_path / "b.bcf")
+    strict, loose, no_type = (str(tmp_path / "a.bcf"), str(tmp_path / "b.bcf"),
+                              str(tmp_path / "c.bcf"))
     F.biallelic_snp_filter(str(v), strict, trim=False)
-    F.biallelic_snp_filter(str(v), loose, trim=False, biallelic=False,
-                           mnp_handling="keep")
-    assert _kept(strict) == [100]                    # the multiallelic goes to `biallelic`
-    assert _kept(loose) == [100, 300]                # ...and comes back when it is off
-    assert 200 not in _kept(loose)
+    F.biallelic_snp_filter(str(v), loose, trim=False, biallelic=False, mnp_handling="keep")
+    F.biallelic_snp_filter(str(v), no_type, trim=False, snps_only=False, biallelic=True)
+    assert _kept(strict) == [100]
+    assert _kept(loose) == [100]                     # the `*,T` record goes too now
+    # With no type test the star rule is the narrow one: `T > *` is dropped for having no
+    # real allele, and `A > *,T` only because `-M2` counts three. Nothing here turns on `*`.
+    assert _kept(no_type) == [100]
 
 
 def test_an_unknown_mnp_handling_is_named(tmp_path):
@@ -441,3 +450,45 @@ def test_split_breaks_up_a_multiallelic_mnp_too(tmp_path):
     # both ALTs carry G at the first base, so that position collapses; the second stays
     # multiallelic because that is where the two alleles actually differ
     assert _rec(out) == [("300", "A", "G"), ("301", "T", "C,G")]
+
+
+@needs_bcftools
+def test_snps_only_drops_a_record_carrying_a_spanning_deletion(tmp_path):
+    """A `*` beside a SNP means some samples are deleted there, so it is not a clean SNP site.
+
+    `--snps-only` is a request for sites where every sample has a base to compare. A record
+    like `A > *,T` does not qualify: whatever T does, some fraction of the cohort has no
+    sequence at that position at all. Keeping it made `--snps-only` mean two different things
+    depending on whether the deletion happened to be called.
+
+    `spanning_del_filter` is the way to keep such a site: it recodes the deleted calls as
+    missing and drops the allele, after which the record really is a clean biallelic SNP.
+    """
+    rows = [
+        (100, "A", "T", "0/1:5,5"),        # plain SNP                     -> keep
+        (200, "A", "*,T", "0/1:5,5,0"),    # SNP under a deletion          -> drop
+        (300, "A", "T,*", "0/1:5,5,0"),    # ALT order must not matter     -> drop
+        (400, "A", "*", "0/1:5,5"),        # nothing but a deletion        -> drop
+        (500, "A", "T,G", "0/1:5,5,0"),    # multiallelic SNP, no deletion -> keep
+        (600, "A", "*,T,G", "0/1:5,5,0,0"),  # multiallelic under one      -> drop
+    ]
+    body = "".join(f"chr1\t{p}\t.\t{r}\t{a}\t.\t.\t.\tGT:AD\t{c}\t{c}\n"
+                   for p, r, a, c in rows)
+    src = _vcf(tmp_path / "in.vcf", body)
+    out = str(tmp_path / "o.bcf")
+    F.biallelic_snp_filter(src, out, trim=False, snps_only=True, biallelic=False,
+                           mnp_handling="remove")
+    assert _positions(out) == [100, 500]
+
+
+@needs_bcftools
+def test_the_spanning_del_filter_is_what_brings_those_sites_back(tmp_path):
+    """Recoded first, the same record passes --snps-only as the SNP it is."""
+    src = _vcf(tmp_path / "one.vcf",
+               "chr1\t200\t.\tA\t*,T\t.\t.\t.\tGT:AD\t1/1:0,9,0\t2/2:0,0,9\n")
+    recoded = str(tmp_path / "r.bcf")
+    F.spanning_del_filter(src, recoded)
+    out = str(tmp_path / "o.bcf")
+    F.biallelic_snp_filter(recoded, out, trim=False, snps_only=True, biallelic=True,
+                           mnp_handling="remove")
+    assert _positions(out) == [200]

@@ -112,3 +112,155 @@ def test_half_decay_interpolates_and_reports_nothing_when_flat():
     h = half_decay(df).set_index("group")["half_decay_bp"]
     assert 2000 < h["a"] < 3000        # crosses 0.2 between the second and third bins
     assert np.isnan(h["b"])            # never halves
+
+
+# --- multiallelic sites: decision 2 is to drop them, counted -------------------------
+
+def _ld_vcf(tmp_path):
+    """Two biallelic SNPs and one triallelic, all with the same carriers.
+
+    `gt_types` reports 3 for any homozygous-alternate call, so `1/1` and `2/2` were both
+    coded as dosage 2 -- two different alleles collapsed into one symbol. That inflates r²
+    between multiallelic sites, and unlike a dropped site it leaves no trace in the SNP
+    count.
+    """
+    samples = [f"s{i}" for i in range(1, 9)]
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples)]
+    rows = [
+        ("1000", "C", ["0/0"] * 4 + ["1/1"] * 4),
+        ("2000", "C,G", ["0/0"] * 4 + ["1/1"] * 2 + ["2/2"] * 2),
+        ("3000", "C", ["0/0"] * 4 + ["1/1"] * 4),
+    ]
+    for pos, alt, gts in rows:
+        hdr.append(f"chr1\t{pos}\t.\tA\t{alt}\t.\t.\t.\tGT\t" + "\t".join(gts))
+    p = tmp_path / "ld.vcf"
+    p.write_text("\n".join(hdr) + "\n")
+    return str(p)
+
+
+def test_multiallelic_sites_are_dropped_not_merged(tmp_path):
+    from plasgenomicsutils.lib.ld import read_dosages
+
+    gn, chrom, pos, _names, st = read_dosages(_ld_vcf(tmp_path))
+    assert gn.shape[0] == 2, "the triallelic record must not reach the dosage matrix"
+    assert list(pos) == [999, 2999]
+    assert st["multiallelic_skipped"] == 1
+    assert st["variants_read"] == 3
+
+
+def test_the_drop_is_reported_rather_than_silent(tmp_path, capsys):
+    """A dropped site is visible in the SNP count; a merged one is not."""
+    from plasgenomicsutils.lib.ld import read_dosages
+
+    read_dosages(_ld_vcf(tmp_path))
+    out = capsys.readouterr().out
+    assert "multiallelic" in out
+    assert "1" in out
+
+
+def test_a_biallelic_only_file_reports_no_skips_and_is_unchanged(tmp_path):
+    from plasgenomicsutils.lib.ld import read_dosages
+
+    samples = [f"s{i}" for i in range(1, 9)]
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples)]
+    for pos in (1000, 2000):
+        hdr.append(f"chr1\t{pos}\t.\tA\tC\t.\t.\t.\tGT\t"
+                   + "\t".join(["0/0"] * 4 + ["1/1"] * 4))
+    p = tmp_path / "bi.vcf"
+    p.write_text("\n".join(hdr) + "\n")
+    gn, _c, pos, _n, st = read_dosages(str(p))
+    assert gn.shape[0] == 2
+    assert st["multiallelic_skipped"] == 0
+    assert list(pos) == [999, 1999]
+
+
+def test_the_two_maf_definitions_now_agree(tmp_path):
+    """`ld_decay --maf` and `maf_filter --maf-min` must mean the same thing.
+
+    They did not: LD computed the *sum of alternates*, which `maf_filter`'s docstring
+    explicitly rejects, while `maf_filter` uses the second-most-common allele. The two
+    differ only at a multiallelic site -- so dropping those, which decision 2 asks for
+    anyway, is what makes the two definitions coincide.
+    """
+    from plasgenomicsutils.lib.ld import _maf, read_dosages
+
+    gn, _c, _p, _n, _st = read_dosages(_ld_vcf(tmp_path))
+    maf, n = _maf(gn)
+    # every surviving site is biallelic 4/4, so both readings give 0.5
+    assert list(n) == [8, 8]
+    assert maf.tolist() == pytest.approx([0.5, 0.5])
+
+
+# --- `*` is not an alternate base -----------------------------------------------------
+#
+# `read_dosages` skips multiallelic records, which is right: r-squared is a squared
+# correlation between two binary indicators and a multiallelic locus has no unique scalar
+# summary. But it counted `*` towards that, so `A > T,*` -- a biallelic SNP with a
+# spanning-deletion note attached -- was thrown away as multiallelic. On a real Uganda
+# callset that removed a large share of the panel, and LD decay is precisely the analysis
+# that needs SNP density.
+#
+# The calls that ARE the deletion still have to go: there is no base there to correlate, so
+# they read as missing, which is what -1 already means to rogers_huff_r.
+
+_LD_HDR = (
+    "##fileformat=VCFv4.2\n"
+    "##contig=<ID=chr1,length=100000>\n"
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
+)
+
+
+def _star_vcf(tmp_path, samples, rows, name="ld.vcf"):
+    hdr = _LD_HDR + ("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
+                     + "\t".join(samples) + "\n")
+    body = "".join(f"chr1\t{pos}\t.\tA\t{alt}\t.\t.\t.\tGT\t" + "\t".join(gts) + "\n"
+                   for pos, alt, gts in rows)
+    p = tmp_path / name
+    p.write_text(hdr + body)
+    return str(p)
+
+
+def test_a_snp_beside_a_spanning_deletion_is_read_not_skipped(tmp_path):
+    pytest.importorskip("cyvcf2")
+    from plasgenomicsutils.lib.ld import read_dosages
+
+    samples = [f"s{i}" for i in range(1, 7)]
+    rows = [
+        (1000, "T", ["0/0", "0/0", "0/0", "1/1", "1/1", "1/1"]),
+        (2000, "T,*", ["0/0", "0/0", "2/2", "1/1", "1/1", "1/1"]),   # SNP + deletion
+        (3000, "T,G", ["0/0", "1/1", "1/1", "2/2", "2/2", "0/0"]),   # truly multiallelic
+    ]
+    gn, _chrom, pos, _names, counts = read_dosages(_star_vcf(tmp_path, samples, rows))
+    assert list(pos) == [999, 1999]
+    assert counts["multiallelic_skipped"] == 1        # only the real one
+    assert counts["spanning_del_masked"] == 1
+
+
+def test_the_deleted_haplotype_reads_as_missing_not_reference(tmp_path):
+    pytest.importorskip("cyvcf2")
+    from plasgenomicsutils.lib.ld import read_dosages
+
+    samples = [f"s{i}" for i in range(1, 7)]
+    rows = [(2000, "T,*", ["0/0", "0/0", "2/2", "1/1", "1/1", "1/1"])]
+    gn, _c, _p, _n, _k = read_dosages(_star_vcf(tmp_path, samples, rows))
+    # s3 carries the deletion: -1, not 0 (which would say "confidently reference") and not
+    # 2 (which would say "carries T")
+    assert list(gn[0]) == [0, 0, -1, 2, 2, 2]
+
+
+def test_a_record_with_nothing_but_a_deletion_carries_no_snp(tmp_path):
+    pytest.importorskip("cyvcf2")
+    from plasgenomicsutils.lib.ld import read_dosages
+
+    samples = [f"s{i}" for i in range(1, 7)]
+    rows = [
+        (1000, "T", ["0/0", "0/0", "0/0", "1/1", "1/1", "1/1"]),
+        (2000, "*", ["0/0", "0/0", "1/1", "1/1", "0/0", "0/0"]),
+    ]
+    _gn, _c, pos, _n, counts = read_dosages(_star_vcf(tmp_path, samples, rows))
+    assert list(pos) == [999]
+    assert counts["multiallelic_skipped"] == 1

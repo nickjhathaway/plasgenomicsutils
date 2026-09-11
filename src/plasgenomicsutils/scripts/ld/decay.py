@@ -23,6 +23,14 @@ def get_parser_ld_decay() -> argparse.ArgumentParser:
         description="Mean r-squared between SNP pairs, binned by the distance between "
                     "them, for each metadata group. How fast it falls says how freely the "
                     "population recombines",
+        epilog="Multiallelic records are skipped, and the count is reported. r-squared is a "
+               "squared correlation between two binary indicators; two multiallelic loci "
+               "have no unique scalar summary, and the 0/2 dosage coding cannot express one "
+               "anyway -- 1/1 and 2/2 both read as dosage 2, so two different alleles would "
+               "merge into one symbol and inflate the result. LD decay needs SNP density "
+               "rather than every site, so the skip costs little and is visible in the "
+               "variant count, which a merge would not be.\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--vcf", required=True, help="VCF/BCF (the full, unpruned callset -- "
                                                 "LD-pruning removes what this measures)")
@@ -38,7 +46,9 @@ def get_parser_ld_decay() -> argparse.ArgumentParser:
                    help="Number of distance bins (default: %(default)s)")
     p.add_argument("--maf", type=float, default=LD_MIN_MAF,
                    help="Minor-allele-frequency floor within each group; rare alleles "
-                        "give noisy, systematically low r-squared (default: %(default)s)")
+                        "give noisy, systematically low r-squared (default: %(default)s). "
+                        "Multiallelic records are skipped before this is computed, so it "
+                        "means the same thing as maf_filter's --maf-min.")
     p.add_argument("--max-snps", type=int, default=LD_MAX_SNPS,
                    help="SNPs kept per chromosome before the pairwise scan, evenly "
                         "spaced. The scan is quadratic in SNPs inside one window "
@@ -76,8 +86,9 @@ def ld_decay():
         meta = meta.dropna(subset=["sample", args.group_col])
         samples = meta["sample"].astype(str).tolist()
 
-    gn, chrom, pos, names = read_dosages(args.vcf, samples=samples, regions=args.region,
-                                         het=args.het, min_depth=args.min_depth)
+    gn, chrom, pos, names, _counts = read_dosages(
+        args.vcf, samples=samples, regions=args.region,
+        het=args.het, min_depth=args.min_depth)
     print(f"[info] {gn.shape[0]:,} variants x {gn.shape[1]} samples")
     if args.meta:
         groups = meta.set_index("sample")[args.group_col].reindex(names).to_numpy()

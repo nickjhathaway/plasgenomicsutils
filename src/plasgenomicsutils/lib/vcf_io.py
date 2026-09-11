@@ -10,6 +10,34 @@ from .reference import normalise_chr
 from ..utils.small_utils import Utils
 
 
+def _reject_duplicate_positions(df: pd.DataFrame, path: str, col: str = "snp_id"):
+    """A panel names positions, so one position must appear once.
+
+    ``bcftools norm -m-`` writes one record per ALT **at the same position**, so a split
+    callset gives several panel entries for one SNP -- and every count built on the panel is
+    then inflated by however many alternates the callset happened to carry: its length, the
+    IBD matrix columns a block covers, the variant density per cM.
+
+    The merged record is this package's interchange form, so split input is a mistake rather
+    than a supported shape. De-duplicating silently would let the run continue on a panel
+    that no longer matches the callset it came from, which is the failure this exists to
+    prevent, so it refuses instead.
+    """
+    dup = df[df.duplicated(subset=[col], keep=False)]
+    if dup.empty:
+        return
+    names = dup[col].drop_duplicates().tolist()
+    shown = ", ".join(str(n) for n in names[:5])
+    more = f" (and {len(names) - 5:,} more)" if len(names) > 5 else ""
+    raise SystemExit(
+        f"ERROR: {path} lists {len(names):,} position(s) more than once: {shown}{more}.\n"
+        "  That is the shape `bcftools norm -m-` produces -- one record per ALT at one "
+        "position.\n"
+        "  A SNP panel names positions, so each must appear once. Put the callset back "
+        "together with `bcftools norm -m +any` first."
+    )
+
+
 class SnpPanel:
     """A SNP panel loaded from a VCF or BED, plus a fast per-chromosome index.
 
@@ -46,7 +74,9 @@ class SnpPanel:
                 src = parts[2] if len(parts) >= 3 and parts[2] not in ("", ".") else None
                 rows.append({"snp_id": snp_label(chrom, pos0), "chr": chrom,
                              "pos0": pos0, "source_id": src})
-        return cls(pd.DataFrame(rows))
+        df = pd.DataFrame(rows)
+        _reject_duplicate_positions(df, path)
+        return cls(df)
 
     @classmethod
     def from_bed(cls, path: str) -> "SnpPanel":
@@ -65,7 +95,9 @@ class SnpPanel:
                 src = parts[3] if len(parts) >= 4 and parts[3] else None
                 rows.append({"snp_id": snp_label(chrom, start), "chr": chrom,
                              "pos0": start, "source_id": src})
-        return cls(pd.DataFrame(rows))
+        df = pd.DataFrame(rows)
+        _reject_duplicate_positions(df, path)
+        return cls(df)
 
     @classmethod
     def load(cls, path: str, fmt: str) -> "SnpPanel":
@@ -123,4 +155,9 @@ def positions_frame(path: str, fmt: str) -> pd.DataFrame:
                 continue
             p = line.rstrip("\n").split("\t")
             rows.append((normalise_chr(p[0]), int(p[1]) - shift))
-    return pd.DataFrame(rows, columns=["chr", "pos0"])
+    df = pd.DataFrame(rows, columns=["chr", "pos0"])
+    # a duplicate position reads as a zero-length gap here, which drags the spacing
+    # quantiles down without changing anything that looks obviously wrong
+    df["snp_id"] = df["chr"].astype(str) + ":" + df["pos0"].astype(str)
+    _reject_duplicate_positions(df, path)
+    return df.drop(columns=["snp_id"])

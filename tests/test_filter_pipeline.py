@@ -5,6 +5,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
+from plasgenomicsutils.lib.singletons import count_singletons
+
 import pytest
 
 DATA = Path(__file__).parent / "data"
@@ -45,17 +49,30 @@ def test_a_report_step_writes_a_table_and_leaves_the_callset_alone(tmp_path):
 
 
 def test_counting_singletons_after_the_singleton_filter_is_warned_about(tmp_path, capsys):
-    """The filter drops exactly what the report counts, so the order is a real trap."""
+    """The filter drops most of what the report counts, so the order is a real trap.
+
+    Not *all* of it, and the distinction matters. The filter is a RECORD-level test -- keep
+    the record when some alternate is carried by more than `min_samples` samples -- while the
+    count is per ALLELE. A singleton alternate sitting beside a well-supported one therefore
+    survives the filter and is still counted, so the number that comes out is neither zero
+    nor the cohort's. It is a fraction of the cohort's, and not comparable with a run that
+    counts first.
+    """
     from plasgenomicsutils.lib.filter_pipeline import run_pipeline
+
+    before = count_singletons(str(BCF), max_missing_frac=1.0)[0]["n_singleton"].sum()
 
     cfg = {"steps": [
         {"name": "singleton_filter_add_ads"},
         {"name": "singleton_counts", "report": True, "ext": "tsv"},
     ]}
-    run_pipeline(str(BCF), str(tmp_path), cfg, emit_snp_bed=False)
+    tally = run_pipeline(str(BCF), str(tmp_path), cfg, emit_snp_bed=False)
     out = capsys.readouterr().out
     assert "WARNING" in out and "Move it earlier" in out
-    assert "0 singletons" in out
+
+    report = next(t for t in tally if t.get("report"))
+    after = pd.read_csv(report["path"], sep="\t")["n_singleton"].sum()
+    assert 0 < after < before
 
 
 def test_the_default_config_counts_singletons_before_filtering_them():
@@ -102,11 +119,13 @@ def test_paralog_masking_is_off_by_default_but_present_to_turn_on():
     step = next(s for s in DEFAULT_CONFIG["steps"] if s["name"] == "paralog_mask")
     assert step["enabled"] is False              # discoverable, not silently absent
     assert step["params"]["bed"] == "builtin:pf3d7_paralog_genes"
-    # exactly two steps ship switched off, and both for a stated reason: paralog masking is
-    # a choice about which regions to trust, and fws_filter changes which infections the
-    # callset describes. Anything else arriving here off is a mistake, not a default.
+    # exactly three steps ship switched off, each for a stated reason: paralog masking is a
+    # choice about which regions to trust; fws_filter changes which infections the callset
+    # describes; and spanning_del_filter discards a confident observation that sequence is
+    # absent, which in P. falciparum is frequently the other dimorphic haplotype rather than
+    # a dropout. Anything else arriving here off is a mistake, not a default.
     off = {s["name"] for s in DEFAULT_CONFIG["steps"] if s.get("enabled", True) is False}
-    assert off == {"paralog_mask", "fws_filter"}
+    assert off == {"paralog_mask", "fws_filter", "spanning_del_filter"}
 
 
 def test_the_default_config_still_masks_tandem_repeats_and_keeps_the_core():
@@ -165,6 +184,13 @@ def test_the_default_pipeline_writes_a_summary_for_every_row(tmp_path):
     assert header[3:-3] == ["snps", "indels", "mnps", "mixed", "spanning_del", "other",
                             "no_alt"]
     cols = {n: i for i, n in enumerate(header)}
+    # the class columns partition the records, so they sum to `count`
+    for r in rows[1:]:
+        f = r.split("\t")
+        cls = [f[cols[n]] for n in ("snps", "indels", "mnps", "mixed", "spanning_del",
+                                    "other", "no_alt")]
+        if f[cols["count"]] and all(x != "" for x in cls):
+            assert sum(int(x) for x in cls) == int(f[cols["count"]])
     # nothing is whitelisted in this config, and nothing was pruned
     assert all(r.split("\t")[cols["rescued"]] == "" for r in rows[1:])
     assert all(r.split("\t")[cols["removed"]] == "" for r in rows[1:])
@@ -509,10 +535,15 @@ def test_a_record_is_one_class_and_a_mixed_one_is_not_a_snp():
     # as an MNP invents a population of them that is not in the data
     assert classify_record("TTATA", "CTATA") == "snps"
     assert classify_record("ATCG", "GTCA") == "mnps"      # two bases really do differ
-    # `*` is its own class: routinely the largest one in a joint callset, and a different
-    # problem from a symbolic allele or a breakend
+    # A `*` says some samples have a deletion covering this position, so the record is not a
+    # clean SNP site whatever its other alleles read. `--snps-only` drops it, and the class
+    # has to agree or the tally would promise records the filter then removes.
     assert classify_record("T", "*") == "spanning_del"
     assert classify_record("A", "*,T") == "spanning_del"
+    assert classify_record("A", "T,*") == "spanning_del"   # ALT order must not matter
+    assert classify_record("A", "*,T,G") == "spanning_del"
+    assert classify_record("A", "*,ATT") == "spanning_del"
+    assert classify_record("A", "*,.") == "spanning_del"
     for symbolic in ("<*>", "<NON_REF>", "A[chr1:100["):
         assert classify_record("A", symbolic) == "other"
 
@@ -793,3 +824,49 @@ def test_an_unknown_verbosity_is_refused_by_name():
 
     with pytest.raises(SystemExit, match="verbosity must be one of"):
         set_verbosity("loud")
+
+
+def test_the_default_chain_keeps_multiallelic_snps():
+    """The callset carries them; `snps_only` and `biallelic` are separate questions.
+
+    `-M2` deletes exactly the sites where independent origins sit -- at pfpx1 codon 384,
+    D384A, D384G and D384Y arose separately -- so the default now keeps them and the
+    consumers that need one ALT per record ask for it.
+    """
+    from plasgenomicsutils.lib.filter_pipeline import DEFAULT_CONFIG
+
+    step = next(s for s in DEFAULT_CONFIG["steps"] if s["name"] == "biallelic_snp_filter")
+    assert step["params"]["snps_only"] is True, "still SNPs only"
+    assert step["params"]["biallelic"] is False, "but no longer one ALT per record"
+    assert step["params"]["mnp_handling"] == "split"
+
+
+def test_a_multiallelic_snp_survives_the_default_chain(tmp_path):
+    """End to end, not just the config value."""
+    import copy
+
+    from plasgenomicsutils.lib.filter_pipeline import DEFAULT_CONFIG, run_pipeline
+
+    hdr = ("##fileformat=VCFv4.2\n##contig=<ID=chr1,length=100000>\n"
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
+           '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">\n'
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
+           + "\t".join(f"s{i}" for i in range(1, 9)) + "\n")
+    # four carriers of each alternate, so nothing downstream has grounds to drop it
+    cells = ["1/1:0,30,0"] * 4 + ["2/2:0,0,30"] * 4
+    body = "chr1\t50000\t.\tA\tC,G\t.\t.\t.\tGT:AD\t" + "\t".join(cells) + "\n"
+    src = tmp_path / "in.vcf"
+    src.write_text(hdr + body)
+
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    # keep the chain to the steps this fixture can satisfy: no QC tags, no region beds
+    cfg["steps"] = [s for s in cfg["steps"]
+                    if s["name"] in ("no_alt_filter", "singleton_filter_add_ads",
+                                     "filter_ad_regenotype", "biallelic_snp_filter")]
+    tally = run_pipeline(str(src), str(tmp_path / "out"), cfg, emit_snp_bed=False)
+    final = [t for t in tally if t.get("path", "").endswith(".bcf")][-1]["path"]
+
+    import pysam
+    with pysam.VariantFile(final) as vf:
+        rec, = list(vf)
+        assert rec.alts == ("C", "G"), "both alternates must still be there"

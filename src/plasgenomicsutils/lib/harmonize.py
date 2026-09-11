@@ -99,14 +99,25 @@ def _snapshot_r(rec, shapes: dict):
     return info, fmt
 
 
-def _remap_gt(sample, old_to_new: dict) -> None:
-    """Re-index a genotype through an old-allele -> new-allele map, keeping phasing."""
+def _remap_gt(sample, old_to_new: dict) -> int:
+    """Re-index a genotype through an old-allele -> new-allele map, keeping phasing.
+
+    An allele with no entry in the map is one the union does not carry, which should be
+    impossible: the union is built from these same records. It became reachable through the
+    pass-1/pass-2 disagreement that :func:`harmonize_file` now refuses outright. Should any
+    other route to it appear, the call becomes missing and is **counted** rather than
+    raising a bare ``KeyError`` that names neither the position nor the file. Returns how
+    many alleles were dropped, so the caller can say so.
+    """
     gt = sample.get("GT", None)
     if gt is None:
-        return
+        return 0
     phased = sample.phased
-    sample["GT"] = tuple(None if g is None else old_to_new[g] for g in gt)
+    new = tuple(None if g is None else old_to_new.get(g) for g in gt)
+    dropped = sum(1 for g, n in zip(gt, new) if g is not None and n is None)
+    sample["GT"] = new
     sample.phased = phased
+    return dropped
 
 
 def clean_record(rec, min_ad: int, min_af: float, het_min_af: float, *,
@@ -176,7 +187,12 @@ def clean_record(rec, min_ad: int, min_af: float, het_min_af: float, *,
                 ad = new_ad_per_sample.get(sname)
                 ref_ad = ad[0] if ad is not None else 0
                 rec.samples[sname]["AD"] = (ref_ad, 0)
-                rec.samples[sname]["GT"] = (0, 0)
+                # Reference only if there are reference reads to say so. This used to stamp
+                # 0/0 on every sample, including one with no AD and one with AD=0,0 -- a
+                # sample with no reads at all called confidently homozygous reference, which
+                # is the rule the rest of the module refuses ("total 0 -> missing") and the
+                # gVCF trap the singleton counter documents.
+                rec.samples[sname]["GT"] = (0, 0) if ref_ad > 0 else (None, None)
                 # the other per-allele counts shrink to REF plus the empty ALT slot
                 for fid in shapes["format_r"]:
                     if fid != "AD":
@@ -317,6 +333,26 @@ def _prefer(cand_n: int, prev_n: int) -> bool:
     return cand_n >= prev_n
 
 
+def _pad_to_ref(alleles, ref: str, common_ref: str):
+    """Re-express ``alleles`` (whose REF is ``ref``) against ``common_ref``.
+
+    Two records at one position can have REFs of different length when one is an indel:
+    ``A > T`` and ``ATT > A`` both sit at the same POS. Their alleles are only comparable
+    once written against one REF, and the longer one is it -- ``A > T`` becomes
+    ``ATT > TTT``, which is the same variant. ``bcftools merge`` does exactly this. Before
+    this the union was ``[first file's REF] + sorted(every file's ALTs)`` and, with the SNP
+    file first, came out as ``REF=A ALT=A,T``: an ALT equal to the reference, with the
+    deletion carriers re-labelled as carrying it.
+
+    ``common_ref`` must extend ``ref``; the caller has checked that. ``*`` and symbolic
+    alleles are not sequences and are left alone.
+    """
+    pad = common_ref[len(ref):]
+    if not pad:
+        return list(alleles)
+    return [a if (a == "*" or a.startswith("<") or a == ".") else a + pad for a in alleles]
+
+
 def accumulate_union(files: list[str], min_ad: int, min_af: float, het_min_af: float,
                      drop_indels: bool = True, keep_ref_only: bool = False):
     """Pass 1: stream each file, clean, and collect real ALTs per site.
@@ -341,7 +377,7 @@ def accumulate_union(files: list[str], min_ad: int, min_af: float, het_min_af: f
         useful work and one that is quietly discarding real alleles.
     """
     ref_of: dict = {}
-    alts_of: dict = {}
+    raw_of: dict = {}   # key -> [(ref, {alts}) per file]
     dup_positions: set = set()
     ambiguous: set = set()
     per_file_stats: dict = {}
@@ -375,8 +411,34 @@ def accumulate_union(files: list[str], min_ad: int, min_af: float, het_min_af: f
         st["sites"] = len(per_file)
         per_file_stats[fpath] = st
         for key, (ref, alts, _n) in per_file.items():
-            ref_of.setdefault(key, ref)
-            alts_of.setdefault(key, set()).update(alts)
+            # the longest REF at a position is the one every file's alleles get written
+            # against; every other REF there has to be a prefix of it or the files do not
+            # agree on the reference sequence, which no re-expression can fix
+            have = ref_of.get(key)
+            if have is None or len(ref) > len(have):
+                ref_of[key] = ref
+            raw_of.setdefault(key, []).append((ref, alts))
+
+    ref_conflicts = []
+    alts_of = {}
+    for key, entries in raw_of.items():
+        common = ref_of[key]
+        merged = set()
+        for ref, alts in entries:
+            if not common.startswith(ref):
+                ref_conflicts.append((key, ref, common))
+                break
+            merged.update(_pad_to_ref(alts, ref, common))
+        else:
+            alts_of[key] = merged
+    if ref_conflicts:
+        shown = "; ".join(f"{c}:{p} has REF {a!r} and {b!r}" for (c, p), a, b in ref_conflicts[:5])
+        raise SystemExit(
+            f"ERROR: {len(ref_conflicts)} position(s) have REF alleles that are not "
+            f"prefixes of one another across the inputs ({shown}"
+            f"{'; ...' if len(ref_conflicts) > 5 else ''}). The files do not agree on the "
+            "reference sequence there, and no re-expression of the alleles can reconcile "
+            "them. Check that every input was called against the same reference.")
 
     union = {k: [ref_of[k]] + sorted(alts) for k, alts in alts_of.items()
              if alts or keep_ref_only}
@@ -406,9 +468,12 @@ def harmonize_record_to_union(rec, union_alleles, het_min_af, out, *,
         shapes = field_shapes(rec.header)
     stale = list(stale_info) + [f for f in shapes["info_ag"] if f not in stale_info]
     union_alts = union_alleles[1:]
-    current_alts = [a for a in rec.alleles[1:] if a != "."]
+    # the union may be written against a longer REF than this record's (see _pad_to_ref);
+    # its ALTs only match the union's once written the same way
+    current_alts = _pad_to_ref([a for a in rec.alleles[1:] if a != "."],
+                               rec.ref, union_alleles[0])
 
-    if current_alts == union_alts:
+    if current_alts == union_alts and rec.ref == union_alleles[0]:
         strip_stale_info(rec, stale)
         out.write(rec)
         return False
@@ -506,6 +571,20 @@ def harmonize_file(fpath: str, out_path: str, union: dict,
             if held is not None and key != held_key:
                 _emit(held, held_key, union, het_min_af, out, st, seen, opts)
                 held, held_n = None, -1
+            if key in seen:
+                # Pass 1 collapses duplicate positions over the whole file; this loop only
+                # collapses *adjacent* ones. On a coordinate-sorted file the two agree. On
+                # anything else they can pick different records, and the record emitted here
+                # may name an allele the union was never told about -- which used to surface
+                # as a bare KeyError deep in _remap_gt, or, with regenotype on, as a sample
+                # silently re-called from an all-zero AD.
+                raise SystemExit(
+                    f"ERROR: {fpath} is not coordinate-sorted: {key[0]}:{key[1]} appears "
+                    f"again after another position.\n"
+                    "  harmonize builds its ALT union in one pass and rewrites in a second, "
+                    "and the two only agree on sorted input.\n"
+                    "  Run `bcftools sort` on it first."
+                )
             cand_n = n_real_alts(rec)
             if held is None or _prefer(cand_n, held_n):
                 held, held_key, held_n = rec, key, cand_n

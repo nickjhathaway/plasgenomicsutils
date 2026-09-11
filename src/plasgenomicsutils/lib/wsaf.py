@@ -273,7 +273,8 @@ def wsaf_profile(bcf_path: str, *, min_depth: int = 10,
         sites_fh = None
         if sites_out:
             sites_fh = stack.enter_context(Utils.smart_open_write(sites_out))
-            sites_fh.write("sample\tsnp_id\tminor_frac\talt_frac\tplaf\twsmaf\n")
+            sites_fh.write("sample\tsnp_id\tminor_frac\talt_frac\tplaf\twsmaf\t"
+                           "wsmaf_allele\n")
         stack.callback(vcf.close)
         for v in vcf:
             ad = v.format("AD")
@@ -293,18 +294,28 @@ def wsaf_profile(bcf_path: str, *, min_depth: int = 10,
             mf = np.zeros(n)
             mf[ok] = second[ok] / depth[ok]
             # the population alt frequency this record shows, over the samples with depth --
-            # the anchor for wsmaf, computed from the same reads rather than an INFO field
+            # kept as a reported column, computed from the same reads rather than an INFO field
             af_alt = np.zeros(n)
             af_alt[ok] = ad[ok, 1:].sum(axis=1) / depth[ok]
             plaf = float(af_alt[ok].mean())
+
+            # Which allele wsmaf is about: the population's **minor** one, meaning the
+            # second most common by pooled depth. `1 - p_ref` is that allele only when there
+            # is one alternate; at a triallelic site it is the pooled non-reference share,
+            # and the `plaf > 0.5` flip that used to orient it presupposes a two-allele
+            # partition. Naming the allele makes the number checkable against the callset.
+            pooled = ad[ok].sum(axis=0)
+            order = np.argsort(-pooled)
+            minor_idx = int(order[1]) if len(order) > 1 else int(order[0])
+            minor_allele = ([v.REF] + list(v.ALT))[minor_idx]
+            wsmaf_all = np.zeros(n)
+            wsmaf_all[ok] = ad[ok, minor_idx] / depth[ok]
 
             het = ok & (mf >= min_minor) & (second >= min_minor_reads)
             if not het.any():
                 continue
             idx = np.flatnonzero(het)
-            # WSMAF: the population-level minor allele is the alternate where PLAF <= 0.5,
-            # otherwise the reference, so the within-sample frequency flips with it
-            wsmaf = af_alt[idx] if plaf <= 0.5 else 1.0 - af_alt[idx]
+            wsmaf = wsmaf_all[idx]
             bins = np.clip((mf[idx] / WSAF_BIN).astype(np.int64), 0, _N_BINS - 1)
             np.add.at(hist, (idx, bins), 1)
             wsmaf_sum[idx] += wsmaf
@@ -314,7 +325,7 @@ def wsaf_profile(bcf_path: str, *, min_depth: int = 10,
                 snp = f"{v.CHROM}:{v.POS - 1}"
                 for j, i in enumerate(idx):
                     sites_fh.write(f"{samples[i]}\t{snp}\t{mf[i]:.6g}\t{af_alt[i]:.6g}\t"
-                                   f"{plaf:.6g}\t{wsmaf[j]:.6g}\n")
+                                   f"{plaf:.6g}\t{wsmaf[j]:.6g}\t{minor_allele}\n")
     rows = []
     for i, s in enumerate(samples):
         counts, cov = hist[i], int(n_sites[i])

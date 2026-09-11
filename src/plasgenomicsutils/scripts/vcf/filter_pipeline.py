@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from ...lib import filter_pipeline as P
-from ...lib.bcftools import VARIANT_TYPES
+from ...lib.bcftools import EXTRA_COUNTS, VARIANT_TYPES
 from ...lib.reporting import LEVELS, say, set_verbosity
 
 
@@ -90,13 +90,15 @@ def filter_pipeline():
     # `rescued` records how many of a step's kept variants only survived because the
     # whitelist covered them -- a run artifact rather than something to re-derive from the
     # console, since it is the number that says whether the whitelist did anything
-    cols = ["step", "kind", "count", *VARIANT_TYPES, "rescued", "removed", "path"]
+    cols = ["step", "kind", "count", *VARIANT_TYPES, *EXTRA_COUNTS,
+            "rescued", "removed", "path"]
     lines = ["\t".join(cols) + "\n"]
     for row in tally:
         kind, count, path = _tally_fields(row)
         types = row.get("types") or {}
         cells = [row["step"], kind, str(count),
                  *(str(types[t]) if types else "" for t in VARIANT_TYPES),
+                 *(str(types.get(t, "")) if types else "" for t in EXTRA_COUNTS),
                  str(row.get("rescued", "")),
                  "True" if row.get("removed") else "",
                  path]

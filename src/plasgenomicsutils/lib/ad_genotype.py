@@ -40,17 +40,19 @@ def regenotype_from_ad(ad_counts, het_min_af: float = 0.2, called_alleles=None):
 
     candidates = list(range(len(ad_counts)))
     if called_alleles is not None:
+        # Restricting the CANDIDATES is the whole of what this option does; the call itself
+        # is then made the same way as without it -- ranked by depth, heterozygous only
+        # when the minor allele clears ``het_min_af``. It used to return the two
+        # lowest-indexed supported alleles as a het whatever their depths, which made
+        # ``het_min_af`` a no-op under ``--restrict-to-called-alleles`` at ploidy 2: a
+        # caller's 0/1 backed by one alternate read in a hundred stayed 0/1. Narrowing that
+        # to 0/0 is exactly the "can lose support" the option promises.
         allowed = {a for a in called_alleles if a is not None and a >= 0}
         candidates = [i for i in candidates if i in allowed]
         if not candidates:
             return None
-        supported = [i for i in candidates if ad_counts[i] > 0]
-        if not supported:
+        if not any(ad_counts[i] > 0 for i in candidates):
             return None
-        if len(supported) == 1:
-            return (supported[0], supported[0])
-        a, b = sorted(supported[:2])
-        return (a, b)
 
     ranked = sorted(((i, ad_counts[i]) for i in candidates), key=lambda x: -x[1])
     top_idx, _ = ranked[0]

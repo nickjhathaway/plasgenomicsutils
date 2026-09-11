@@ -57,3 +57,38 @@ def test_clean_ad_matrix_protect_ref():
     assert protected.tolist() == [[1, 20]]   # ref never zeroed
     unprotected = clean_ad_matrix(ad, depth, min_reads=2, min_freq=0.01, protect_ref=False)
     assert unprotected.tolist() == [[0, 20]]  # ref zeroed (1 < 2)
+
+
+# --- called_alleles restricts the candidates, and nothing else -----------------------
+#
+# The option promises "a call can lose support and go missing but never gain a new allele".
+# It used to do the second half only: the restricted branch returned the two lowest-indexed
+# supported alleles as a het whatever their depths, so `het_min_af` never applied there. A
+# caller's 0/1 backed by one alternate read in a hundred stayed 0/1 -- the sequencing-error
+# het the module exists to suppress.
+
+
+def test_restricted_call_still_applies_het_min_af():
+    # 99 reference reads, 1 alternate read; the caller said 0/1
+    assert regenotype_from_ad([99, 1], het_min_af=0.2, called_alleles=(0, 1)) == (0, 0)
+    # and a genuinely mixed sample keeps its het
+    assert regenotype_from_ad([60, 40], het_min_af=0.2, called_alleles=(0, 1)) == (0, 1)
+
+
+def test_restricted_call_never_gains_an_allele():
+    # ALT2 has reads, but the caller never named it, so it cannot be called
+    assert regenotype_from_ad([30, 40, 5], het_min_af=0.2, called_alleles=(0, 1)) == (0, 1)
+    assert regenotype_from_ad([0, 40, 70], het_min_af=0.2, called_alleles=(0, 1)) == (1, 1)
+    # ...and with the alternate it DID name too thin, narrows to the reference
+    assert regenotype_from_ad([30, 2, 70], het_min_af=0.2, called_alleles=(0, 1)) == (0, 0)
+
+
+def test_restricted_call_ranks_by_depth_not_index():
+    # the caller said 1/2; ALT2 is the deeper of the two
+    assert regenotype_from_ad([0, 5, 50], het_min_af=0.2, called_alleles=(1, 2)) == (2, 2)
+    assert regenotype_from_ad([0, 30, 50], het_min_af=0.2, called_alleles=(1, 2)) == (1, 2)
+
+
+def test_restricted_call_goes_missing_when_nothing_named_has_reads():
+    assert regenotype_from_ad([0, 0, 50], het_min_af=0.2, called_alleles=(0, 1)) is None
+    assert regenotype_from_ad([0, 0, 0], het_min_af=0.2, called_alleles=(0, 1)) is None

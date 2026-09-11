@@ -135,3 +135,22 @@ def test_locus_parsing(tmp_path):
 def test_locus_and_bed_together_is_refused(tmp_path):
     with pytest.raises(SystemExit, match="not both"):
         variant_spacing(_vcf(tmp_path), locus="chr1", bed="x.bed", quiet=True)
+
+
+def test_a_split_callset_is_refused_not_read_as_zero_gaps(tmp_path):
+    """`bcftools norm -m-` writes one record per ALT at one position. Read as positions
+    that is a run of zero-length gaps, and every gap and density statistic is wrong by the
+    number of alternates. `SnpPanel.from_vcf` refuses that shape; this used to accept it,
+    so the plan's claim that it "reads the same frame" was wrong."""
+    pytest.importorskip("cyvcf2")
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1",
+           "chr1\t1000\t.\tA\tT\t.\t.\t.\tGT\t1/1",
+           "chr1\t1000\t.\tA\tG\t.\t.\t.\tGT\t0/0",      # the same site, split
+           "chr1\t5000\t.\tA\tC\t.\t.\t.\tGT\t1/1"]
+    p = tmp_path / "split.vcf"
+    p.write_text("\n".join(hdr) + "\n")
+    from plasgenomicsutils.lib.variant_spacing import variant_spacing
+    with pytest.raises(SystemExit, match="more than once"):
+        variant_spacing(str(p), quiet=True)

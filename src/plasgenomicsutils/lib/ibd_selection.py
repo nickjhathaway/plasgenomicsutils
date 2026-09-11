@@ -119,6 +119,31 @@ def _read_af_table(af_path: str, usecols: list) -> pd.DataFrame:
         ) from e
 
 
+def _reject_per_alt_table(df: pd.DataFrame, af_path: str, keys: list[str]) -> None:
+    """Refuse a table with more than one row per SNP.
+
+    ``compute_allele_freqs --per-alt`` writes one row per (SNP, ALT), and the two modes
+    write the same filename. The joins below are dictionary lookups, so a per-ALT table
+    would not fail -- it would silently keep whichever alternate happened to be last and
+    run the whole statistic on that one allele's frequency. At a biallelic site the two
+    modes agree row for row, which is why this only bites once the callset carries a
+    multiallelic record.
+    """
+    dup = df.duplicated(subset=keys, keep=False)
+    if not dup.any():
+        return
+    offenders = df.loc[dup, keys].drop_duplicates()
+    example = " / ".join(f"{k}={v}" for k, v in offenders.iloc[0].items())
+    raise SystemExit(
+        f"ERROR: {af_path} has {len(offenders):,} {'/'.join(keys)} value(s) on more than "
+        f"one row (e.g. {example}).\n"
+        "  That is the shape `compute_allele_freqs --per-alt` writes: one row per "
+        "(SNP, ALT).\n"
+        "  The selection statistic joins one row per SNP, so re-run "
+        "compute_allele_freqs without --per-alt."
+    )
+
+
 def load_global_af(af_path: str, snp_labels: list, af_col: str = "af") -> np.ndarray:
     """Global AFs aligned to ``snp_labels``; any missing SNP is a hard error.
 
@@ -131,6 +156,7 @@ def load_global_af(af_path: str, snp_labels: list, af_col: str = "af") -> np.nda
     anyway. Exposed so that can be checked rather than assumed.
     """
     af_df = _read_af_table(af_path, ["snp_id", af_col])
+    _reject_per_alt_table(af_df, af_path, ["snp_id"])
     af_map = af_df.set_index("snp_id")[af_col].to_dict()
     af = np.array([af_map.get(s, np.nan) for s in snp_labels])
     missing = int(np.isnan(af).sum())
@@ -146,15 +172,70 @@ def load_global_af(af_path: str, snp_labels: list, af_col: str = "af") -> np.nda
     return af
 
 
+def load_global_he(af_path: str, snp_labels: list) -> np.ndarray | None:
+    """Expected heterozygosity aligned to ``snp_labels``, or ``None`` when the table has none.
+
+    ``he`` is what generalises this statistic to any number of alleles, so it is read whenever
+    the table carries it and the biallelic forms are used when it does not -- which is what a
+    table written before the column existed requires. Returning ``None`` rather than raising
+    keeps an old table working; the caller says which form it ended up using.
+    """
+    have = pd.read_csv(af_path, sep="\t", nrows=0, comment="#").columns.tolist()
+    if "he" not in have:
+        return None
+    df = _read_af_table(af_path, ["snp_id", "he"])
+    _reject_per_alt_table(df, af_path, ["snp_id"])
+    m = df.set_index("snp_id")["he"].to_dict()
+    return np.array([m.get(s, np.nan) for s in snp_labels])
+
+
+def load_global_bin_inputs(af_path: str, snp_labels: list):
+    """``(n_alleles_obs, maf_k)`` aligned to ``snp_labels``, or ``(None, None)``.
+
+    The binning half of the k-allele generalisation, kept separate from ``he`` because they
+    are different quantities used for different things -- see :func:`selection_bin_key`.
+    Missing columns mean an older table, and the binning is then left exactly as it was.
+    """
+    have = pd.read_csv(af_path, sep="\t", nrows=0, comment="#").columns.tolist()
+    if "maf_k" not in have or "n_alleles_obs" not in have:
+        return None, None
+    df = _read_af_table(af_path, ["snp_id", "n_alleles_obs", "maf_k"])
+    _reject_per_alt_table(df, af_path, ["snp_id"])
+    n = df.set_index("snp_id")["n_alleles_obs"].to_dict()
+    k = df.set_index("snp_id")["maf_k"].to_dict()
+    return (np.array([n.get(s, 2) for s in snp_labels]),
+            np.array([k.get(s, np.nan) for s in snp_labels]))
+
+
+def get_he_for_group(group, snp_labels, group_af_table, global_he):
+    """Group ``he`` with the same fallback :func:`get_af_for_group` uses."""
+    if (group_af_table is not None and "he" in group_af_table.columns
+            and group in group_af_table["group"].values):
+        sub = group_af_table[group_af_table["group"] == group]
+        m = sub.set_index("snp_id")["he"].to_dict()
+        return np.array([m.get(s, np.nan) for s in snp_labels])
+    return None if global_he is None else global_he.copy()
+
+
 def load_group_af_table(af_group_path: str, af_col: str = "af") -> pd.DataFrame:
     """Read the per-group allele-frequency table, verifying its coordinate stamp.
 
     ``af_col`` chooses which frequency column to use and arrives renamed to ``af``, so
     everything downstream joins on one name whichever was asked for.
     """
-    df = _read_af_table(af_group_path, ["group", "snp_id", af_col])
+    want = ["group", "snp_id", af_col]
+    have = pd.read_csv(af_group_path, sep="\t", nrows=0, comment="#").columns.tolist()
+    if "he" in have and "he" not in want:
+        want.append("he")
+    df = _read_af_table(af_group_path, want)
+    _reject_per_alt_table(df, af_group_path, ["group", "snp_id"])
     if af_col != "af":
         df = df.rename(columns={af_col: "af"})     # downstream joins on `af`
+    # `he` rides along when the table has it -- it is what generalises the statistic to any
+    # number of alleles -- but `af` stays the second-to-last column so the shape reads the
+    # same whichever frequency column was asked for
+    df = df[[c for c in ("group", "snp_id", "af") if c in df.columns]
+            + [c for c in df.columns if c not in ("group", "snp_id", "af")]]
     print(f"  Loaded group AF table: {len(df):,} rows, "
           f"{df['group'].nunique()} groups, {df['snp_id'].nunique():,} SNPs")
     return df
@@ -210,10 +291,76 @@ def _variant_dtype(variant):
     return _DTYPE if variant == "corrected" else _VARIANT_DTYPE[variant]
 
 
+def selection_bin_key(af, n_alleles=None, maf_k=None):
+    """The frequency-bin key: ``maf`` at a biallelic site, ``1 - max(p_i)`` beyond one.
+
+    Binning exists to compare a SNP against others of similar informativeness. Both keys
+    order sites the same way in principle, so the obvious move is to bin on ``he`` -- and
+    that is wrong for a reason only real data shows.
+
+    **Heterozygosity is flat near p = 0.5.** MAFs of 0.48 and 0.52 have the *same* ``he``, so
+    binning on it merges frequency classes that ``maf`` keeps apart. Synthetic frequencies
+    drawn from a uniform are all distinct and hide this; a real panel is ``ac/an`` with ``an``
+    around a thousand, so thousands of SNPs share each value. On the 27k-SNP Uganda callset,
+    binning on ``he`` moved 248 SNPs between bins -- and since a bin's mean and sd shift with
+    its membership, **12,986 z-scores changed**, by up to 4.6.
+
+    So the key has to reduce to ``maf`` *exactly* at a biallelic site. ``1 - max(p_i)`` does:
+    with two alleles it is the frequency of the less common one, which is what ``maf`` is. At
+    k alleles it reaches ``1 - 1/k``, so a site more balanced than any biallelic one bins
+    above them all, which is the improvement that was wanted.
+
+    ``maf_k`` is that column from ``compute_allele_freqs``; without it, or at a site with two
+    alleles, the ``maf`` computed here from ``af`` is used verbatim so the bins do not move.
+    """
+    maf = np.where(af <= 0.5, af, 1 - af)
+    if maf_k is None or n_alleles is None:
+        return maf
+    use_k = (n_alleles > 2) & np.isfinite(maf_k)
+    return np.where(use_k, maf_k, maf)
+
+
+def _scale_and_gate(af, he):
+    """The scale divisor and the validity gate, from heterozygosity when it is available.
+
+    Allele frequency enters this statistic in exactly two places -- this divisor and the
+    binning variable -- and both are heterozygosity terms wearing a biallelic disguise.
+    ``p(1-p)`` is ``H/2`` where ``H = 1 - sum(p_i^2)``, so ``sqrt(he/2)`` is not an
+    alternative to ``sqrt(af(1-af))`` but the same quantity written for any number of
+    alleles. At a biallelic site the two are equal to the last bit, which is why supplying
+    ``he`` moves no existing result.
+
+    The gate changes with it, and this is the part that was quietly deleting data. ``af`` is
+    the pooled non-reference frequency, so a site where the reference is absent altogether --
+    4 C and 4 G, say -- collapses to ``af = 1.0`` and failed ``0 < af < 1``, though it is
+    perfectly polymorphic and more informative than most of the panel. ``he > 0`` is the
+    honest test for "nothing to see here", and a genuinely monomorphic site still fails it.
+    """
+    if he is None:
+        valid = ~np.isnan(af) & (af > 0) & (af < 1)
+        return valid, np.where(valid, np.sqrt(af * (1 - af)), np.nan)
+    valid = ~np.isnan(he) & (he > 0)
+    return valid, np.where(valid, np.sqrt(he / 2.0), np.nan)
+
+
 def compute_selection_statistic(mat, af: np.ndarray, n_bins: int = 100,
                                 label: str = "", variant: str = "corrected",
-                                tail: str = "upper") -> tuple[dict, pd.DataFrame]:
-    """Per-SNP selection statistic. See the module docstring for ``variant`` and ``tail``."""
+                                tail: str = "upper",
+                                he: np.ndarray | None = None,
+                                n_alleles: np.ndarray | None = None,
+                                maf_k: np.ndarray | None = None) -> tuple[dict, pd.DataFrame]:
+    """Per-SNP selection statistic. See the module docstring for ``variant`` and ``tail``.
+
+    ``he`` is expected heterozygosity, ``1 - sum(p_i^2)`` over every allele including the
+    reference (``compute_allele_freqs`` emits it). Supplying it generalises the two places
+    allele frequency is used -- the scale divisor and the frequency binning -- to any number
+    of alleles, and changes nothing on a biallelic panel. Without it the biallelic forms are
+    used, which is what tables written before the column existed require.
+
+    ``n_alleles`` and ``maf_k`` are the binning half of the same generalisation; see
+    :func:`selection_bin_key` for why they are separate from ``he`` rather than derived from
+    it. Without them the binning is unchanged.
+    """
     if variant not in VARIANTS:
         raise ValueError(f"variant must be one of {VARIANTS}, got {variant!r}")
     n_pairs, n_snps = mat.shape
@@ -222,12 +369,15 @@ def compute_selection_statistic(mat, af: np.ndarray, n_bins: int = 100,
     estimated_gb = n_pairs * n_snps * np.dtype(_variant_dtype(variant)).itemsize / 1e9
     if estimated_gb > 16:
         print(f"  {tag}~{estimated_gb:.1f} GB dense — using chunked path")
-        return _compute_chunked(mat, af, n_bins, variant=variant, tail=tail)
+        return _compute_chunked(mat, af, n_bins, variant=variant, tail=tail, he=he,
+                                n_alleles=n_alleles, maf_k=maf_k)
     print(f"  {tag}~{estimated_gb:.1f} GB dense — using dense path")
-    return _compute_dense(mat, af, n_bins, variant=variant, tail=tail)
+    return _compute_dense(mat, af, n_bins, variant=variant, tail=tail, he=he,
+                          n_alleles=n_alleles, maf_k=maf_k)
 
 
-def _compute_dense(mat, af, n_bins, variant="corrected", tail="upper"):
+def _compute_dense(mat, af, n_bins, variant="corrected", tail="upper", he=None,
+                   n_alleles=None, maf_k=None):
     n_pairs, n_snps = mat.shape
     dt = _variant_dtype(variant)
     X = mat.toarray().astype(dt).T          # (snps, pairs)
@@ -236,19 +386,21 @@ def _compute_dense(mat, af, n_bins, variant="corrected", tail="upper"):
         # Centring each SNP and then summing that same SNP cancels exactly; kept only to
         # reproduce isoRelate / ibdutils output.
         X -= X.mean(axis=1, keepdims=True)
-    valid = ~np.isnan(af) & (af > 0) & (af < 1)
-    denom = np.where(valid, np.sqrt(af * (1 - af)), np.nan).astype(dt)
+    valid, denom = _scale_and_gate(af, he)
+    denom = denom.astype(dt)
     X /= denom[:, np.newaxis]
     raw_stat = np.nansum(X, axis=1) / np.sqrt(n_pairs)
     raw_stat = np.where(valid, raw_stat, np.nan)
-    return _normalise_and_finalise(raw_stat, af, valid, n_bins, tail=tail)
+    return _normalise_and_finalise(raw_stat, af, valid, n_bins, tail=tail,
+                                   n_alleles=n_alleles, maf_k=maf_k)
 
 
-def _compute_chunked(mat, af, n_bins, chunk_size=500, variant="corrected", tail="upper"):
+def _compute_chunked(mat, af, n_bins, chunk_size=500, variant="corrected", tail="upper",
+                     he=None, n_alleles=None, maf_k=None):
     n_pairs, n_snps = mat.shape
     dt = _variant_dtype(variant)
     pair_means = np.asarray(mat.mean(axis=1)).ravel().astype(dt)
-    valid = ~np.isnan(af) & (af > 0) & (af < 1)
+    valid, denom_all = _scale_and_gate(af, he)
     raw_stat = np.full(n_snps, np.nan, dtype=np.float64)
     n_chunks = (n_snps + chunk_size - 1) // chunk_size
     for c in range(n_chunks):
@@ -260,26 +412,29 @@ def _compute_chunked(mat, af, n_bins, chunk_size=500, variant="corrected", tail=
         chunk -= pair_means[np.newaxis, :]
         if variant == "published":
             chunk -= chunk.mean(axis=1, keepdims=True)
-        chunk_af = af[start:end]
         chunk_valid = valid[start:end]
-        denom = np.where(chunk_valid, np.sqrt(chunk_af * (1 - chunk_af)), np.nan).astype(dt)
+        denom = denom_all[start:end].astype(dt)
         chunk /= denom[:, np.newaxis]
         rs = np.nansum(chunk, axis=1) / np.sqrt(n_pairs)
         raw_stat[start:end] = np.where(chunk_valid, rs, np.nan)
     print()
-    return _normalise_and_finalise(raw_stat, af, valid, n_bins, tail=tail)
+    return _normalise_and_finalise(raw_stat, af, valid, n_bins, tail=tail,
+                                   n_alleles=n_alleles, maf_k=maf_k)
 
 
-def _normalise_and_finalise(raw_stat, af, valid, n_bins, tail="upper"):
+def _normalise_and_finalise(raw_stat, af, valid, n_bins, tail="upper",
+                            n_alleles=None, maf_k=None):
     n_snps = len(raw_stat)
-    maf = np.where(af <= 0.5, af, 1 - af)
+    maf = np.where(af <= 0.5, af, 1 - af)      # still reported, whatever the binning uses
+    key = selection_bin_key(af, n_alleles=n_alleles, maf_k=maf_k)
+    key_name = "maf" if maf_k is None or n_alleles is None else "binkey"
 
     bin_ids = np.full(n_snps, -1, dtype=int)
     valid_idx = np.where(valid)[0]
-    maf_valid = maf[valid_idx]
-    bin_edges = np.quantile(maf_valid, np.linspace(0, 1, n_bins + 1))
+    key_valid = key[valid_idx]
+    bin_edges = np.quantile(key_valid, np.linspace(0, 1, n_bins + 1))
     bin_edges[-1] += 1e-9
-    bin_ids[valid_idx] = np.digitize(maf_valid, bin_edges) - 1
+    bin_ids[valid_idx] = np.digitize(key_valid, bin_edges) - 1
 
     z_score = np.full(n_snps, np.nan)
     bin_records = []
@@ -295,7 +450,7 @@ def _normalise_and_finalise(raw_stat, af, valid, n_bins, tail="upper"):
         z_score[idx] = (vals - mu) / sd
         bin_records.append({
             "bin": b, "n_snps": len(idx),
-            "maf_min": bin_edges[b], "maf_max": bin_edges[b + 1],
+            f"{key_name}_min": bin_edges[b], f"{key_name}_max": bin_edges[b + 1],
             "mean": mu, "sd": sd,
         })
     bin_df = pd.DataFrame(bin_records)

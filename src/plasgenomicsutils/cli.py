@@ -48,6 +48,7 @@ from .scripts.vcf.singleton_filter_add_ads import singleton_filter_add_ads
 from .scripts.vcf.singleton_counts import singleton_counts
 from .scripts.vcf.wsaf_profile import wsaf_profile
 from .scripts.vcf.biallelic_snp_filter import biallelic_snp_filter
+from .scripts.vcf.spanning_del_filter import spanning_del_filter
 from .scripts.vcf.strip_stale_format import strip_stale_format
 from .scripts.vcf.tandem_repeat_mask import tandem_repeat_mask
 from .scripts.vcf.core_region_filter import core_region_filter
@@ -130,6 +131,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Remove variants overlapping paralogous/multigene-family genes"),
         "filter_ad_regenotype": Command(filter_ad_regenotype,
             "Clean within-sample AD artifacts by depth/frequency, then re-genotype"),
+        "spanning_del_filter": Command(spanning_del_filter,
+            "Recode `*` calls as missing and drop the allele, leaving the non-deleted strains' variants"),
         "biallelic_snp_filter": Command(biallelic_snp_filter,
             "Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping"),
         "sample_coverage_filter": Command(sample_coverage_filter,

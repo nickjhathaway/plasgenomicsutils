@@ -98,7 +98,7 @@ def count_singletons(vcf_path, samples=None, regions=None, max_missing_frac=1.0,
     doubles = np.zeros(n, dtype=np.int64)
     called = np.zeros(n, dtype=np.int64)
     shared = Counter()                      # (i, j) -> doubletons carried by both
-    counters = {"n_variants": 0, "n_low_depth": 0}
+    counters = {"n_variants": 0, "n_low_depth": 0, "n_star_alleles": 0, "n_star_only": 0}
 
     def scan(it):
         for v in it:
@@ -114,15 +114,42 @@ def count_singletons(vcf_path, samples=None, regions=None, max_missing_frac=1.0,
                 continue
             counters["n_variants"] += 1
             np.add(called, ~miss, out=called)
-            carriers = ((gt == 1) | (gt == 3)) & ~miss
-            k = carriers.sum()
-            if k == 1:
-                singles[np.argmax(carriers)] += 1
-            elif k == 2:
-                i, j = np.flatnonzero(carriers)
-                doubles[i] += 1
-                doubles[j] += 1
-                shared[(int(i), int(j))] += 1
+            # Per ALT allele, not per record. At a triallelic site where one sample carries
+            # ALT1 and another ALT2 there are two singletons; counting carriers of *any*
+            # alternate saw two non-reference samples and booked a doubleton shared between
+            # them -- which then fed the "near-identical to X" flag with evidence of
+            # near-identity between samples carrying different alleles.
+            alts = list(v.ALT)
+            n_alt = len(alts)
+            if not n_alt:
+                continue
+            # `*` is a spanning deletion, not an alternate base, and a singleton count is
+            # about alleles. Counting it does two kinds of damage: a sample that is the only
+            # one with a deletion is booked a private SNP it does not have, and -- the
+            # expensive one -- two samples that share a deletion are booked a DOUBLETON,
+            # which feeds `shared[(i, j)]` and therefore the "near-identical to X" flag.
+            # Deletions are haplotype markers, so sharing one is common and the fabricated
+            # evidence accumulates between samples that are not near-identical at all.
+            real = [i for i, a in enumerate(alts, start=1) if a != "*"]
+            if not real:
+                counters["n_star_only"] += 1
+                continue
+            counters["n_star_alleles"] += n_alt - len(real)
+            if n_alt == 1:
+                # the fast path, and bit-for-bit what this always did on a biallelic record
+                per_allele = [((gt == 1) | (gt == 3)) & ~miss]
+            else:
+                alleles = v.genotype.array()[:, :-1]      # (samples, ploidy) allele indices
+                per_allele = [np.isin(alleles, a).any(axis=1) & ~miss for a in real]
+            for carriers in per_allele:
+                k = carriers.sum()
+                if k == 1:
+                    singles[np.argmax(carriers)] += 1
+                elif k == 2:
+                    i, j = np.flatnonzero(carriers)
+                    doubles[i] += 1
+                    doubles[j] += 1
+                    shared[(int(i), int(j))] += 1
 
     if regions:
         for r in regions:
@@ -149,6 +176,8 @@ def count_singletons(vcf_path, samples=None, regions=None, max_missing_frac=1.0,
         "top_partner": [names[k] if k >= 0 else "" for k in best_of],
         "n_shared_with_partner": best, "frac_doubletons_with_partner": frac})
     df.attrs["n_low_depth"] = counters["n_low_depth"]
+    df.attrs["n_star_alleles"] = counters["n_star_alleles"]
+    df.attrs["n_star_only_records"] = counters["n_star_only"]
     return df, counters["n_variants"]
 
 

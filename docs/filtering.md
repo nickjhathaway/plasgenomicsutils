@@ -10,11 +10,90 @@ plasgenomicsutils tandem_repeat_mask --input 02.bcf --output 03.bcf        # --b
 plasgenomicsutils core_region_filter  --input 03.bcf --output 04.bcf       # keep core genome
 plasgenomicsutils paralog_mask        --input 04.bcf --output 05.bcf       # drop paralog/multigene families (optional, see Pipeline)
 plasgenomicsutils filter_ad_regenotype --input-vcf 05.bcf --output-vcf 06.bcf  # clean low AD, re-genotype
-plasgenomicsutils biallelic_snp_filter --input 06.bcf --output 07.bcf      # keep biallelic SNPs
-plasgenomicsutils sample_coverage_filter --input 07.bcf --output 08.bcf
-plasgenomicsutils locus_missingness_filter --input 08.bcf --output 09.bcf
-plasgenomicsutils maf_filter --input 09.bcf --output 10.bcf --maf-min 0.02 --maf-max 0.98
+plasgenomicsutils spanning_del_filter --input 06.bcf --output 07.bcf       # `*` -> missing, then drop the allele
+plasgenomicsutils biallelic_snp_filter --input 07.bcf --output 08.bcf --no-biallelic  # SNPs only; keep multiallelic ones
+plasgenomicsutils sample_coverage_filter --input 08.bcf --output 09.bcf
+plasgenomicsutils locus_missingness_filter --input 09.bcf --output 10.bcf
+plasgenomicsutils maf_filter --input 10.bcf --output 11.bcf --maf-min 0.02 --maf-max 0.98
 ```
+
+### The callset keeps multiallelic SNPs
+
+`biallelic_snp_filter` asks two separate questions, and the shipped default now answers them
+differently: **SNPs only, yes; one ALT per record, no.**
+
+A site with three alleles is where independent origins sit. At *pfpx1* codon 384, D384A,
+D384G and D384Y arose separately, and `-M2` deletes exactly those sites. Everything this
+pipeline feeds can read them:
+
+| consumer | how |
+|---|---|
+| `hmmibd-rs` | models a per-allele frequency vector; `--max-all` defaults to 8 |
+| Fws | `1 - sum(p^2)` over every allele, at both levels |
+| `maf_filter` | `INFO/MAF`, the second-most-common allele |
+| the QC filter here | SOR and the `*BZ` effect sizes pool every ALT |
+| `singleton_filter_add_ads` | carrier counts are per ALT |
+
+Pass `--biallelic` (or `"biallelic": true` in the config) when the consumer genuinely needs
+one ALT per record. The R package's `load_genotypes()` still does, until its backend is
+replaced — it reports how many records it skipped, so the loss is visible, but it is a loss.
+
+The whitelist does **not** rescue a multiallelic record from `--biallelic`. Letting one
+through would break anything downstream relying on the file being biallelic, silently and far
+from here. Instead the run says which whitelisted records the step removed, so a resistance
+codon that turns out to be multiallelic announces itself at the moment it goes:
+
+```
+     WARNING: 1 whitelisted record(s) were removed by biallelic_snp_filter, which does not
+     honour the whitelist.
+       Pf3D7_13_v3:1725591 A>C,G
+```
+
+### `*` alleles: `spanning_del_filter` (off by default)
+
+A `*` in ALT says a deletion called somewhere else covers this position in some samples.
+
+**`--snps-only` drops every record carrying one.** It asks for sites where every sample has a
+base to compare, and `A > *,T` is not one however well T behaves: part of the cohort has no
+sequence there at all. Keeping it would make `--snps-only` mean two different things
+depending on whether the overlapping deletion happened to be called.
+
+**`spanning_del_filter` is how you keep those sites**, and it is worth more than it looks.
+It recodes the deleted calls as missing and drops the allele, after which the record really
+is a clean SNP and passes `--snps-only` normally. Measured on the shipped Pf7 fixture, after
+trimming alleles no genotype carries:
+
+| SNP panel from `--snps-only` | records | of which multiallelic |
+|---|---|---|
+| as-is | 577 | 50 |
+| after `spanning_del_filter` | **755** | 64 |
+
+So the step adds 178 records — **31% more SNPs** — because a `*` sitting beside a real SNP is
+common in a joint callset and would otherwise take the whole record with it.
+
+**It is still off by default**, because the recode discards a real observation. A `*` is a
+confident statement that the sequence is absent, not a failure to call: a site with 20 deleted
+samples and 5 carrying a variant comes out reading as though 20 samples could not be
+genotyped. In *P. falciparum* that weighs heavier than elsewhere, since across the dimorphic
+regions a deletion is frequently the *other haplotype* rather than a dropout, and which
+samples carry it is a result. Turn it on when the question is about the variants of the
+**non-deleted** strains and the deletion itself is not the subject.
+
+The cost is bounded and reported per run. At the 369 fixture records where `*` sits beside
+real alleles, a mean 17.2% of called samples carry it; 77% of those records lose under a
+quarter of their samples, and none loses more than 90%. A call is nulled slot by slot, so
+`*/T` becomes `./T` and keeps the `T` it does carry — 14.5% of the fixture's `*` calls are
+partial like that. Only a call naming nothing but `*` goes fully missing. Because the loss
+shows up as missingness at sites that still look healthy in the variant counts, run
+`locus_missingness_filter` after this step, not before.
+
+### How `*` is counted
+
+A record carrying a `*` is its own class, `spanning_del`, whatever its other alleles read —
+so the tally agrees with the filter rather than promising SNPs that `--snps-only` then
+removes. On the shipped fixture, post-trim, that is 1,617 of 3,123 records: routinely the
+largest class in a joint callset, which is why it is named rather than left to share `other`
+with symbolic alleles and breakends.
 
 Region masks (`tandem_repeat_mask`, `core_region_filter`, `paralog_mask`) take `--bed`,
 a plain path or a bundled asset via `builtin:<name>` (`pf3d7_core_regions`,

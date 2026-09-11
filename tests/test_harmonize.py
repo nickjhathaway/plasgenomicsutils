@@ -362,3 +362,132 @@ def test_dropping_an_unsupported_allele_reshapes_every_per_allele_field(tmp_path
     assert tuple(info["AD"]) == (10, 14) and "AC" not in info and info["DP"] == 24
     assert samples["S1"] == ((0, 1), False, (10, 5), (5, 3))     # kept, re-indexed
     assert samples["S2"] == ((1, 1), False, (0, 9), (0, 5))      # was 1/2, A gone: re-called
+
+
+def _unsorted_vcf(tmp_path):
+    """Two records at one position with another position wedged between them.
+
+    Pass 1 collapses duplicates over the whole file, pass 2 only over *adjacent* records,
+    so this is the input on which the two passes disagree about which record wins. Real
+    bcftools output is coordinate-sorted and never looks like this; a hand-edited or
+    concatenated file can.
+    """
+    return _write_vcf(tmp_path / "unsorted.vcf",
+        "chr1\t384\t.\tA\tT,G\t.\t.\t.\tGT:AD\t1/1:0,26,0\t2/2:0,0,24\n"
+        "chr1\t500\t.\tA\tT\t.\t.\t.\tGT:AD\t0/1:5,5\t0/0:9,0\n"
+        "chr1\t384\t.\tA\tC\t.\t.\t.\tGT:AD\t1/1:0,26\t0/0:9,0\n")
+
+
+def test_a_non_adjacent_duplicate_position_is_refused_not_crashed_on(tmp_path):
+    """Pass 2 must not emit a record whose alleles pass 1 left out of the union.
+
+    Before this check the second `chr1:384` record reached `_remap_gt`, whose
+    `old_to_new[g]` raised a bare `KeyError: 1` — no position, no file, no clue what was
+    wrong. With `regenotype=True` there was no crash at all and the sample was silently
+    re-called from an all-zero relaid AD, so its reads simply vanished.
+    """
+    f = _unsorted_vcf(tmp_path)
+    union, _dups, _amb, _st = H.accumulate_union([f], min_ad=3, min_af=0.005,
+                                                 het_min_af=0.2)
+    # pass 1 preferred the 2-ALT record, so 'C' is not in the union
+    assert "C" not in union[("chr1", 384)]
+
+    out = str(tmp_path / "out.vcf")
+    with pytest.raises(SystemExit, match="coordinate-sorted"):
+        H.harmonize_file(f, out, union, 3, 0.005, 0.2, regenotype=False)
+
+
+def test_the_same_refusal_applies_on_the_regenotype_path(tmp_path):
+    """The silent variant is the more dangerous one, so it must be refused too."""
+    f = _unsorted_vcf(tmp_path)
+    union, _dups, _amb, _st = H.accumulate_union([f], min_ad=3, min_af=0.005,
+                                                 het_min_af=0.2)
+    out = str(tmp_path / "out2.vcf")
+    with pytest.raises(SystemExit, match="coordinate-sorted"):
+        H.harmonize_file(f, out, union, 3, 0.005, 0.2, regenotype=True)
+
+
+def test_an_unmappable_allele_becomes_a_missing_call_rather_than_a_keyerror():
+    """`_remap_gt`'s own guard, independent of how the record got there."""
+    class _S(dict):
+        phased = False
+        def get(self, k, d=None):
+            return dict.get(self, k, d)
+
+    s = _S(GT=(1, 1))
+    dropped = H._remap_gt(s, {0: 0, 2: 1})
+    assert s["GT"] == (None, None)
+    assert dropped == 2
+
+
+# --- records at one position with REFs of different length ----------------------------
+#
+# `A > T` and `ATT > A` both sit at POS 500. With indels kept, the union used to be
+# `[first file's REF] + sorted(every file's ALTs)`, which with the SNP file first came out
+# as `REF=A ALT=A,T` -- an ALT equal to the reference, and every carrier of the deletion
+# re-labelled `1/1` of it. Nothing errored. The alleles are only comparable once written
+# against one REF, and the longer one is it: `A > T` is `ATT > TTT`, the same variant.
+
+
+def test_a_snp_and_a_deletion_at_one_position_share_the_longer_ref(tmp_path):
+    a = _write_vcf(tmp_path / "a.vcf",
+                   "chr1\t500\t.\tA\tT\t.\t.\t.\tGT:AD\t1/1:0,40\t0/0:40,0\n")
+    b = _write_vcf(tmp_path / "b.vcf",
+                   "chr1\t500\t.\tATT\tA\t.\t.\t.\tGT:AD\t1/1:0,40\t0/0:40,0\n")
+    union, _d, _a, _st = H.accumulate_union([a, b], min_ad=0, min_af=0.0, het_min_af=0.2,
+                                            drop_indels=False)
+    assert union[("chr1", 500)] == ["ATT", "A", "TTT"]
+    assert "A" != union[("chr1", 500)][0]          # no ALT equal to REF
+
+
+def test_the_carriers_end_up_on_the_right_allele_in_both_files(tmp_path):
+    a = _write_vcf(tmp_path / "a.vcf",
+                   "chr1\t500\t.\tA\tT\t.\t.\t.\tGT:AD\t1/1:0,40\t0/0:40,0\n")
+    b = _write_vcf(tmp_path / "b.vcf",
+                   "chr1\t500\t.\tATT\tA\t.\t.\t.\tGT:AD\t1/1:0,40\t0/0:40,0\n")
+    union, _d, _a, _st = H.accumulate_union([a, b], min_ad=0, min_af=0.0, het_min_af=0.2,
+                                            drop_indels=False)
+    oa, ob = str(tmp_path / "ha.vcf"), str(tmp_path / "hb.vcf")
+    H.harmonize_file(a, oa, union, 0, 0.0, 0.2, drop_indels=False)
+    H.harmonize_file(b, ob, union, 0, 0.0, 0.2, drop_indels=False)
+    (_c, _p, alleles_a, gts_a), = _records(oa)
+    (_c, _p, alleles_b, gts_b), = _records(ob)
+    assert alleles_a == alleles_b == ("ATT", "A", "TTT")
+    assert gts_a["S1"] == (2, 2)      # the SNP carrier: TTT is index 2
+    assert gts_b["S1"] == (1, 1)      # the deletion carrier: A is index 1
+    assert gts_a["S2"] == gts_b["S2"] == (0, 0)
+
+
+def test_refs_that_are_not_prefixes_of_each_other_are_refused(tmp_path):
+    # `AT` and `AG` at one position are two different reference sequences, not two lengths
+    # of one; no re-expression can reconcile them and guessing would be worse than stopping
+    a = _write_vcf(tmp_path / "a.vcf",
+                   "chr1\t500\t.\tAT\tA\t.\t.\t.\tGT:AD\t1/1:0,40\t0/0:40,0\n")
+    b = _write_vcf(tmp_path / "b.vcf",
+                   "chr1\t500\t.\tAG\tA\t.\t.\t.\tGT:AD\t1/1:0,40\t0/0:40,0\n")
+    with pytest.raises(SystemExit, match="not prefixes"):
+        H.accumulate_union([a, b], min_ad=0, min_af=0.0, het_min_af=0.2, drop_indels=False)
+
+
+def test_a_biallelic_snp_union_is_untouched_by_the_padding_path(tmp_path):
+    a = _write_vcf(tmp_path / "a.vcf",
+                   "chr1\t500\t.\tA\tT\t.\t.\t.\tGT:AD\t1/1:0,40\t0/0:40,0\n")
+    b = _write_vcf(tmp_path / "b.vcf",
+                   "chr1\t500\t.\tA\tG\t.\t.\t.\tGT:AD\t1/1:0,40\t0/0:40,0\n")
+    union, _d, _a, _st = H.accumulate_union([a, b], min_ad=0, min_af=0.0, het_min_af=0.2)
+    assert union[("chr1", 500)] == ["A", "G", "T"]
+
+
+def test_a_record_reduced_to_ref_only_does_not_invent_reference_calls(tmp_path):
+    """When every ALT is cleaned away, the samples WITH reference reads become 0/0. A sample
+    with no reads at all -- AD=0,0, or no AD -- has no evidence for any call, and used to be
+    stamped 0/0 with the rest: the "total 0 -> missing" rule the module applies everywhere
+    else, broken on this one path."""
+    f = _write_vcf(tmp_path / "a.vcf",
+                   "chr1\t100\t.\tA\tT\t.\t.\t.\tGT:AD\t0/1:30,1\t./.:0,0\n")
+    with pysam.VariantFile(f) as vf:
+        rec = next(vf)
+        H.clean_record(rec, min_ad=3, min_af=0.05, het_min_af=0.2)
+        assert rec.alleles == ("A", ".")                     # the one-read ALT is gone
+        assert tuple(rec.samples["S1"]["GT"]) == (0, 0)      # 30 reference reads: 0/0
+        assert tuple(rec.samples["S2"]["GT"]) == (None, None)  # no reads: still missing

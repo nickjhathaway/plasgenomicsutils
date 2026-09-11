@@ -163,3 +163,50 @@ def test_regenotype_self_cleans_stale_likelihoods(tmp_path, bgzip):
     pl = _pl(out)["100"]
     assert all(set(v) <= {".", ","} for v in pl)
     assert _trims_ok(out)
+
+
+_HALF_MISSING = (
+    "##fileformat=VCFv4.2\n"
+    "##contig=<ID=chr1,length=100000>\n"
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
+    '##FORMAT=<ID=PL,Number=G,Type=Integer,Description="phred GLs">\n'
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
+    # every call is diploid; S2's is half-missing and S3's is fully missing
+    "chr1\t100\t.\tA\tT\t.\t.\t.\tGT:PL\t0/1:0,10,20\t./1:0,10,20\t./.:0,10,20\n"
+)
+
+
+@needs
+def test_a_half_missing_genotype_is_diploid_not_haploid(tmp_path):
+    """`./1` is a diploid call with one allele unknown, and its PL is still diploid.
+
+    Counting only the non-missing alleles read it as haploid, so a perfectly good 3-value
+    PL was judged the wrong length and nulled. This matters now because setting a spanning
+    deletion's slot to missing is exactly how `./1` calls get made -- 14.5% of the `*`
+    calls in the shipped Pf7 fixture are partial like this.
+    """
+    p = tmp_path / "half.vcf"
+    p.write_text(_HALF_MISSING)
+    out = str(tmp_path / "out.vcf")
+    n = strip_stale_format(str(p), out, mode="mismatch")
+    assert n == 0, "nothing in this file is stale"
+    with pysam.VariantFile(out) as vf:
+        rec = next(iter(vf))
+        for s in ("S1", "S2", "S3"):
+            assert tuple(rec.samples[s]["PL"]) == (0, 10, 20), f"{s}'s PL was altered"
+
+
+@needs
+def test_a_genuinely_haploid_call_is_still_read_as_haploid(tmp_path):
+    """The fix must not swing the other way: real haploid GTs have 1-tuples, not 2."""
+    src = _HALF_MISSING.replace(
+        "chr1\t100\t.\tA\tT\t.\t.\t.\tGT:PL\t0/1:0,10,20\t./1:0,10,20\t./.:0,10,20\n",
+        # haploid calls with a diploid-length PL: that PL *is* stale
+        "chr1\t100\t.\tA\tT\t.\t.\t.\tGT:PL\t0:0,10,20\t1:0,10,20\t.:0,10,20\n")
+    p = tmp_path / "hap.vcf"
+    p.write_text(src)
+    out = str(tmp_path / "out2.vcf")
+    assert strip_stale_format(str(p), out, mode="mismatch") == 1
+    with pysam.VariantFile(out) as vf:
+        rec = next(iter(vf))
+        assert len(rec.samples["S1"]["PL"]) == 2      # haploid, 2 alleles -> 2 values
