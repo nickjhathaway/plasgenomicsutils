@@ -30,6 +30,7 @@ plasgenomicsutils <command> -h     # options for one command
 | command | what it does |
 | --- | --- |
 | `ld_decay` | Mean r² vs SNP-pair distance per group: how fast LD decays |
+| `ld_recombination` | Per-SNP recombination-rate (ρ) map from monoclonal isolates, via LDhat (recommended for Pf) or pyrho |
 
 ## `coverage`
 
@@ -47,6 +48,7 @@ Making a callset, merging one, converting one.
 | `call_variants` | Call variants with bcftools, annotated for `hard_qc_filter`, parallel over regions |
 | `harmonize_bcf` | Harmonize ALT sets of separately-called cohorts for `bcftools merge` |
 | `vcf_to_bed` | Convert a VCF/BCF to 0-based BED (stdout by default) |
+| `split_by_meta` | Split a callset into per-group VCFs by a metadata column; refill AC/AF, optional per-group MAF and ALT trim |
 
 ## `vcf_filter_pipeline`
 
