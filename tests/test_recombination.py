@@ -103,10 +103,21 @@ def test_read_pyrho_map_parses_headerless_rows(tmp_path):
     assert list(df["chrom"]) == ["c7", "c7"] and df["rho_per_bp"].iloc[1] == pytest.approx(0.0022)
 
 
-def test_resolve_pyrho_cmd_explicit_and_auto():
+def test_resolve_pyrho_cmd_explicit_and_auto(monkeypatch):
+    which = "plasgenomicsutils.scripts.ld.recombination.shutil.which"
+    # an explicit spec is split on spaces, with no PATH lookup at all
     assert resolve_pyrho_cmd("mamba run -n foo pyrho") == ["mamba", "run", "-n", "foo", "pyrho"]
-    auto = resolve_pyrho_cmd("auto")                        # PATH pyrho or a manager fallback
-    assert auto[-1] == "pyrho"
+    # 'auto' prefers pyrho on PATH ...
+    monkeypatch.setattr(which, lambda name: "/usr/bin/pyrho" if name == "pyrho" else None)
+    assert resolve_pyrho_cmd("auto") == ["pyrho"]
+    # ... then falls back to a conda-family manager when pyrho is absent ...
+    monkeypatch.setattr(which, lambda name: "/opt/conda/bin/mamba" if name == "mamba" else None)
+    assert resolve_pyrho_cmd("auto") == ["mamba", "run", "-n", "pyrho", "pyrho"]
+    # ... and errors clearly when neither is available (the case on a bare CI runner, where
+    # depending on a manager being installed made this test environment-specific).
+    monkeypatch.setattr(which, lambda name: None)
+    with pytest.raises(SystemExit, match="pyrho not found"):
+        resolve_pyrho_cmd("auto")
 
 
 def test_resolve_ldhat_finds_binaries_and_handles_arch_prefix(tmp_path):
