@@ -759,3 +759,34 @@ def fws_filter(inp, out, *, fws_min=0.95, estimator="regression", min_depth=0, n
         say(f"     {len(unscored)} sample(s) could not be scored and were dropped: "
               + ", ".join(unscored))
     return dropped
+
+
+def monoclonal_samples(fws_table_path, *, fws_min=0.95):
+    """Read a precomputed Fws table and return the monoclonal sample names.
+
+    Reads the table written by ``calculate_fws`` / :func:`write_fws_table` (columns
+    ``sample``, ``fws``, ``n_sites``, ``monoclonal``, ``dropped``). Selection is on the
+    ``fws`` column against ``fws_min`` when it is present -- so a caller can apply a
+    different bar than the table was built with -- and falls back to the boolean
+    ``monoclonal`` column when there is no ``fws`` column. Unscored rows (blank ``fws``)
+    are never monoclonal.
+
+    This is the gate ``ld_recombination`` uses: pyrho reads every haplotype column as one
+    phased haplotype, so only monoclonal isolates may go in. Samples are returned in table
+    order; intersecting them with the callset is left to the reader (a name absent from the
+    VCF is simply not selected).
+    """
+    import pandas as pd
+
+    df = pd.read_csv(fws_table_path, sep="\t", dtype={"sample": str})
+    if "sample" not in df.columns:
+        raise SystemExit(f"{fws_table_path}: no 'sample' column")
+    if "fws" in df.columns:
+        fws = pd.to_numeric(df["fws"], errors="coerce")
+        keep = df.loc[fws >= fws_min, "sample"]
+    elif "monoclonal" in df.columns:
+        mono = df["monoclonal"].astype(str).str.lower().isin(("true", "1", "yes"))
+        keep = df.loc[mono, "sample"]
+    else:
+        raise SystemExit(f"{fws_table_path}: needs an 'fws' or 'monoclonal' column")
+    return keep.astype(str).tolist()

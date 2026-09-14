@@ -32,6 +32,7 @@ from .scripts.fws.calculate_fws import calculate_fws
 
 # -- LD leaves ----------------------------------------------------------------
 from .scripts.ld.decay import ld_decay
+from .scripts.ld.recombination import ld_recombination
 
 # -- Coverage leaves ----------------------------------------------------------
 from .scripts.cov.depth_stats import depth_stats
@@ -98,6 +99,9 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
     "ld": {
         "ld_decay": Command(ld_decay,
             "Mean r-squared vs SNP-pair distance per group: how fast LD decays"),
+        "ld_recombination": Command(ld_recombination,
+            "Per-SNP recombination-rate (rho) map from monoclonal isolates, via LDhat "
+            "(recommended for Pf) or pyrho"),
     },
     "coverage": {
         "coverage_depth_stats": Command(depth_stats,
