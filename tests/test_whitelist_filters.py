@@ -160,3 +160,55 @@ def test_a_single_filter_run_on_its_own_still_warns_immediately(tmp_path, capsys
     bad.write_text("nosuchchrom\t1\t2\n")
     F.hard_qc_filter(inp, str(tmp_path / "o.bcf"), keep_bed=str(bad))
     assert "rescued nothing" in capsys.readouterr().out
+
+
+def test_the_biallelic_filter_names_the_whitelisted_records_it_removes(tmp_path, capsys):
+    """A whitelist that silently does nothing reads as a guarantee it is not making.
+
+    `biallelic_snp_filter` deliberately does not honour `keep_bed` (decision 3): letting one
+    multiallelic record past `-M2` because it sits under a whitelist would break anything
+    downstream relying on the file being biallelic, silently and far from here. So the
+    whitelist becomes a diagnostic -- it says what it would have saved.
+    """
+    from plasgenomicsutils.lib.filter_pipeline import run_pipeline
+
+    hdr = ("##fileformat=VCFv4.2\n##contig=<ID=chr1,length=100000>\n"
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
+           '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">\n'
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2\ts3\ts4\n")
+    body = ("chr1\t1000\t.\tA\tC,G\t.\t.\t.\tGT:AD\t1/1:0,9,0\t1/1:0,9,0\t2/2:0,0,9\t"
+            "2/2:0,0,9\n"
+            "chr1\t2000\t.\tA\tC\t.\t.\t.\tGT:AD\t1/1:0,9\t1/1:0,9\t0/0:9,0\t0/0:9,0\n")
+    src = tmp_path / "in.vcf"
+    src.write_text(hdr + body)
+    bed = tmp_path / "wl.bed"
+    bed.write_text("chr1\t999\t1001\n")          # covers the multiallelic record only
+
+    cfg = {"keep_bed": str(bed),
+           "steps": [{"name": "biallelic_snp_filter",
+                      "params": {"snps_only": True, "biallelic": True,
+                                 "mnp_handling": "remove"}}]}
+    run_pipeline(str(src), str(tmp_path / "out"), cfg, emit_snp_bed=False)
+    printed = capsys.readouterr().out
+    assert "whitelisted record(s) were removed by biallelic_snp_filter" in printed
+    assert "chr1:999 A>C,G" in printed
+
+
+def test_nothing_is_said_when_the_whitelist_loses_nothing(tmp_path, capsys):
+    from plasgenomicsutils.lib.filter_pipeline import run_pipeline
+
+    hdr = ("##fileformat=VCFv4.2\n##contig=<ID=chr1,length=100000>\n"
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">\n'
+           '##FORMAT=<ID=AD,Number=R,Type=Integer,Description="AD">\n'
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2\ts3\ts4\n")
+    body = "chr1\t2000\t.\tA\tC\t.\t.\t.\tGT:AD\t1/1:0,9\t1/1:0,9\t0/0:9,0\t0/0:9,0\n"
+    src = tmp_path / "in.vcf"
+    src.write_text(hdr + body)
+    bed = tmp_path / "wl.bed"
+    bed.write_text("chr1\t1999\t2001\n")
+    cfg = {"keep_bed": str(bed),
+           "steps": [{"name": "biallelic_snp_filter",
+                      "params": {"snps_only": True, "biallelic": True,
+                                 "mnp_handling": "remove"}}]}
+    run_pipeline(str(src), str(tmp_path / "out"), cfg, emit_snp_bed=False)
+    assert "were removed by biallelic_snp_filter" not in capsys.readouterr().out

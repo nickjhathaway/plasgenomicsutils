@@ -24,6 +24,12 @@ def get_parser_singleton_filter_add_ads() -> argparse.ArgumentParser:
                         "(0-based half-open, like any BED). Whitelisted variants still "
                         "face every other filter -- this only exempts them from this "
                         "one.")
+    p.add_argument("--per-allele", action="store_true",
+                   help="At a record with a singleton alternate beside a well-supported "
+                        "one, blank the singleton alternate's calls and trim it off rather "
+                        "than keeping the whole record. A record whose every real alternate "
+                        "is a singleton becomes ref-only and is dropped. `*` is never "
+                        "recoded here.")
     return p
 
 
@@ -34,7 +40,7 @@ def parse_args_singleton_filter_add_ads():
 def singleton_filter_add_ads():
     args = parse_args_singleton_filter_add_ads()
     F.singleton_add_ads(args.input, args.output, min_samples=args.min_samples,
-                 keep_bed=args.keep_bed)
+                 keep_bed=args.keep_bed, per_allele=args.per_allele)
     report_counts(args.input, args.output, "singleton_filter_add_ads")
 
 

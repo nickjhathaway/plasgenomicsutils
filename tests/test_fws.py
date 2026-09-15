@@ -460,3 +460,51 @@ def test_vcf_sites_are_keyed_chrom_pos_for_frequencies(tmp_path):
     assert n.tolist() == [1, 1, 1, 1]
     assert f[samples.index("pure_alt2")] == pytest.approx(1.0)      # homozygous: Hw = 0
     assert f[samples.index("mix_alt1_alt2")] == pytest.approx(1 - 0.5 / 0.5)
+
+
+# --- k-allele sites and the MAF grid ---------------------------------------------------
+#
+# moimix's grid is ten bins over [0, 0.5], which is the whole range of a biallelic minor-
+# allele fraction. A site with k alleles has `1 - max(p)` up to 1 - 1/k, and used to fall
+# off the top: the regression estimator gave every such site one shared overflow bin, the
+# ratio estimator clipped them into the 0.45-0.5 bin beside biallelic sites of half their
+# heterozygosity. The grid now extends upward in the same width -- and the biallelic part of
+# it does not move.
+
+
+def _with_k_allele_sites(n_multi=40, seed=3):
+    rng = np.random.default_rng(seed)
+    ref, alt = _cohort()
+    n_bi, n_samples = ref.shape
+    recs = [np.stack([ref[i], alt[i]], axis=1) for i in range(n_bi)]
+    for _ in range(n_multi):
+        # four alleles at roughly even depth: 1 - max(p) is about 0.7, well above 0.5
+        recs.append(rng.integers(20, 30, size=(n_samples, 4)).astype(float))
+    return AlleleDepths.from_records(recs, n_samples), n_bi
+
+
+def test_a_biallelic_panel_is_binned_exactly_as_before():
+    # nothing above 0.5, so no extra bins, so the same edges and the same numbers
+    ref, alt = _cohort()
+    f, n = compute_fws(ref, alt, estimator="regression")
+    f2, n2 = compute_fws(AlleleDepths.from_ref_alt(ref, alt), estimator="regression")
+    assert np.array_equal(f, f2) and np.array_equal(n, n2)
+
+
+def test_k_allele_sites_get_bins_of_their_own_rather_than_the_top_biallelic_one():
+    d, n_bi = _with_k_allele_sites()
+    for est in ("regression", "ratio"):
+        f, n = compute_fws(d, estimator=est, min_alt_samples=1)
+        assert np.isfinite(f).all()
+        assert (n == d.n_sites).all()          # every site, k-allele ones included, counted
+    # the mechanism: with the k-allele sites removed, the biallelic sites alone give the
+    # same per-sample regression inputs, i.e. adding sites above 0.5 did not move the
+    # biallelic bins. Check by scoring the biallelic subset and comparing it to a run on the
+    # full panel from which the k-allele sites contribute only their own (new) bins.
+    ref, alt = _cohort()
+    f_bi, _ = compute_fws(ref, alt, estimator="regression")
+    f_all, _ = compute_fws(d, estimator="regression", min_alt_samples=1)
+    # not identical -- the extra bins add points to the regression -- but a mixture that is
+    # 40 k-allele sites in 340 cannot swing a monoclonal-vs-polyclonal reading; the
+    # correlation across samples has to stay near one
+    assert np.corrcoef(f_bi, f_all)[0, 1] > 0.9

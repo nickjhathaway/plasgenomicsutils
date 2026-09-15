@@ -71,10 +71,14 @@ def test_without_a_grouping_only_the_whole_file_table_is_produced(tmp_path):
     assert _af(g, "chr1:19") == pytest.approx(0.75)
     # the group table is empty but still shaped, so a caller can concat it either way
     assert len(r) == 0
-    assert list(r.columns) == ["group", "snp_id", "n_alts", "af", "maf", "ac", "an",
+    assert list(r.columns) == ["group", "snp_id", "n_alts", "he", "n_alleles_obs", "maf_k",
+                               "af", "maf", "ac", "an",
                                "af_weighted", "n_samples_ad", "prevalence",
                                "n_samples_alt", "n_samples",
                                "prevalence_ad", "n_samples_alt_ad"]
+    # the empty frame must be shaped like a populated one, or a concat silently reorders
+    with_rows, populated = compute_allele_freqs(str(vcf), {"s1": "A", "s2": "A", "s3": "B"})
+    assert list(populated.columns) == list(r.columns)
 
     # and the whole-file numbers do not depend on whether a grouping was asked for
     with_groups, _ = compute_allele_freqs(str(vcf), {"s1": "A", "s2": "A", "s3": "B"})
@@ -335,3 +339,90 @@ def test_n_alts_is_carried_by_the_group_table_too(tmp_path):
     assert "n_alts" in r.columns
     # a site-level property, so it does not vary by group
     assert (r.groupby("snp_id").n_alts.nunique() == 1).all()
+
+
+def _tri_vcf(tmp_path):
+    """A site with no majority allele, one with a majority, and one where REF is absent.
+
+    The third is the case the `0 < af < 1` gate in the selection statistic silently deletes:
+    every sample carries an alternate, so the collapsed `af` is 1.0 even though the site is
+    perfectly polymorphic and maximally informative.
+    """
+    samples = [f"s{i}" for i in range(1, 9)]
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples)]
+    rows = [
+        # 4 REF, 2 C, 2 G  ->  p = .5/.25/.25, he = 1 - (.25+.0625+.0625) = 0.625
+        ("1000", "A", "C,G", ["0/0"] * 4 + ["1/1"] * 2 + ["2/2"] * 2),
+        # 4 REF, 4 C        ->  he = 1 - (.25+.25) = 0.5, and af collapses to the same 0.5
+        ("2000", "A", "C,G", ["0/0"] * 4 + ["1/1"] * 4),
+        # REF absent: 4 C, 4 G -> he = 0.5, but the collapsed af is 1.0
+        ("3000", "A", "C,G", ["1/1"] * 4 + ["2/2"] * 4),
+    ]
+    for pos, ref, alt, gts in rows:
+        hdr.append(f"chr1\t{pos}\t.\t{ref}\t{alt}\t.\t.\t.\tGT\t" + "\t".join(gts))
+    p = tmp_path / "tri.vcf"
+    p.write_text("\n".join(hdr) + "\n")
+    return str(p)
+
+
+def test_expected_heterozygosity_is_the_k_allele_form(tmp_path):
+    """`he = 1 - sum(p_i^2)` over every allele including REF, not `2p(1-p)`."""
+    g, _ = compute_allele_freqs(_tri_vcf(tmp_path))
+    he = dict(zip(g["snp_id"], g["he"]))
+    assert he["chr1:999"] == pytest.approx(0.625)
+    assert he["chr1:1999"] == pytest.approx(0.5)
+    assert he["chr1:2999"] == pytest.approx(0.5)
+
+
+def test_he_separates_two_sites_the_collapsed_af_cannot(tmp_path):
+    """A 4/2/2 site and a 4/4 site both give af = 0.5; their diversity differs."""
+    g, _ = compute_allele_freqs(_tri_vcf(tmp_path))
+    row = g.set_index("snp_id")
+    assert row.loc["chr1:999", "af"] == pytest.approx(0.5)
+    assert row.loc["chr1:1999", "af"] == pytest.approx(0.5)
+    assert row.loc["chr1:999", "he"] != row.loc["chr1:1999", "he"]
+
+
+def test_a_ref_absent_site_has_af_one_but_real_diversity(tmp_path):
+    """This is why the statistic must gate on `he > 0`, not on `0 < af < 1`."""
+    g, _ = compute_allele_freqs(_tri_vcf(tmp_path))
+    row = g.set_index("snp_id").loc["chr1:2999"]
+    assert row["af"] == pytest.approx(1.0)
+    assert row["he"] == pytest.approx(0.5)
+    assert row["n_alleles_obs"] == 2
+
+
+def test_he_reduces_to_2pq_on_a_biallelic_site(tmp_path):
+    """The k-allele form must not move an existing biallelic number."""
+    g, _ = compute_allele_freqs(_tri_vcf(tmp_path))
+    row = g.set_index("snp_id").loc["chr1:1999"]
+    p = row["af"]
+    assert row["he"] == pytest.approx(2 * p * (1 - p))
+
+
+def test_n_alleles_obs_counts_what_is_carried_not_what_is_listed(tmp_path):
+    """`n_alts` is the ALT column's length; `n_alleles_obs` is how many are really there."""
+    g, _ = compute_allele_freqs(_tri_vcf(tmp_path))
+    row = g.set_index("snp_id")
+    assert row.loc["chr1:999", "n_alts"] == 2          # ALT lists C and G
+    assert row.loc["chr1:999", "n_alleles_obs"] == 3   # REF, C and G are all carried
+    assert row.loc["chr1:1999", "n_alts"] == 2         # ALT still lists both
+    assert row.loc["chr1:1999", "n_alleles_obs"] == 2  # but nobody carries G
+
+
+def test_he_is_on_every_per_alt_row_and_on_the_group_table(tmp_path):
+    """Both are site-level facts, so they ride along like `n_alts` does."""
+    vcf = _tri_vcf(tmp_path)
+    per, _ = compute_allele_freqs(vcf, per_alt=True)
+    tri = per[per["snp_id"] == "chr1:999"]
+    assert len(tri) == 2
+    assert tri["he"].nunique() == 1 and tri["he"].iloc[0] == pytest.approx(0.625)
+
+    s2g = {f"s{i}": ("A" if i <= 4 else "B") for i in range(1, 9)}
+    _, grp = compute_allele_freqs(vcf, s2g)
+    a = grp[(grp["group"] == "A") & (grp["snp_id"] == "chr1:999")]
+    # group A is s1..s4, all reference at that site: no diversity within it
+    assert a["he"].iloc[0] == pytest.approx(0.0)
+    assert a["n_alleles_obs"].iloc[0] == 1

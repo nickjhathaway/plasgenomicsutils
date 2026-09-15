@@ -52,7 +52,26 @@ def read_dosages(vcf_path, samples=None, regions=None, het="missing", min_depth=
     site; ``het="dosage"`` keeps it as 1. Correlation is invariant to the 0/2 scaling, so
     this matches a 0/1 haploid coding exactly.
 
-    Returns ``(gn, chrom, pos, samples)`` with ``pos`` 0-based.
+    **Multiallelic records are skipped**, and the count is reported. ``*`` does not count
+    towards that: a spanning deletion is not an alternate base, so ``A > T,*`` is a biallelic
+    SNP with a note attached and is read as one, with the calls that ARE the deletion masked
+    to missing. A record whose only alternate is ``*`` carries no SNP and is skipped.
+ r-squared is a squared
+    correlation between two *binary* indicators; two multiallelic loci give a contingency
+    table with more than one degree of freedom and no unique scalar summary. This coding
+    cannot express that: ``gt_types`` reports 3 for any homozygous-alternate call, so ``1/1``
+    and ``2/2`` both became dosage 2 and two different alleles collapsed into one symbol,
+    which inflates r-squared rather than shrinking the panel. LD decay needs SNP *density*
+    rather than every site, so dropping them is the right trade -- and a dropped site is
+    visible in the variant count, while a merged one leaves no trace.
+
+    Skipping them also settles a second problem: :func:`_maf` here computes the *sum of
+    alternates*, which ``maf_filter``'s own docstring rejects, while ``maf_filter`` uses the
+    second-most-common allele. The two readings differ **only** at a multiallelic site, so
+    once those are gone ``ld_decay --maf`` and ``maf_filter --maf-min`` mean the same thing.
+
+    Returns ``(gn, chrom, pos, samples, counts)``, ``pos`` 0-based, ``counts`` holding
+    ``variants_read`` and ``multiallelic_skipped``.
     """
     from cyvcf2 import VCF
 
@@ -62,12 +81,33 @@ def read_dosages(vcf_path, samples=None, regions=None, het="missing", min_depth=
         raise SystemExit(f"{vcf_path}: no samples selected")
 
     rows, chroms, positions = [], [], []
+    counts = {"variants_read": 0, "multiallelic_skipped": 0, "spanning_del_masked": 0}
     it = (v for r in regions for v in vcf(r)) if regions else vcf
     for v in it:
+        counts["variants_read"] += 1
+        alts = list(v.ALT)
+        # `*` is a spanning deletion, not an alternate base. `A > T,*` is a biallelic SNP
+        # with a note attached, and counting the note made it "multiallelic" and threw the
+        # SNP away -- on a real Uganda callset that was a large share of the panel, and LD
+        # decay is exactly the analysis that needs SNP density.
+        star = [i for i, a in enumerate(alts, start=1) if a == "*"]
+        if len(alts) - len(star) > 1:
+            counts["multiallelic_skipped"] += 1
+            continue
+        if not (len(alts) - len(star)):
+            counts["multiallelic_skipped"] += 1     # nothing but a deletion: no SNP here
+            continue
         gt = v.gt_types                       # 0 hom-ref, 1 het, 2 unknown, 3 hom-alt
         d = np.full(len(names), -1, dtype=np.int8)
         d[gt == 0] = 0
         d[gt == 3] = 2
+        if star:
+            # a haplotype with the sequence deleted has no base to correlate; -1 is what
+            # "no call here" already means to `rogers_huff_r`
+            alleles = v.genotype.array()[:, :-1]
+            deleted = np.isin(alleles, star).any(axis=1)
+            counts["spanning_del_masked"] += int((deleted & (d >= 0)).sum())
+            d[deleted] = -1
         if het == "dosage":
             d[gt == 1] = 1
         if min_depth > 0:
@@ -78,13 +118,29 @@ def read_dosages(vcf_path, samples=None, regions=None, het="missing", min_depth=
         chroms.append(v.CHROM)
         positions.append(v.POS - 1)           # VCF is 1-based; everything here is not
     vcf.close()
+    if counts["multiallelic_skipped"]:
+        print(f"  skipped {counts['multiallelic_skipped']:,} multiallelic record(s) of "
+              f"{counts['variants_read']:,}: r-squared is defined between two biallelic "
+              f"loci, and merging the alternates would inflate it")
+    if counts["spanning_del_masked"]:
+        print(f"  masked {counts['spanning_del_masked']:,} spanning-deletion call(s) as "
+              f"missing: `*` says the sequence is absent, so there is no base to correlate")
     if not rows:
-        raise SystemExit(f"{vcf_path}: no variants read")
-    return (np.vstack(rows), np.array(chroms), np.array(positions, dtype=np.int64), names)
+        raise SystemExit(
+            f"{vcf_path}: no biallelic variants read"
+            + (f" ({counts['multiallelic_skipped']:,} record(s) were multiallelic)"
+               if counts["multiallelic_skipped"] else ""))
+    return (np.vstack(rows), np.array(chroms), np.array(positions, dtype=np.int64),
+            names, counts)
 
 
 def _maf(gn):
-    """Minor-allele frequency per variant, ignoring missing calls."""
+    """Minor-allele frequency per variant, ignoring missing calls.
+
+    ``read_dosages`` has already dropped multiallelic records, so the single ALT's frequency,
+    the sum of alternates and the second-most-common allele are all the same number here --
+    which is what makes this agree with ``maf_filter``'s ``INFO/MAF``.
+    """
     called = gn >= 0
     n = called.sum(axis=1)
     alt = np.where(called, gn, 0).sum(axis=1) / 2.0     # 0/2 coding -> allele count

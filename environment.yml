@@ -38,6 +38,25 @@ dependencies:
   # speed -- but a lot of it. pysam reads roughly 90 kb of genome per second per core,
   # so a 23 Mb genome is ~4 minutes per sample without it.
   - mosdepth >=0.3
+  # --- recombination-rate map (ld_recombination) -- estimators NOT installed here ---
+  # ld_recombination shells out to an external estimator; neither is a dependency of this
+  # env. LDhat (--emit ldhat) is the recommended one for Pf and is a separate C build --
+  # see scripts/build_ldhat.sh (x86_64/Rosetta on Apple Silicon). pyrho (--emit pyrho) is
+  # the fast alternative and lives in its own conda env, deliberately NOT added here: the
+  # bioconda recipe (0.2.1) hard-pins `msprime >=0.7,<1.0`, msprime 0.7.x has no osx-arm64
+  # build, so adding it makes the WHOLE env unsolvable on Apple Silicon. pyrho recipe
+  # (osx-arm64, 2026-09):
+  #   mamba create -n pyrho -c conda-forge -c bioconda python=3.11 "msprime>=1" numba \
+  #       scipy "pandas<3" pytables cyvcf2 pip
+  #   mamba run -n pyrho pip install \
+  #       "git+https://github.com/popgenmethods/ldpop" "git+https://github.com/popgenmethods/pyrho"
+  # Two non-obvious pins, both required:
+  #   * install from GitHub, not `pip install pyrho`: pyrho needs `ldpop`, which is not on
+  #     PyPI (GitHub-only), so plain pip cannot resolve it.
+  #   * pandas<3: pandas 3.0 copy-on-write returns a read-only `.values`, and pyrho's njit
+  #     `_single_vec_downsample` signature rejects a readonly array -> make_table crashes.
+  # gives pyrho 0.2.1 + msprime 1.4.4 + numpy 2.4 + numba 0.67 + cyvcf2 0.34; make_table and
+  # optimize (ploidy 1, the only ploidy pyrho supports -- exactly right for haploid Pf) run.
   # --- test / dev ---
   - pytest >=7.0
   - pip

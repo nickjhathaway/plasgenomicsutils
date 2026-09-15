@@ -4,17 +4,97 @@ Each step is a parameterized command backed by `bcftools`/`bedtools`, reporting
 before/after variant counts.
 
 ```bash
-plasgenomicsutils hard_qc_filter --input in.bcf --output 01.bcf            # QD/MQ/SOR/RankSums, keep PASS
+plasgenomicsutils caller_pass_filter --input in.bcf --output 01.bcf         # the caller's own FILTER column
+plasgenomicsutils hard_qc_filter --input 01.bcf --output 02.bcf            # QD/MQ/SOR/RankSums
 plasgenomicsutils singleton_filter_add_ads --input 01.bcf --output 02.bcf  # drop singletons, add FORMAT/ADS
 plasgenomicsutils tandem_repeat_mask --input 02.bcf --output 03.bcf        # --bed defaults to builtin:pf3d7_tandem_repeats
 plasgenomicsutils core_region_filter  --input 03.bcf --output 04.bcf       # keep core genome
 plasgenomicsutils paralog_mask        --input 04.bcf --output 05.bcf       # drop paralog/multigene families (optional, see Pipeline)
 plasgenomicsutils filter_ad_regenotype --input-vcf 05.bcf --output-vcf 06.bcf  # clean low AD, re-genotype
-plasgenomicsutils biallelic_snp_filter --input 06.bcf --output 07.bcf      # keep biallelic SNPs
-plasgenomicsutils sample_coverage_filter --input 07.bcf --output 08.bcf
-plasgenomicsutils locus_missingness_filter --input 08.bcf --output 09.bcf
-plasgenomicsutils maf_filter --input 09.bcf --output 10.bcf --maf-min 0.02 --maf-max 0.98
+plasgenomicsutils spanning_del_filter --input 06.bcf --output 07.bcf       # `*` -> missing, then drop the allele
+plasgenomicsutils biallelic_snp_filter --input 07.bcf --output 08.bcf --no-biallelic  # SNPs only; keep multiallelic ones
+plasgenomicsutils sample_coverage_filter --input 08.bcf --output 09.bcf
+plasgenomicsutils locus_missingness_filter --input 09.bcf --output 10.bcf
+plasgenomicsutils maf_filter --input 10.bcf --output 11.bcf --maf-min 0.02 --maf-max 0.98
 ```
+
+### The callset keeps multiallelic SNPs
+
+`biallelic_snp_filter` asks two separate questions, and the shipped default now answers them
+differently: **SNPs only, yes; one ALT per record, no.**
+
+A site with three alleles is where independent origins sit. At *pfpx1* codon 384, D384A,
+D384G and D384Y arose separately, and `-M2` deletes exactly those sites. Everything this
+pipeline feeds can read them:
+
+| consumer | how |
+|---|---|
+| `hmmibd-rs` | models a per-allele frequency vector; `--max-all` defaults to 8 |
+| Fws | `1 - sum(p^2)` over every allele, at both levels |
+| `maf_filter` | `INFO/MAF`, the second-most-common allele |
+| the QC filter here | SOR and the `*BZ` effect sizes pool every ALT |
+| `singleton_filter_add_ads` | carrier counts are per ALT |
+
+Pass `--biallelic` (or `"biallelic": true` in the config) when the consumer genuinely needs
+one ALT per record. The R package's `load_genotypes()` still does, until its backend is
+replaced — it reports how many records it skipped, so the loss is visible, but it is a loss.
+
+The whitelist does **not** rescue a multiallelic record from `--biallelic`. Letting one
+through would break anything downstream relying on the file being biallelic, silently and far
+from here. Instead the run says which whitelisted records the step removed, so a resistance
+codon that turns out to be multiallelic announces itself at the moment it goes:
+
+```
+     WARNING: 1 whitelisted record(s) were removed by biallelic_snp_filter, which does not
+     honour the whitelist.
+       Pf3D7_13_v3:1725591 A>C,G
+```
+
+### `*` alleles: `spanning_del_filter` (off by default)
+
+A `*` in ALT says a deletion called somewhere else covers this position in some samples.
+
+**`--snps-only` drops every record carrying one.** It asks for sites where every sample has a
+base to compare, and `A > *,T` is not one however well T behaves: part of the cohort has no
+sequence there at all. Keeping it would make `--snps-only` mean two different things
+depending on whether the overlapping deletion happened to be called.
+
+**`spanning_del_filter` is how you keep those sites**, and it is worth more than it looks.
+It recodes the deleted calls as missing and drops the allele, after which the record really
+is a clean SNP and passes `--snps-only` normally. Measured on the shipped Pf7 fixture, after
+trimming alleles no genotype carries:
+
+| SNP panel from `--snps-only` | records | of which multiallelic |
+|---|---|---|
+| as-is | 577 | 50 |
+| after `spanning_del_filter` | **755** | 64 |
+
+So the step adds 178 records — **31% more SNPs** — because a `*` sitting beside a real SNP is
+common in a joint callset and would otherwise take the whole record with it.
+
+**It is still off by default**, because the recode discards a real observation. A `*` is a
+confident statement that the sequence is absent, not a failure to call: a site with 20 deleted
+samples and 5 carrying a variant comes out reading as though 20 samples could not be
+genotyped. In *P. falciparum* that weighs heavier than elsewhere, since across the dimorphic
+regions a deletion is frequently the *other haplotype* rather than a dropout, and which
+samples carry it is a result. Turn it on when the question is about the variants of the
+**non-deleted** strains and the deletion itself is not the subject.
+
+The cost is bounded and reported per run. At the 369 fixture records where `*` sits beside
+real alleles, a mean 17.2% of called samples carry it; 77% of those records lose under a
+quarter of their samples, and none loses more than 90%. A call is nulled slot by slot, so
+`*/T` becomes `./T` and keeps the `T` it does carry — 14.5% of the fixture's `*` calls are
+partial like that. Only a call naming nothing but `*` goes fully missing. Because the loss
+shows up as missingness at sites that still look healthy in the variant counts, run
+`locus_missingness_filter` after this step, not before.
+
+### How `*` is counted
+
+A record carrying a `*` is its own class, `spanning_del`, whatever its other alleles read —
+so the tally agrees with the filter rather than promising SNPs that `--snps-only` then
+removes. On the shipped fixture, post-trim, that is 1,617 of 3,123 records: routinely the
+largest class in a joint callset, which is why it is named rather than left to share `other`
+with symbolic alleles and breakends.
 
 Region masks (`tandem_repeat_mask`, `core_region_filter`, `paralog_mask`) take `--bed`,
 a plain path or a bundled asset via `builtin:<name>` (`pf3d7_core_regions`,
@@ -30,6 +110,7 @@ positions had nothing to call, and how many real variants failed quality:
 ```
   input                      437
   no_alt_filter              275     <- 162 positions were non-variant
+  caller_pass_filter         275     <- nothing the caller had flagged
   hard_qc_filter             175     <- 100 variants failed QC
 ```
 
@@ -48,6 +129,83 @@ In the default chain the end result is the same, since `biallelic_snp_filter` dr
 non-variant records later regardless — what changes is where they go and what the counts
 tell you.
 
+## The caller's own FILTER column is its own step
+
+A joint callset arrives with the caller's verdicts already in `FILTER`: Pf7's VQSR tranches
+and `Low_VQSLOD`, its region classes (`SubtelomericHypervariable`, `Mitochondrion`, ...),
+`MissingVQSLOD` on the contigs VQSR never scored. `caller_pass_filter` keeps the records
+whose `FILTER` is `PASS` or `.` and counts what it removes **by flag**, so "the caller had
+already flagged all of it" is something the log says:
+
+```
+[02] caller_pass_filter -> 02_caller_pass_filter.bcf
+NOTE: 19 record(s) removed on the caller's own FILTER (MissingVQSLOD;Mitochondrion: 19)
+     variants: 0
+     no variants remain after [02] caller_pass_filter; 13 later step(s) not run
+```
+
+`"allow"` lists flags to tolerate — a record whose flags are *all* allowed is kept.
+`["MissingVQSLOD", "Mitochondrion", "Apicoplast"]` keeps the organelle records a nuclear
+VQSR model could not score. `"enabled": false` keeps everything the caller flagged and lets
+the metric thresholds decide.
+
+When the caller's verdicts are not wanted at all — a VQSR model trained on the wrong data,
+region classes this chain re-derives from its own BEDs — `--reset-filter` (or
+`"reset_filter": true` in the config) clears the FILTER column on every record before the
+chain runs. It is a step `00` with its own output and tally row, and it reports what it
+cleared by flag, so the decision leaves a trace:
+
+```
+[00] reset_filter -> 00_reset_filter.bcf
+NOTE: FILTER cleared on every record; 19 carried a caller flag (MissingVQSLOD;Mitochondrion: 19)
+```
+
+`caller_pass_filter` then finds nothing to act on and says so. The finer tool is its
+`"allow"` list; the reset is the blunt one.
+
+`hard_qc_filter` judges on its metrics alone and **does not act on the FILTER column**. It
+used to, by selecting `PASS` after applying its thresholds — which enforced the caller's
+flags silently, as though they were its own metrics, and emptied any callset the caller
+had flagged throughout with no word as to why. It now reports the flags it left in place:
+
+```
+NOTE: 6 kept record(s) carry a FILTER set by the caller (MissingVQSLOD;Mitochondrion: 6);
+      hard_qc_filter judges on its own metrics and does not act on those -- caller_pass_filter does
+```
+
+On a Pf7 callset the two steps in sequence keep exactly what the old single step kept; the
+difference is that the FILTER-only removals are now their own number in `variant_counts.tsv`.
+
+## When a step removes everything
+
+A step that leaves no variants stops the run. The later steps are listed as `not run (no
+variants remain)` in the log and in `variant_counts.tsv`, no SNP panel is written, and the
+exit is clean. Before this the chain carried on: a sample-coverage rule over zero loci
+dropped every sample, and a callset with no samples has lost the FORMAT tags the next step
+reads, so the run died two steps later on `the tag "ADS" is not defined` — an error about
+the wrong thing.
+
+## What the callset looks like at the end
+
+The chain ends with two report steps that change nothing. `sample_summary` is one row per
+sample: the coverage columns `sample_coverage_filter` decides on and the Fws columns
+`fws_filter` decides on, side by side, with `would_drop_coverage` / `would_drop_fws` saying
+what those filters *would* do at their thresholds. `variant_summary` is the records by
+class and, within each class, by how many ALT alleles they carry, as counts and as fractions
+of the callset and of the class:
+
+```
+[16] sample_summary (report) -> 16_sample_summary.tsv
+     351 sample(s): median fraction covered 1.000, 0 under 0.8; Fws scored for 351 over 617 site(s), median 0.998, 348 monoclonal at >= 0.95
+[17] variant_summary (report) -> 17_variant_summary.tsv
+     617 record(s): snps 617 100.0% (biallelic 591 95.8%, triallelic 26 4.2%)
+```
+
+They exist because the filters that would say these things are the ones most often switched
+off, and they only speak for the samples they drop. `FORMAT/ADS` is added on a temporary
+copy when the input lacks it. Both are also commands (`sample_summary`, `variant_summary`)
+for any callset.
+
 ## Hard QC on a bcftools callset
 
 `hard_qc_filter` defaults to GATK's metrics — `QD`, `MQ`, `SOR`, `MQRankSum`,
@@ -59,7 +217,7 @@ tell you.
 | is the variant only on one strand? | `SOR > 3` | `SOR > 3`, computed from `ADF`/`ADR` |
 | does the variant sit at the ends of reads? | `ReadPosRankSum < -5` | `abs(RPBZ) > 5`, `abs(SCBZ) > 5`, each with effect `> 0.15` |
 | are the reads carrying it poorly mapped? | `MQRankSum < -5`, `MQ < 55` | `abs(MQBZ) > 5`, `abs(MQSBZ) > 5`, each with effect `> 0.15`; `MQ < 55` |
-| is the call weak for its depth? | `QD < 20` | `QUAL/INFO/DP` (off by default — see below) |
+| is the call weak for its depth? | `QD < 10` | `QUAL/INFO/DP` (off by default — see below) |
 | — | — | `abs(BQBZ)` (with effect), `MQ0F` (optional extras) |
 
 ```bash
@@ -130,8 +288,13 @@ of sites was 5.2). `--caller gatk` therefore keeps its plain thresholds. A multi
 VCF from HaplotypeCaller run directly on many BAMs, with no GVCF step, does pool reads and
 would inflate; none of the project's callsets are of that kind.
 
+**`QD < 10`** (was 20 before v0.3.2). QD is QUAL over the reads of the non-reference
+samples, so depth cancels out of it; the 20 was mostly removing thinly covered sWGA sites by
+proxy, which the missingness and coverage filters do directly. The evidence is in the
+project's `investigations/qd_threshold/`.
+
 **`QD` does not carry across.** bcftools QUAL is not on GATK's scale — a clean 40x site
-called at QUAL 222 has `QUAL/DP` of 5.6, so reusing GATK's `QD < 20` would throw away a
+called at QUAL 222 has `QUAL/DP` of 5.6, so reusing GATK-mode's `QD < 10` would throw away a
 good callset. It is therefore off by default under `--caller bcftools`; pass `--qd` to set
 it on a scale you have checked. Every threshold takes `none` to switch that test off.
 
@@ -428,7 +591,8 @@ whose file is gone, so the run is as auditable as it was; only the bytes are mis
 flowchart TD
     IN(["input callset — VCF / BCF"])
     S01["01 · no_alt_filter *"]
-    S02["02 · hard_qc_filter *"]
+    S01b["02 · caller_pass_filter *"]
+    S02["03 · hard_qc_filter *"]
     S03["03 · singleton_counts"]
     S04["04 · singleton_filter_add_ads *"]
     S05["05 · tandem_repeat_mask *"]
@@ -442,7 +606,7 @@ flowchart TD
     S13["13 · fws_filter"]
     OUT(["filtered callset + SNP panel BED"])
 
-    IN --> S01 --> S02 --> S03 --> S04 --> S05 --> S06 --> S07 --> S08
+    IN --> S01 --> S01b --> S02 --> S03 --> S04 --> S05 --> S06 --> S07 --> S08
     S08 --> S09 --> S10 --> S11 --> S12 --> S13 --> OUT
 
     classDef variant stroke:#0f766e,stroke-width:2px
@@ -451,7 +615,7 @@ flowchart TD
     classDef report stroke:#64748b,stroke-width:1px,stroke-dasharray:2 3
     classDef disabled stroke:#a16207,stroke-width:2px,stroke-dasharray:6 4
 
-    class S01,S02,S04,S05,S06,S09,S11,S12 variant
+    class S01,S01b,S02,S04,S05,S06,S09,S11,S12 variant
     class S08 genotype
     class S10 sample
     class S03 report

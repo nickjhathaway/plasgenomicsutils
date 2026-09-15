@@ -32,6 +32,7 @@ from .scripts.fws.calculate_fws import calculate_fws
 
 # -- LD leaves ----------------------------------------------------------------
 from .scripts.ld.decay import ld_decay
+from .scripts.ld.recombination import ld_recombination
 
 # -- Coverage leaves ----------------------------------------------------------
 from .scripts.cov.depth_stats import depth_stats
@@ -43,11 +44,15 @@ from .scripts.vcf.filter_ad_regenotype import filter_ad_regenotype
 from .scripts.vcf.fws_filter import fws_filter
 from .scripts.vcf.harmonize_bcf import harmonize_bcf
 from .scripts.vcf.no_alt_filter import no_alt_filter
+from .scripts.vcf.caller_pass_filter import caller_pass_filter
 from .scripts.vcf.hard_qc_filter import hard_qc_filter
 from .scripts.vcf.singleton_filter_add_ads import singleton_filter_add_ads
 from .scripts.vcf.singleton_counts import singleton_counts
+from .scripts.vcf.sample_summary import sample_summary
+from .scripts.vcf.variant_summary import variant_summary
 from .scripts.vcf.wsaf_profile import wsaf_profile
 from .scripts.vcf.biallelic_snp_filter import biallelic_snp_filter
+from .scripts.vcf.spanning_del_filter import spanning_del_filter
 from .scripts.vcf.strip_stale_format import strip_stale_format
 from .scripts.vcf.tandem_repeat_mask import tandem_repeat_mask
 from .scripts.vcf.core_region_filter import core_region_filter
@@ -59,6 +64,7 @@ from .scripts.vcf.filter_pipeline import filter_pipeline
 from .scripts.vcf.strand_bias_scan import strand_bias_scan
 from .scripts.vcf.variant_spacing import variant_spacing
 from .scripts.vcf.vcf_to_bed import vcf_to_bed
+from .scripts.vcf.split_by_meta import split_by_meta
 from .scripts.vcf.strand_read_check import strand_read_check
 
 
@@ -93,6 +99,9 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
     "ld": {
         "ld_decay": Command(ld_decay,
             "Mean r-squared vs SNP-pair distance per group: how fast LD decays"),
+        "ld_recombination": Command(ld_recombination,
+            "Per-SNP recombination-rate (rho) map from monoclonal isolates, via LDhat "
+            "(recommended for Pf) or pyrho"),
     },
     "coverage": {
         "coverage_depth_stats": Command(depth_stats,
@@ -108,6 +117,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Harmonize ALT sets of separately-called cohorts for bcftools merge"),
         "vcf_to_bed": Command(vcf_to_bed,
             "Convert a VCF/BCF to 0-based BED (stdout by default)"),
+        "split_by_meta": Command(split_by_meta,
+            "Split a callset into per-group VCFs by a metadata column; refill AC/AF, optional per-group MAF and ALT trim"),
     },
     # The filtering chain: the runner, then its steps **in the order the default
     # config runs them** rather than alphabetically -- the order is the point, and a
@@ -118,8 +129,10 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Run an ordered, config-driven chain of filtering steps, tallying counts"),
         "no_alt_filter": Command(no_alt_filter,
             "Drop records with no ALT allele (non-variant positions), counted separately"),
+        "caller_pass_filter": Command(caller_pass_filter,
+            "Keep records the caller itself passed (FILTER PASS or '.'), counting removals by flag"),
         "hard_qc_filter": Command(hard_qc_filter,
-            "GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS"),
+            "Hard filter on the caller's INFO metrics (QD/MQ/SOR/RankSums, or bcftools' *BZ)"),
         "singleton_filter_add_ads": Command(singleton_filter_add_ads,
             "Drop near-private variants and add the FORMAT/ADS summed-depth tag"),
         "tandem_repeat_mask": Command(tandem_repeat_mask,
@@ -130,6 +143,8 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
             "Remove variants overlapping paralogous/multigene-family genes"),
         "filter_ad_regenotype": Command(filter_ad_regenotype,
             "Clean within-sample AD artifacts by depth/frequency, then re-genotype"),
+        "spanning_del_filter": Command(spanning_del_filter,
+            "Recode `*` calls as missing and drop the allele, leaving the non-deleted strains' variants"),
         "biallelic_snp_filter": Command(biallelic_snp_filter,
             "Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping"),
         "sample_coverage_filter": Command(sample_coverage_filter,
@@ -147,6 +162,10 @@ REGISTRY: Dict[str, Dict[str, Command]] = {
     "vcf_reporting": {
         "singleton_counts": Command(singleton_counts,
             "Per-sample count of variants where it is the only non-reference carrier"),
+        "sample_summary": Command(sample_summary,
+            "Per-sample coverage and Fws for a callset as it stands (a table, nothing dropped)"),
+        "variant_summary": Command(variant_summary,
+            "Records by class and ALT-allele count, as counts and fractions"),
         "strand_bias_scan": Command(strand_bias_scan,
             "Flag strand-bias (SSE) fake-het artifacts from FORMAT/ADF+ADR; emit a blacklist BED"),
         "strand_read_check": Command(strand_read_check,

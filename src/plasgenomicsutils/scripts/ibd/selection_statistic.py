@@ -174,11 +174,23 @@ def selection_statistic():
     global_af = S.load_global_af(args.af, snp_labels, af_col=args.af_col)
     group_af_table = (S.load_group_af_table(args.af_group, af_col=args.af_col)
                       if args.af_group else None)
+    global_he = S.load_global_he(args.af, snp_labels)
+    n_alleles, maf_k = S.load_global_bin_inputs(args.af, snp_labels)
+    if global_he is None:
+        print("  no `he` column: using the biallelic scale and MAF binning. Re-run "
+              "compute_allele_freqs to get the k-allele forms.")
+    else:
+        n_multi = 0 if n_alleles is None else int((n_alleles > 2).sum())
+        print(f"  using `he` for the scale "
+              f"({int(np.isfinite(global_he).sum()):,} SNPs have it)"
+              + (f"; {n_multi:,} multiallelic SNP(s) bin on `maf_k`" if n_multi
+                 else "; the binning is unchanged, every SNP being biallelic"))
 
     print("\n--- Global selection statistic ---")
     stats, bin_df = S.compute_selection_statistic(mat, global_af, n_bins=args.n_bins,
                                                  label="global", variant=args.xirs_variant,
-                                                 tail=args.tail)
+                                                 tail=args.tail, he=global_he,
+                                                 n_alleles=n_alleles, maf_k=maf_k)
     perm = _permute(args, mat, global_af)
     out_df, info = S.assemble_output(snp_df, stats, args.alpha, fdr_alpha=args.fdr_alpha,
                                      perm=perm, pool=args.empirical_pool,
@@ -211,9 +223,11 @@ def selection_statistic():
             continue
         mat_sub = mat[row_idx, :]
         af_reg = S.get_af_for_group(group, snp_labels, group_af_table, global_af)
+        he_reg = S.get_he_for_group(group, snp_labels, group_af_table, global_he)
         stats_r, bin_df_r = S.compute_selection_statistic(mat_sub, af_reg, n_bins=args.n_bins,
                                                          label=group, variant=args.xirs_variant,
-                                                         tail=args.tail)
+                                                         tail=args.tail, he=he_reg,
+                                                         n_alleles=n_alleles, maf_k=maf_k)
         perm_r = _permute(args, mat_sub, af_reg, indent="    ")
         out_r, info_r = S.assemble_output(snp_df, stats_r, args.alpha, group=group,
                                           fdr_alpha=args.fdr_alpha, perm=perm_r,

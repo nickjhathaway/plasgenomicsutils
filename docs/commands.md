@@ -30,6 +30,7 @@ plasgenomicsutils <command> -h     # options for one command
 | command | what it does |
 | --- | --- |
 | `ld_decay` | Mean r² vs SNP-pair distance per group: how fast LD decays |
+| `ld_recombination` | Per-SNP recombination-rate (ρ) map from monoclonal isolates, via LDhat (recommended for Pf) or pyrho |
 
 ## `coverage`
 
@@ -47,6 +48,7 @@ Making a callset, merging one, converting one.
 | `call_variants` | Call variants with bcftools, annotated for `hard_qc_filter`, parallel over regions |
 | `harmonize_bcf` | Harmonize ALT sets of separately-called cohorts for `bcftools merge` |
 | `vcf_to_bed` | Convert a VCF/BCF to 0-based BED (stdout by default) |
+| `split_by_meta` | Split a callset into per-group VCFs by a metadata column; refill AC/AF, optional per-group MAF and ALT trim |
 
 ## `vcf_filter_pipeline`
 
@@ -56,15 +58,17 @@ Making a callset, merging one, converting one.
 |---|---|
 | `filter_pipeline` | Run an ordered, config-driven chain of filtering steps, tallying counts |
 | `no_alt_filter` | Drop records with no ALT allele (non-variant positions), counted separately |
-| `hard_qc_filter` | GATK-style hard filter on INFO metrics (QD/MQ/SOR/RankSums), keep PASS |
+| `caller_pass_filter` | Keep records the caller itself passed (FILTER `PASS` or `.`), counting removals by flag |
+| `hard_qc_filter` | Hard filter on the caller's INFO metrics (QD/MQ/SOR/RankSums, or bcftools' *BZ) |
 | `singleton_filter_add_ads` | Drop near-private variants and add the `FORMAT/ADS` summed-depth tag |
 | `tandem_repeat_mask` | Remove variants overlapping a tandem-repeat BED |
 | `core_region_filter` | Keep only variants inside the core-genome BED |
 | `paralog_mask` | Remove variants overlapping paralogous/multigene-family genes |
 | `filter_ad_regenotype` | Clean within-sample AD artifacts by depth/frequency, then re-genotype |
+| `spanning_del_filter` | Recode `*` calls as missing and drop the allele, leaving the non-deleted strains' variants |
 | `biallelic_snp_filter` | Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping |
 | `sample_coverage_filter` | Drop low-coverage samples; refresh AC/AN/AF |
-| `locus_missingness_filter` | Keep loci with low missingness and high per-sample coverage |
+| `locus_missingness_filter` | Keep loci with low missingness and enough samples covered (80% at ADS 5) |
 | `maf_filter` | Keep variants within a minor-allele-frequency window |
 | `fws_filter` | Keep only monoclonal samples (Fws >= a threshold); refresh AC/AN/AF |
 | `strip_stale_format` | Strip stale genotype-linked FORMAT fields (e.g. `PL`) that no longer match the genotypes |
@@ -76,6 +80,8 @@ Reads a callset and writes a table; never changes the data.
 | Command | Description |
 |---|---|
 | `singleton_counts` | Per-sample count of variants where it is the only non-reference carrier |
+| `sample_summary` | Per-sample coverage and Fws for a callset as it stands (a table, nothing dropped) |
+| `variant_summary` | Records by class and ALT-allele count, as counts and fractions |
 | `strand_bias_scan` | Flag strand-bias (SSE) fake-het artifacts from `FORMAT/ADF+ADR`; emit a blacklist BED |
 | `strand_read_check` | Read-level strand-bias diagnostic at one site (+ optional ALT-read extraction) |
 | `variant_spacing` | Per-chromosome gaps between consecutive variants, and density per cM |

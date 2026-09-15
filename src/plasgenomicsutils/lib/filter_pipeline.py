@@ -3,7 +3,7 @@
 A pipeline config is JSON::
 
     {"steps": [
-        {"name": "hard_qc_filter",         "params": {"qd": 20, "mq": 55}},
+        {"name": "hard_qc_filter",         "params": {"qd": 10, "mq": 55}},
         {"name": "singleton_filter_add_ads"},
         {"name": "tandem_repeat_mask",     "params": {"bed": "tandems.bed"}, "ext": "vcf.gz"},
         {"name": "filter_ad_regenotype",   "params": {"min_reads": 2, "min_freq": 0.01}},
@@ -34,7 +34,7 @@ from pathlib import Path
 from . import vcf_filters as F
 from .assets import resolve_bed
 from .. import __version__
-from .bcftools import VARIANT_TYPES, index_vcf, variant_type_counts
+from .bcftools import EXTRA_COUNTS, VARIANT_TYPES, index_vcf, variant_type_counts
 from .regenotype import filter_ad_regenotype
 from .reporting import detail, listing, say
 from .strip_format import strip_stale_format
@@ -101,6 +101,21 @@ def _fws(inp, out, **kw):
     return dropped
 
 
+def _spanning_del(inp, out, **kw):
+    """Recode `*` calls to missing, saying how many samples that cost.
+
+    Said out loud because nothing else in the run would mention it: the samples a site loses
+    here do not show up as dropped records, only as missingness at sites that still look
+    perfectly healthy in the variant counts.
+    """
+    from .spanning_del import spanning_del_note
+
+    st = F.spanning_del_filter(inp, out, **kw)
+    say(spanning_del_note(st))
+    return st
+
+
+_spanning_del.target = F.spanning_del_filter
 _sample_coverage.target = F.sample_coverage_filter
 _fws.target_ref = (".fws", "fws_filter")
 
@@ -108,6 +123,7 @@ _fws.target_ref = (".fws", "fws_filter")
 # name -> callable(input_path, output_path, **params)
 STEPS = {
     "no_alt_filter": _whitelisted(F.no_alt_filter, "no_alt_filter"),
+    "caller_pass_filter": _whitelisted(F.caller_pass_filter, "caller_pass_filter"),
     "hard_qc_filter": _whitelisted(F.hard_qc_filter, "hard_qc_filter"),
     "singleton_filter_add_ads": _whitelisted(F.singleton_add_ads, "singleton_filter_add_ads"),
     "tandem_repeat_mask": _region(F.tandem_repeat_mask),
@@ -115,6 +131,7 @@ STEPS = {
     "paralog_mask": _region(F.paralog_mask),
     "filter_ad_regenotype": filter_ad_regenotype,
     "strip_stale_format": strip_stale_format,
+    "spanning_del_filter": _spanning_del,
     "biallelic_snp_filter": F.biallelic_snp_filter,
     "sample_coverage_filter": _sample_coverage,
     "fws_filter": _fws,
@@ -149,9 +166,18 @@ def _singleton_report(inp, out, **kw):
 #: rather than filtering it on quality (``biallelic_snp_filter`` -- letting a whitelisted
 #: multiallelic record through would break every downstream reader's assumption).
 WHITELISTABLE = {
-    "no_alt_filter", "hard_qc_filter", "singleton_filter_add_ads", "tandem_repeat_mask",
+    "no_alt_filter", "caller_pass_filter", "hard_qc_filter", "singleton_filter_add_ads",
+    "tandem_repeat_mask",
     "core_region_filter", "paralog_mask", "locus_missingness_filter", "maf_filter",
 }
+
+#: Steps that do **not** honour the whitelist but say what it would have saved. A whitelist
+#: that silently does nothing is worse than no whitelist: it reads as a guarantee. So for
+#: these the whitelist becomes a diagnostic instead -- you learn that the resistance codon you
+#: asked to protect was multiallelic at the moment it is removed, rather than weeks later when
+#: it is missing from a table. See
+#: :func:`~plasgenomicsutils.lib.vcf_filters.report_whitelisted_drops`.
+WARN_WHITELIST_DROPS = {"biallelic_snp_filter"}
 
 #: name -> callable(input_path, output_path, **params). A report reads the callset and
 #: writes a table; it never changes the data.
@@ -163,8 +189,36 @@ WHITELISTABLE = {
 _singleton_report.target_ref = (".singletons", "count_singletons")
 _singleton_report.extra_params = ("mad_cutoff", "duplicate_frac")
 
+def _sample_summary(inp, out, **kw):
+    """Per-sample coverage and Fws on the callset as it stands; drops nothing."""
+    from .callset_summary import (sample_summary_note, sample_summary_table,
+                                  write_sample_summary)
+
+    rows, n_sites = sample_summary_table(inp, **kw)
+    write_sample_summary(rows, out)
+    say("     " + sample_summary_note(rows, n_sites, frac_min=kw.get("frac_min", 0.80),
+                                      fws_min=kw.get("fws_min", 0.95)))
+    return len(rows)
+
+
+def _variant_summary(inp, out, **kw):
+    """Records by class and ALT-allele count, as counts and fractions."""
+    from .callset_summary import (variant_summary_note, variant_summary_table,
+                                  write_variant_summary)
+
+    rows = variant_summary_table(inp, **kw)
+    write_variant_summary(rows, out)
+    say("     " + variant_summary_note(rows))
+    return len(rows)
+
+
+_sample_summary.target_ref = (".callset_summary", "sample_summary_table")
+_variant_summary.target_ref = (".callset_summary", "variant_summary_table")
+
 REPORTS = {
     "singleton_counts": _singleton_report,
+    "sample_summary": _sample_summary,
+    "variant_summary": _variant_summary,
 }
 
 DEFAULT_CONFIG = {
@@ -173,6 +227,13 @@ DEFAULT_CONFIG = {
     # comments, and a resistance locus that a MAF floor or a coverage rule would otherwise
     # remove is exactly the thing worth keeping. A step's own params.keep_bed overrides it.
     "keep_bed": None,
+    # Clear the caller's FILTER column before anything runs, as a step 00 that reports what
+    # it cleared by flag. For when the caller-side verdicts are not wanted at all -- a VQSR
+    # model trained on the wrong data, region classes this chain re-derives from its own
+    # BEDs, a contig the caller never scored. caller_pass_filter then has nothing to act on.
+    # The finer tool is that step's "allow" list, which tolerates named flags and removes
+    # the rest.
+    "reset_filter": False,
     "steps": [
         # Non-variant records first, and in their own step: the bias statistics are
         # computed whether or not an ALT was called, so hard_qc_filter does remove them --
@@ -180,6 +241,14 @@ DEFAULT_CONFIG = {
         # trim first, so every count below describes the alleles this cohort actually
         # carries rather than the ones the callset it was subset from did
         {"name": "no_alt_filter", "params": {"keep": False, "trim": True}},
+        # The caller's own FILTER column -- VQSR tranches, Low_VQSLOD, the region classes,
+        # MissingVQSLOD on contigs VQSR never scored -- acted on in its own step, so what it
+        # removes is counted by flag rather than folded into "failed QC". hard_qc_filter
+        # judges on its metrics alone. `allow` lists flags to tolerate: the organelle
+        # records a nuclear VQSR model could not score, for instance --
+        # ["MissingVQSLOD", "Mitochondrion", "Apicoplast"]. Set "enabled": false to keep
+        # everything the caller flagged and let the metric thresholds decide.
+        {"name": "caller_pass_filter", "params": {"allow": []}},
         # `caller` is written out at its default for the same reason as keep_bed: a
         # bcftools callset carries none of GATK's metrics, and "bcftools" here is what
         # makes this step read the ones it does carry (FS/RPBZ/SCBZ/MQBZ/MQSBZ).
@@ -198,10 +267,36 @@ DEFAULT_CONFIG = {
         {"name": "paralog_mask", "enabled": False,
          "params": {"bed": "builtin:pf3d7_paralog_genes"}},
         {"name": "filter_ad_regenotype"},
-        # both tests written out at their defaults so the split is discoverable: `biallelic`
-        # off keeps multiallelic SNPs for downstream tools that can read them.
+        # Off by default, and written out so the choice is discoverable. `*` says a deletion
+        # called elsewhere covers this position, and recoding it to missing throws away a
+        # real, confident observation: a site with 20 deleted samples and 5 carrying a
+        # variant comes out looking as though 20 samples could not be called there, which is
+        # not what the data says. In P. falciparum that matters more than usual -- the
+        # dimorphic regions mean a deletion is often the other haplotype rather than a
+        # dropout, and which samples carry it is a result, not noise.
+        #
+        # Turn it on when the question is about the variants of the *non-deleted* strains
+        # and the deletion itself is not the subject -- then the recode is what stops a `*`
+        # being scored as a third allele. Its position here is the point: it must run BEFORE
+        # the biallelic test, or the records it would rescue are already gone. With it on,
+        # 312 records in the shipped Pf7 fixture come back as ordinary biallelic SNPs and the
+        # genuine multiallelic count falls from 544 to 232.
+        {"name": "spanning_del_filter", "enabled": False},
+        # `snps_only` on, `biallelic` OFF: the callset keeps multiallelic SNPs.
+        #
+        # The two tests are separate on purpose and both are written out so the choice is
+        # discoverable. A site with three alleles is where independent origins sit -- at
+        # pfpx1 codon 384, D384A, D384G and D384Y arose separately -- and `-M2` deletes
+        # exactly those. Everything this pipeline feeds can now read them: hmmibd-rs models
+        # per-allele frequencies, Fws is `1 - sum(p^2)` over all alleles, `maf_filter` uses
+        # the second-most-common allele, and the QC arithmetic here counts every ALT.
+        #
+        # Set `biallelic: true` when the consumer genuinely requires one ALT per record --
+        # and note that the R package's `load_genotypes()` still does, until its backend is
+        # replaced. It says how many records it skipped, so the loss is visible rather than
+        # silent, but it is a loss.
         {"name": "biallelic_snp_filter",
-         "params": {"snps_only": True, "biallelic": True, "mnp_handling": "split"}},
+         "params": {"snps_only": True, "biallelic": False, "mnp_handling": "split"}},
         {"name": "sample_coverage_filter"},
         {"name": "locus_missingness_filter"},
         {"name": "maf_filter", "params": {"maf_min": 0.02}},  # maf_max defaults to 1 - maf_min
@@ -211,6 +306,11 @@ DEFAULT_CONFIG = {
         # survivors no longer support is still there, which is why re-running maf_filter and
         # locus_missingness_filter after it is worth doing when the frequencies matter.
         {"name": "fws_filter", "enabled": False, "params": {"fws_min": 0.95}},
+        # What the callset looks like when the chain is done, as two tables that change
+        # nothing. The filters that would say so -- sample_coverage_filter, fws_filter -- are
+        # the ones most often off, and they only speak for the samples they drop.
+        {"name": "sample_summary", "report": True, "ext": "tsv"},
+        {"name": "variant_summary", "report": True, "ext": "tsv"},
     ]
 }
 
@@ -226,7 +326,7 @@ def load_config(path: str) -> dict:
 STEP_KEYS = ("name", "params", "ext", "enabled", "report")
 
 #: Keys a config may carry at the top level.
-CONFIG_KEYS = ("steps", "keep_bed", "remove_intermediates", "_meta")
+CONFIG_KEYS = ("steps", "keep_bed", "remove_intermediates", "reset_filter", "_meta")
 
 
 def _accepted_params(step) -> set[str] | None:
@@ -303,6 +403,72 @@ def validate_config(config: dict) -> None:
                        else f"\n  {name} takes no params"))
 
 
+#: Step params that name an **input file** the step reads, so every one can be checked to
+#: exist and open before the run starts rather than only when its step is reached. Output
+#: paths (``cov_table_path``, ``fws_table_path``, ``dropped_samples_path``) are not here --
+#: they are written, not read -- nor is ``regions`` (bcftools region *strings*, not a file).
+#: ``bed`` and ``keep_bed`` may be a ``builtin:`` reference, so they are resolved through
+#: :func:`resolve_bed` before the existence check, the same expansion the step itself does.
+INPUT_FILE_PARAMS = ("bed", "keep_bed", "meta")
+
+
+def _readable_file_error(path: str) -> str | None:
+    """``None`` if ``path`` is a file that opens for reading, else why it does not."""
+    if not os.path.exists(path):
+        return "no such file"
+    if os.path.isdir(path):
+        return "is a directory, not a file"
+    try:
+        with open(path, "rb"):
+            return None
+    except OSError as e:
+        return e.strerror or "cannot be opened"
+
+
+def check_input_paths(config: dict) -> None:
+    """Verify every input file the config points at exists and opens, before anything runs.
+
+    Structural validation (:func:`validate_config`) catches typos in step and param names;
+    this catches the other up-front mistake -- a path handed to a late step (a wrong
+    ``meta`` for ``maf_filter``, a moved whitelist BED) that would otherwise only surface
+    after the earlier steps had already written their output. Only enabled steps are
+    checked; a step switched off with ``"enabled": false`` will not run, so its paths do
+    not matter. ``builtin:`` bed references are resolved the way the steps resolve them, so
+    an unknown builtin name is caught here too.
+    """
+    top_keep = config.get("keep_bed")
+    for i, step in enumerate(config.get("steps", []), start=1):
+        if not isinstance(step, dict) or step.get("enabled", True) is False:
+            continue
+        name = step.get("name", "?")
+        params = step.get("params") or {}
+        if not isinstance(params, dict):
+            continue                       # validate_config already rejected this
+        # keep_bed follows the same override rule the runner uses: a step's own value wins,
+        # an explicit null opts the step out, and otherwise a whitelistable step inherits
+        # the top-level keep_bed. So the effective value is what actually gets opened.
+        effective = dict(params)
+        if ("keep_bed" not in params and top_keep is not None
+                and name in WHITELISTABLE):
+            effective["keep_bed"] = top_keep
+        for param in INPUT_FILE_PARAMS:
+            raw = effective.get(param)
+            if not raw or not isinstance(raw, str):
+                continue
+            try:
+                path = resolve_bed(raw) if param in ("bed", "keep_bed") else raw
+            except (SystemExit, FileNotFoundError, KeyError, ValueError) as e:
+                raise SystemExit(
+                    f"ERROR: step {i} ({name}): {param}={raw!r} could not be resolved: {e}")
+            why = _readable_file_error(path)
+            if why is not None:
+                shown = f"{raw!r}" + (f" (resolved to {path})" if path != raw else "")
+                raise SystemExit(
+                    f"ERROR: step {i} ({name}): {param} {shown}: {why}.\n"
+                    f"  Fix the path in the config before rerunning -- the pipeline writes "
+                    f"no output until every step's input files are readable.")
+
+
 def _jsonable(v):
     """A default rendered for JSON, so a config record is a config you can run again."""
     if isinstance(v, (str, int, float, bool)) or v is None:
@@ -342,9 +508,11 @@ def effective_config(config: dict, **meta) -> dict:
     Steps switched off keep their entry and their defaults: what did **not** run is part of
     the record too. The result is a valid config -- run it again and you get this run.
     """
-    out = {k: config[k] for k in ("keep_bed", "remove_intermediates") if k in config}
+    out = {k: config[k] for k in ("keep_bed", "remove_intermediates", "reset_filter")
+           if k in config}
     out.setdefault("keep_bed", None)
     out.setdefault("remove_intermediates", False)
+    out.setdefault("reset_filter", False)
     if meta:
         out["_meta"] = {k: _jsonable(v) for k, v in meta.items()}
     steps = []
@@ -356,6 +524,11 @@ def effective_config(config: dict, **meta) -> dict:
         if name in WHITELISTABLE:
             params["keep_bed"] = config.get("keep_bed")
         params.update(step.get("params") or {})
+        # "auto" is a rule, not a value, and the point of this file is the values that ran
+        if name == "hard_qc_filter":
+            params["qd"], params["strand_bias_p"] = F.resolve_qc_auto(
+                params.get("caller", "gatk"), qd=params.get("qd", "auto"),
+                strand_bias_p=params.get("strand_bias_p", "auto"))
         entry = {"name": name}
         for key in ("report", "ext", "enabled"):
             if key in step:
@@ -373,7 +546,10 @@ def type_counts_note(counts: dict) -> str:
         return ""
     named = [f"snps {counts.get('snps', 0):,}"]
     named += [f"{n} {counts[n]:,}" for n in VARIANT_TYPES if n != "snps" and counts.get(n)]
-    return "   (" + ", ".join(named) + ")"
+    # after a "+", because these are counted on top of the classes rather than beside them
+    extra = [f"{n} {counts[n]:,}" for n in EXTRA_COUNTS if counts.get(n)]
+    body = ", ".join(named) + ("; + " + ", ".join(extra) if extra else "")
+    return "   (" + body + ")"
 
 
 def _types_note(counts: dict) -> str:
@@ -410,6 +586,13 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
     nothing to rescue is the normal case and most steps are that.
     """
     validate_config(config)
+    # Every path the run depends on, checked before a single output is written: the input
+    # callset and every input file a step names. A wrong path to a late step should cost
+    # nothing, not eight steps of output (the failure that prompted this).
+    if _readable_file_error(input_path) is not None:
+        raise SystemExit(f"ERROR: input {input_path!r}: "
+                         f"{_readable_file_error(input_path)}.")
+    check_input_paths(config)
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     used = out / "config_used.json"
@@ -424,12 +607,25 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
               "types": counts}]
     prev = input_path
     seen: list[str] = []
+    prev_row: dict | None = None
+    prune = bool(config.get("remove_intermediates", False))
+    # Step 00, when asked for: the caller's FILTER column cleared before the chain sees it.
+    # A real step with a real output and a tally row, so that what it did is in the run's
+    # record and not only in the config.
+    if config.get("reset_filter"):
+        out_path = str(out / "00_reset_filter.bcf")
+        say(f"[00] reset_filter -> {out_path}")
+        F.reset_filter(prev, out_path)
+        index_vcf(out_path)
+        counts = variant_type_counts(out_path)
+        prev_row = {"step": "reset_filter", "path": out_path, "variants": counts["total"],
+                    "types": counts}
+        tally.append(prev_row)
+        prev = out_path
     # `remove_intermediates` deletes each step's callset as soon as the next one has read it,
     # so a long chain over a large cohort costs one intermediate on disk rather than all of
     # them. The input is never touched, the final output stays, and the side tables -- the
     # record of what happened -- are small and are kept whatever this says.
-    prune = bool(config.get("remove_intermediates", False))
-    prev_row: dict | None = None
     # One "the whitelist rescued nothing" warning for the run, not one per step: most
     # steps have nothing for a whitelist to do, and saying so each time reads as an error.
     with F.deferred_whitelist_warnings():
@@ -455,9 +651,17 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
                     raise SystemExit(f"ERROR: unknown pipeline report '{name}'. "
                                      f"Known: {', '.join(REPORTS)}")
                 if name == "singleton_counts" and "singleton_filter_add_ads" in seen:
+                    # Not "every sample scores zero" any more: the filter is a RECORD-level
+                    # test (keep the record when some alternate has enough carriers) and the
+                    # count is a per-ALLELE one, so a singleton alternate sitting beside a
+                    # well-supported one survives the filter and is still counted. What is
+                    # lost either way is every singleton whose record was dropped, which is
+                    # most of them -- the number that comes out is not the cohort's.
                     say(f"[{i:02d}] WARNING: singleton_counts runs after "
-                          f"singleton_filter_add_ads, which drops the variants it counts -- "
-                          f"every sample will score zero. Move it earlier.")
+                          f"singleton_filter_add_ads, which has already dropped most of the "
+                          f"variants it counts -- the counts will be a fraction of the "
+                          f"cohort's and are not comparable with a run that counts first. "
+                          f"Move it earlier.")
                 say(f"[{i:02d}] {name} (report) -> {out_path}")
                 n = REPORTS[name](prev, out_path, **params)
                 tally.append({"step": name, "path": out_path, "report": True, "rows": n})
@@ -469,6 +673,8 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
                                  f"Known: {', '.join(STEPS)}")
             say(f"[{i:02d}] {name} -> {out_path}")
             rescued = STEPS[name](prev, out_path, **params)
+            if config.get("keep_bed") and name in WARN_WHITELIST_DROPS:
+                F.report_whitelisted_drops(prev, out_path, config["keep_bed"], name)
             seen.append(name)
             index_vcf(out_path)   # keep intermediates indexed (quiets pysam, enables region queries)
             counts = variant_type_counts(out_path)
@@ -482,8 +688,21 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
                 _remove_intermediate(prev_row)
             prev_row = row
             prev = out_path
+            # Nothing left means nothing for the later steps to judge -- and some of them
+            # cannot run on nothing: a sample-coverage rule over zero loci drops every
+            # sample, and a callset with no samples has lost the FORMAT tags the next step
+            # reads. Stop here, say so, and record the rest as not run.
+            if n == 0:
+                rest = config["steps"][i:]
+                say(f"     no variants remain after [{i:02d}] {name}; "
+                    f"{len(rest)} later step(s) not run")
+                for j, later in enumerate(rest, start=i + 1):
+                    say(f"[{j:02d}] {later['name']} -- not run (no variants remain)")
+                    tally.append({"step": later["name"], "skipped": True,
+                                  "reason": "no variants remain"})
+                break
 
-    if emit_snp_bed and len(tally) > 1:
+    if emit_snp_bed and len(tally) > 1 and (prev_row is None or prev_row["variants"] > 0):
         bed_path = str(out / (Path(prev).stem + ".snps.bed"))
         F.snp_bed(prev, bed_path)
         n_snps = sum(1 for _ in open(bed_path))

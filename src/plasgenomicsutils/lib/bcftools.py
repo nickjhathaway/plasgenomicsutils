@@ -116,8 +116,14 @@ def count_variants(path: str) -> int:
     return int(proc.stdout.strip() or 0)
 
 
-#: The classes counted per step, in the order they are reported.
+#: The classes counted per step, in the order they are reported. Every record is in exactly
+#: one of these, so they sum to the total.
 VARIANT_TYPES = ("snps", "indels", "mnps", "mixed", "spanning_del", "other", "no_alt")
+
+#: Nothing is counted outside :data:`VARIANT_TYPES` any more. ``with_spanning_del`` lived here
+#: while a ``*`` did not decide a record's class; now it does, so the extra column would be an
+#: exact copy of ``spanning_del``.
+EXTRA_COUNTS = ()
 
 
 def classify_record(ref: str, alt: str) -> str:
@@ -134,12 +140,16 @@ def classify_record(ref: str, alt: str) -> str:
         return "no_alt"
     if any(a.startswith("<") or "[" in a or "]" in a for a in alts):
         return "other"
+    # `*` says an upstream deletion covers this position in some samples, so the record is
+    # not a clean SNP site whatever its other alleles read -- part of the cohort has no base
+    # there to compare. `--snps-only` drops it, and this has to agree: a tally that filed it
+    # under `snps` would promise records the filter then removes.
+    #
+    # `*` is routinely the largest class in a joint callset, which is why it is named rather
+    # than left to share `other` with symbolic alleles and breakends. To keep such a site,
+    # run `spanning_del_filter` first: it recodes the deleted calls as missing and drops the
+    # allele, after which the record is an ordinary SNP and classified as one.
     if "*" in alts:
-        # `*` says an upstream deletion covers this position in some samples. A record
-        # carrying one is not a plain SNP however its other alleles read -- no type filter
-        # will pass it -- and in a joint callset it is routinely the largest class of all,
-        # so it is named rather than left to share `other` with symbolic alleles and
-        # breakends, which are a different problem entirely.
         return "spanning_del"
     kinds = set()
     for a in alts:
@@ -161,6 +171,8 @@ def variant_type_counts(path: str) -> dict[str, int]:
 
     This replaces a plain count rather than adding to it: the total falls out of the same
     scan, so knowing the breakdown costs nothing over knowing the number.
+
+    The :data:`VARIANT_TYPES` keys partition the records and sum to ``total``.
     """
     require("bcftools")
     proc = subprocess.run(f"bcftools query -f '%REF\\t%ALT\\n' {q(path)}", shell=True,
