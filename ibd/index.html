@@ -1,0 +1,1352 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Post-processing utilities for Plasmodium genomics data">
+      
+      
+      
+        <link rel="canonical" href="https://nickjhathaway.github.io/plasgenomicsutils/ibd/">
+      
+      
+        <link rel="prev" href="../within-host-mixtures/">
+      
+      
+        <link rel="next" href="../allele-frequencies/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>IBD post-analysis - plasgenomicsutils</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="teal">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#ibd-post-analysis" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="plasgenomicsutils" class="md-header__button md-logo" aria-label="plasgenomicsutils" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            plasgenomicsutils
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              IBD post-analysis
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="teal"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="teal"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nickjhathaway/plasgenomicsutils" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nickjhathaway/plasgenomicsutils
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="plasgenomicsutils" class="md-nav__button md-logo" aria-label="plasgenomicsutils" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    plasgenomicsutils
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nickjhathaway/plasgenomicsutils" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nickjhathaway/plasgenomicsutils
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../filtering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    VCF filtering & harmonization
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fws/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fws (within-host diversity)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../within-host-mixtures/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Within-host mixtures
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IBD post-analysis
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IBD post-analysis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-selection-statistic-has-two-variants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The selection statistic has two variants
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The selection statistic has two variants">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#direction-and-which-tail" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Direction, and which tail
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#calling-a-selection-peak-significant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Calling a selection peak significant
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Calling a selection peak significant">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#calibrated-p-values-and-an-fdr-worth-quoting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Calibrated p-values, and an FDR worth quoting
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-threshold-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The threshold file
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#maf-ties-coarsen-the-binning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MAF ties coarsen the binning
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#short-ibd-segments-are-dropped-by-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Short IBD segments are dropped by default
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-pairs-share-a-gene" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which pairs share a gene
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../allele-frequencies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Allele frequencies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../coverage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage QC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Command reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <label class="md-nav__link" for="__nav_10" id="__nav_10_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Methods
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Methods
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../strand_bias_artifact_exclusion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Strand-bias artifacts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fws_moimix_reconciliation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fws reconciliation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-selection-statistic-has-two-variants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The selection statistic has two variants
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The selection statistic has two variants">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#direction-and-which-tail" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Direction, and which tail
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#calling-a-selection-peak-significant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Calling a selection peak significant
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Calling a selection peak significant">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#calibrated-p-values-and-an-fdr-worth-quoting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Calibrated p-values, and an FDR worth quoting
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-threshold-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The threshold file
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#maf-ties-coarsen-the-binning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MAF ties coarsen the binning
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#short-ibd-segments-are-dropped-by-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Short IBD segments are dropped by default
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-pairs-share-a-gene" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which pairs share a gene
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="ibd-post-analysis">IBD post-analysis<a class="headerlink" href="#ibd-post-analysis" title="Permanent link">&para;</a></h1>
+<p>Downstream of the <code>hmmibd-rs</code> IBD caller, these commands turn IBD blocks into a binary
+matrix and per-pair / per-SNP / per-region summaries, allele frequencies, and an
+EIGENSTRAT-style selection statistic. Their tables feed the R plots in
+<a href="https://nickjhathaway.github.io/plasgenomicsutilsR/">plasgenomicsutilsR</a>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># hmmibd-rs blocks + a SNP panel -&gt; sparse (pairs x SNPs) binary matrix (writes ibd_matrix.npz)</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>plasgenomicsutils<span class="w"> </span>build_ibd_matrix<span class="w"> </span>--blocks<span class="w"> </span>blocks.tsv.gz<span class="w"> </span>--snps<span class="w"> </span>panel.vcf.gz<span class="w"> </span>--snp-format<span class="w"> </span>vcf<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span>--output<span class="w"> </span>ibd_matrix
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="c1"># per-pair / per-SNP / per-group / per-chromosome summaries</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>plasgenomicsutils<span class="w"> </span>analyze_ibd_matrix<span class="w"> </span>--matrix<span class="w"> </span>ibd_matrix<span class="w"> </span>--meta<span class="w"> </span>samples.tsv<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span>--group-col<span class="w"> </span>region<span class="w"> </span>--output<span class="w"> </span>ibd_analysis
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="c1"># global + per-group allele frequencies, single pass over the BCF</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="c1"># (writes allele_freqs.tsv.gz and group_allele_freqs.tsv.gz in the output directory)</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>plasgenomicsutils<span class="w"> </span>compute_allele_freqs<span class="w"> </span>--bcf<span class="w"> </span>cohort.bcf<span class="w"> </span>--meta<span class="w"> </span>samples.tsv<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">  </span>--group-col<span class="w"> </span>region<span class="w"> </span>--output<span class="w"> </span>freqs/
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="c1"># IBD selection statistic (XiR,s), genome-wide and per group</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>plasgenomicsutils<span class="w"> </span>ibd_selection_statistic<span class="w"> </span>--matrix<span class="w"> </span>ibd_matrix<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">  </span>--af<span class="w"> </span>freqs/allele_freqs.tsv.gz<span class="w"> </span>--af-group<span class="w"> </span>freqs/group_allele_freqs.tsv.gz<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="w">  </span>--meta<span class="w"> </span>samples.tsv<span class="w"> </span>--group-col<span class="w"> </span>region<span class="w"> </span>--output<span class="w"> </span>ibd_selection
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="c1"># per-pair IBD fraction (callable-length denominator) and SNP density</span>
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>plasgenomicsutils<span class="w"> </span>ibd_fraction_and_snp_density<span class="w"> </span>--blocks<span class="w"> </span>blocks.tsv.gz<span class="w"> </span>--snps<span class="w"> </span>panel.vcf.gz<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="w">  </span>--snp-format<span class="w"> </span>vcf<span class="w"> </span>--reference<span class="w"> </span>pf3d7<span class="w"> </span>--output<span class="w"> </span>ibd_fraction
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="c1"># -&gt; ibd_fraction.pair_ibd_fraction.tsv.gz, an edge list: one row per compared pair with</span>
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="c1">#    pair, sample1, sample2, total/max IBD in bp and cM, ibd_fraction_accessible,</span>
+<a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a><span class="c1">#    ibd_fraction_full_genome and gen_to_mrca_approx. The two fractions differ only in the</span>
+<a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a><span class="c1">#    denominator (the callable map, or the whole genome). Feeds R's plot_ibd_pair_network().</span>
+<a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>
+<a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="c1"># per-gene IBD-block overlap between groups (for the R gene triangles): the fraction of</span>
+<a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="c1"># pairs whose IBD block overlaps each gene, NOT pairs that are IBD at a SNP inside it</span>
+<a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>plasgenomicsutils<span class="w"> </span>ibd_gene_overlap<span class="w"> </span>--blocks<span class="w"> </span>blocks.tsv.gz<span class="w"> </span>--genes<span class="w"> </span>genes.tsv<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a><span class="w">  </span>--meta<span class="w"> </span>samples.tsv<span class="w"> </span>--group-col<span class="w"> </span>region<span class="w"> </span>--output<span class="w"> </span>gene_overlap.tsv.gz
+<a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>
+<a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a><span class="c1"># which sample PAIRS are IBD over each gene, and how much of the gene each block covers</span>
+<a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>plasgenomicsutils<span class="w"> </span>ibd_gene_pairs<span class="w"> </span>--blocks<span class="w"> </span>blocks.tsv.gz<span class="w"> </span>--genes<span class="w"> </span>genes.tsv<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="w">  </span>--output<span class="w"> </span>gene_pairs.tsv.gz
+</code></pre></div>
+<h2 id="the-selection-statistic-has-two-variants">The selection statistic has two variants<a class="headerlink" href="#the-selection-statistic-has-two-variants" title="Permanent link">&para;</a></h2>
+<p><code>ibd_selection_statistic</code> measures excess IBD sharing at a locus: centre the binary matrix
+by pair (removing each pair's overall relatedness), scale by <code>sqrt(p(1-p))</code>, sum over pairs,
+then standardise within MAF bins.</p>
+<p>Henden et al. (PLoS Genet 2018), who introduced XiR,s, describe a <strong>second</strong> centring in
+between: <em>"we subtract the row mean from each row"</em> — a row being one SNP — followed by
+<em>"we calculate row sums"</em>. Centring a row and then summing that same row cancels to zero,
+so the statistic as described is identically zero and what gets reported is floating-point
+residue. The residue is not random — it grows with how many pairs share — so it acts as a
+noisy, uncalibrated stand-in for excess sharing, which is why the recipe has looked usable.
+It is not reproducible: float32 leaves ~1e-5, float64 ~1e-14, and the two rank SNPs almost
+independently. The same cancellation is in isoRelate's <code>iRfunction</code> and ibdutils'
+<code>calc_xirs_raw_stats_per_chr</code>; on one real cohort those two and this tool shared 29 of their
+top 100 SNPs.</p>
+<table>
+<thead>
+<tr>
+<th><code>--xirs-variant</code></th>
+<th>step 2</th>
+<th>accumulator</th>
+<th>use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>corrected</code> (default)</td>
+<td>pair centring only</td>
+<td>float64</td>
+<td>what the method claims to measure</td>
+</tr>
+<tr>
+<td><code>published</code></td>
+<td>pair <strong>and</strong> SNP centring</td>
+<td>float32</td>
+<td>reproducing this tool's earlier output</td>
+</tr>
+</tbody>
+</table>
+<p><code>published</code> prints a warning, and cannot be made to agree with isoRelate or ibdutils since
+those cancel at a different precision. On a real 249-sample cohort the switch turns a
+<code>-log10 p</code> of 111.6 at <code>z = -22.5</code> (a sharing <em>deficit</em> scored as a selection peak) into
+41.9 at <code>z = +13.6</code> at the same locus, and takes every region from 29-100% deficits among
+its significant SNPs to <strong>0%</strong>.</p>
+<h3 id="direction-and-which-tail">Direction, and which tail<a class="headerlink" href="#direction-and-which-tail" title="Permanent link">&para;</a></h3>
+<p>Every row carries a <code>direction</code> column, <code>excess</code> or <code>deficit</code>, from the sign of <code>z_score</code>.</p>
+<p><code>--tail upper</code> (the default) asks only whether a locus is shared <em>more</em> than expected, which
+is what a positive-selection scan means. <code>--tail two-sided</code> squares the z-score into a
+chi-square(1) — the published behaviour — which gives a deficit exactly the same p-value as
+an equal excess, so <code>neg_log10_p</code> alone cannot tell them apart.</p>
+<h2 id="calling-a-selection-peak-significant">Calling a selection peak significant<a class="headerlink" href="#calling-a-selection-peak-significant" title="Permanent link">&para;</a></h2>
+<p><code>ibd_selection_statistic</code> reports up to four thresholds, all written to
+<code>&lt;output&gt;.*.threshold.txt</code> and applied as flag columns of the stats table. The last two
+appear only with <code>--permute</code>:</p>
+<table>
+<thead>
+<tr>
+<th>column</th>
+<th>threshold</th>
+<th>controls</th>
+<th>rests on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>significant</code></td>
+<td>Bonferroni, <code>alpha / n_tests</code></td>
+<td>family-wise error</td>
+<td>chi-square(1)</td>
+</tr>
+<tr>
+<td><code>significant_fdr</code></td>
+<td>Benjamini-Hochberg over <code>pval</code></td>
+<td>false discovery rate</td>
+<td>chi-square(1)</td>
+</tr>
+<tr>
+<td><code>significant_perm</code></td>
+<td><code>--permute N</code> genome-wide maxima</td>
+<td>family-wise error</td>
+<td>nothing</td>
+</tr>
+<tr>
+<td><code>significant_fdr_perm</code></td>
+<td>Benjamini-Hochberg over <code>p_empirical</code></td>
+<td>false discovery rate</td>
+<td>exchangeability across SNPs</td>
+</tr>
+</tbody>
+</table>
+<p>The first two convert the statistic to a p-value through a chi-square(1) null. Whether
+that null fits is what <strong><code>lambda_gc</code></strong> measures — the median chi-square divided by the
+chi-square(1) median, which is 1 when the null is right. IBD sharing is strongly
+autocorrelated along a chromosome and pairs are not independent, so <code>lambda_gc</code> is
+routinely far below 1 in practice (0.07-0.26 across regions in a 250-sample <em>P.
+falciparum</em> cohort). Deflation like that means the p-values are not calibrated, and
+neither correction delivers the error rate it claims. The command prints a warning
+outside 0.8-1.25.</p>
+<p>Rescaling does not fix it. Standardising the statistic by its median and MAD forces
+<code>lambda_gc</code> to exactly 1 by construction, which makes the diagnostic vacuous while leaving
+the tail — the part that decides significance — worse, not better.</p>
+<p><code>--permute</code> builds the null from the data instead. Each replicate slides every pair's IBD
+segments to a random circular offset, which keeps that pair's total sharing, segment count,
+segment lengths and along-genome autocorrelation intact while destroying any alignment of
+segments <em>between</em> pairs. The genome-wide maximum of each replicate is one draw from the
+null of "no locus is shared more than chance", and the 95th percentile of those maxima is a
+real 5% family-wise threshold:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>plasgenomicsutils<span class="w"> </span>ibd_selection_statistic<span class="w"> </span>--matrix<span class="w"> </span>ibd_matrix<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span>--af<span class="w"> </span>freqs/allele_freqs.tsv.gz<span class="w"> </span>--af-group<span class="w"> </span>freqs/group_allele_freqs.tsv.gz<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span>--meta<span class="w"> </span>samples.tsv<span class="w"> </span>--group-col<span class="w"> </span>region<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">  </span>--permute<span class="w"> </span><span class="m">200</span><span class="w"> </span>--permute-seed<span class="w"> </span><span class="m">0</span><span class="w"> </span>--output<span class="w"> </span>ibd_selection
+</code></pre></div>
+<p>Expect the permutation threshold to land well above the other two when <code>lambda_gc</code> is
+deflated, and the significant-SNP count to fall accordingly (that cohort: 193 SNPs by
+Bonferroni, 353 by BH, 78 by permutation). Cost is one full scan per replicate — roughly
+4 s for 28k SNPs and 30k pairs — and each group is permuted separately, so 200 replicates
+is minutes per scan. Without <code>--permute</code> the permutation columns are absent and nothing
+else changes.</p>
+<h3 id="calibrated-p-values-and-an-fdr-worth-quoting">Calibrated p-values, and an FDR worth quoting<a class="headerlink" href="#calibrated-p-values-and-an-fdr-worth-quoting" title="Permanent link">&para;</a></h3>
+<p>The same run also writes per-SNP p-values measured against that null, which is what makes
+a defensible FDR possible:</p>
+<table>
+<thead>
+<tr>
+<th>column</th>
+<th>meaning</th>
+<th>resolution</th>
+<th>assumes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>p_pointwise</code></td>
+<td>how often the null at <em>this SNP</em> reached the observed value</td>
+<td><code>1/(N+1)</code></td>
+<td>nothing beyond the shift</td>
+</tr>
+<tr>
+<td><code>p_empirical_binned</code></td>
+<td>how often any null <em>in this SNP's MAF bin</em> reached it</td>
+<td><code>n_bins/(N·n_snps)</code></td>
+<td>nothing beyond the shift</td>
+</tr>
+<tr>
+<td><code>p_empirical</code></td>
+<td>how often <em>any</em> null value anywhere reached it</td>
+<td><code>1/(N·n_snps+1)</code></td>
+<td>the null is exchangeable across MAF bins</td>
+</tr>
+<tr>
+<td><code>q_empirical</code></td>
+<td>Benjamini-Hochberg over whichever of the two <code>--empirical-pool</code> selects</td>
+<td>—</td>
+<td>the above, plus BH's usual dependence condition</td>
+</tr>
+</tbody>
+</table>
+<p>All use the Phipson-Smyth <code>(1 + exceedances) / (1 + draws)</code> form, so nothing is ever
+reported as p = 0: a permutation cannot evidence a p below its own resolution.</p>
+<p>They trade resolution against assumptions, and you have to spend one to get the other.
+<code>p_pointwise</code> assumes the least but bottoms out at <code>1/(N+1)</code> — 0.005 at 200 replicates —
+far too coarse to correct over ~28,000 tests; read it on the top hits. <code>p_empirical</code> pools
+across every SNP to buy six orders of magnitude, which is what BH needs, but that is only
+legitimate if the null has the same shape in every MAF bin.</p>
+<p><strong>It often does not.</strong> The command measures it: each bin's share of null values above one
+common reference, which exchangeability says should be 0.010 everywhere. On a real
+250-sample cohort those rates ran 0.000 to 0.027 across bins — some twenty standard errors
+apart, so a genuine difference in null shape rather than Monte Carlo noise. Pooling then
+makes <code>p_empirical</code> too <em>small</em> for SNPs in the heavy-tailed bins, which is the
+anti-conservative direction. The effect is a factor of two or three, so it does not touch
+the top hits, but it does move SNPs sitting near the q cutoff.</p>
+<p><code>--empirical-pool bin</code> drops the assumption by keeping each SNP inside its own bin
+(<code>p_empirical_binned</code> drives <code>q_empirical</code> instead). That is correct rather than
+approximate, and <code>n_bins</code> times coarser — with the defaults, too coarse for a genome-wide
+FDR unless <code>N</code> goes up by about the same factor. Both columns are always written, so the
+cheapest check is to compare them and see whether anything you care about moves.</p>
+<p><strong>Pick <code>N</code> for the FDR, not just the threshold.</strong> BH multiplies the rank-1 p-value by the
+number of tests, so the smallest reachable q is about <code>1/N</code> regardless of cohort size.
+With <code>N = 20</code> at <code>q &lt; 0.05</code> the column is dead on arrival — nothing can be called. Use
+<code>N ≥ 10/fdr_alpha</code> (200 at the default) for an order of magnitude of headroom. The command
+computes <code>q_empirical_floor</code> and warns when it is close to your cutoff.</p>
+<p><strong>What this does not fix.</strong> <code>pval</code> and <code>q_value</code> still come from the chi-square(1) and
+stay miscalibrated — do not quote them as probabilities. Use <code>p_empirical</code> / <code>q_empirical</code>
+when you need a number. The <em>ranking</em> was never affected either way: every step from
+<code>z_score</code> to <code>neg_log10_p</code> is monotone, so a bad reference distribution mislabels the axis
+without moving any SNP relative to another.</p>
+<h3 id="the-threshold-file">The threshold file<a class="headerlink" href="#the-threshold-file" title="Permanent link">&para;</a></h3>
+<p><code>&lt;output&gt;.&lt;scan&gt;.threshold.txt</code> is one row per scan (<code>global</code>, or one per group) holding
+every cutoff and the diagnostics behind it. Cutoffs are on the <code>-log10(p)</code> scale so each
+can be drawn as a horizontal line; the <code>*_perm*</code> and <code>*_emp*</code> entries appear only with
+<code>--permute</code>.</p>
+<table>
+<thead>
+<tr>
+<th>column</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>n_tests</code></td>
+<td>SNPs with a usable statistic — the <code>m</code> in every correction</td>
+</tr>
+<tr>
+<td><code>neg_log10_p_threshold</code>, <code>n_significant</code></td>
+<td>Bonferroni cutoff and count</td>
+</tr>
+<tr>
+<td><code>neg_log10_p_fdr_threshold</code>, <code>n_significant_fdr</code></td>
+<td>BH critical value <code>k·q/m</code>, and count</td>
+</tr>
+<tr>
+<td><code>neg_log10_p_perm_threshold</code>, <code>n_significant_perm</code></td>
+<td>permutation family-wise cutoff, and count</td>
+</tr>
+<tr>
+<td><code>neg_log10_p_emp_fdr_threshold</code>, <code>n_significant_fdr_perm</code></td>
+<td>lowest score BH kept over the empirical p-values, and count</td>
+</tr>
+<tr>
+<td><code>alpha</code>, <code>fdr_alpha</code></td>
+<td>the levels those were computed at</td>
+</tr>
+<tr>
+<td><code>lambda_gc</code></td>
+<td>genomic inflation; 1 when the chi-square(1) fits</td>
+</tr>
+<tr>
+<td><code>n_perm</code>, <code>empirical_pool</code></td>
+<td>replicates run, and which pooling drove <code>q_empirical</code></td>
+</tr>
+<tr>
+<td><code>p_empirical_resolution</code>, <code>q_empirical_floor</code></td>
+<td>finest p and finest q the permutation can reach</td>
+</tr>
+<tr>
+<td><code>frac_q_unreachable</code></td>
+<td>share of SNPs whose own draws cannot reach <code>fdr_alpha</code> (0 under <code>global</code> pooling)</td>
+</tr>
+<tr>
+<td><code>perm_bin_tail_min</code>, <code>perm_bin_tail_max</code></td>
+<td>the exchangeability check — both want 0.010</td>
+</tr>
+<tr>
+<td><code>n_bins_used</code>, <code>largest_bin_frac</code></td>
+<td>how the MAF binning actually came out (see below)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="maf-ties-coarsen-the-binning">MAF ties coarsen the binning<a class="headerlink" href="#maf-ties-coarsen-the-binning" title="Permanent link">&para;</a></h3>
+<p>Step 5 bins SNPs into <code>--n-bins</code> equal-frequency MAF bins, but allele frequency is <em>k/n</em>
+for a smallish <em>n</em>, so MAF is heavily tied and the quantile edges collapse onto each other.
+Asking for 100 bins routinely yields far fewer, with one bin holding a large share of the
+genome — and the smaller the group, the fewer distinct <em>k/n</em> values and the worse it gets.
+On a real <em>P. falciparum</em> cohort the per-region counts ranged from 41 non-empty bins down
+to 10, the largest bin holding 13% to 43% of SNPs.</p>
+<p><code>n_bins_used</code> and <code>largest_bin_frac</code> report it on every run, and the command warns when one
+bin exceeds 10%. Two things to know:</p>
+<ul>
+<li>It weakens the <strong>MAF control in the statistic itself</strong>, not only the p-values: a bin
+  holding 40% of the genome is not standardising like-with-like.</li>
+<li>Lowering <code>--n-bins</code> does not repair it. No choice of bin count splits a tie, so the
+  largest bin stays the same size, and <code>lambda_gc</code> barely moves.</li>
+</ul>
+<h2 id="short-ibd-segments-are-dropped-by-default">Short IBD segments are dropped by default<a class="headerlink" href="#short-ibd-segments-are-dropped-by-default" title="Permanent link">&para;</a></h2>
+<p>Small IBD blocks are commonly spurious, so every tool that reads hmm blocks discards
+segments with fewer than <strong>15 SNPs</strong> or shorter than <strong>15 kb</strong> — <code>--min-block-snp</code> /
+<code>--min-block-kb</code>, <code>0</code> to disable either. The filter is built in rather than something you
+have to apply beforehand, and it is applied to the IBD <strong>evidence</strong> only: the set of pairs
+that were compared (the denominator in every fraction) still comes from every row of the
+blocks file, so a pair whose only segment was short still counts as compared and simply
+contributes no sharing.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># stricter than the default</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>plasgenomicsutils<span class="w"> </span>build_ibd_matrix<span class="w"> </span>--blocks<span class="w"> </span>blocks.tsv.gz<span class="w"> </span>--snps<span class="w"> </span>panel.snps.bed<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span>--snp-format<span class="w"> </span>bed<span class="w"> </span>--min-block-snp<span class="w"> </span><span class="m">20</span><span class="w"> </span>--min-block-kb<span class="w"> </span><span class="m">25</span><span class="w"> </span>--output<span class="w"> </span>ibd_matrix
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="c1"># keep every segment (what you would get by pre-filtering nothing)</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>plasgenomicsutils<span class="w"> </span>build_ibd_matrix<span class="w"> </span>--blocks<span class="w"> </span>blocks.tsv.gz<span class="w"> </span>--snps<span class="w"> </span>panel.snps.bed<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">  </span>--snp-format<span class="w"> </span>bed<span class="w"> </span>--min-block-snp<span class="w"> </span><span class="m">0</span><span class="w"> </span>--min-block-kb<span class="w"> </span><span class="m">0</span><span class="w"> </span>--output<span class="w"> </span>ibd_matrix_unfiltered
+</code></pre></div>
+<p><code>build_ibd_matrix</code>, <code>ibd_gene_overlap</code>, <code>ibd_gene_pairs</code> and
+<code>ibd_fraction_and_snp_density</code> all take the flags, with the same defaults as R's
+<code>ibd_results(min_block_snp = 15, min_block_kb = 15)</code>, so the two sides agree. The filter
+is not free: on a typical cohort it removes a large share of the raw segments, which shifts
+every fraction downward — regenerate the matrix and any per-gene tables together.</p>
+<p><code>ibd_gene_overlap</code> reads the hmm blocks directly (a pair counts when any IBD segment
+overlaps the gene, even with no panel SNP inside), keeps only IBD segments for the
+numerator, and uses <strong>every</strong> compared pair as the denominator (so never-IBD pairs still
+count). The <code>--genes</code> table needs <code>name, chr</code> (or <code>chrom</code>), <code>start</code>, <code>end</code>. Feed the output
+to R's <code>ibd_results(gene_overlap = ...)</code>, or load the blocks in R
+(<code>ibd_results(blocks = ..., meta = ...)</code>) to compute the same thing for ad-hoc genes.</p>
+<h2 id="which-pairs-share-a-gene">Which pairs share a gene<a class="headerlink" href="#which-pairs-share-a-gene" title="Permanent link">&para;</a></h2>
+<p><code>ibd_gene_overlap</code> gives the <em>fraction</em> per group pair; <code>ibd_gene_pairs</code> gives the
+underlying adjacency list — one row per sample pair x IBD block x gene. Pairs with no IBD
+over a gene are simply absent, and a pair repeats only when it has several separate
+segments spanning the gene.</p>
+<p>Worked example over the eight drug-resistance genes, starting from the gene table the R
+package ships (<code>PF_EXAMPLE_DRUG_GENES</code>: pfcrt, pfdhfr, pfmdr1, pfdhps, pfkelch13, pfaat1,
+pfgch1, pfpx1). Write it out once from R:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nf">library</span><span class="p">(</span><span class="n">plasgenomicsutilsR</span><span class="p">)</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">g</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="n">PF_EXAMPLE_DRUG_GENES</span><span class="p">[,</span><span class="w"> </span><span class="nf">c</span><span class="p">(</span><span class="s">"name"</span><span class="p">,</span><span class="w"> </span><span class="s">"Pf3D7_chrom"</span><span class="p">,</span><span class="w"> </span><span class="s">"start"</span><span class="p">,</span><span class="w"> </span><span class="s">"end"</span><span class="p">,</span><span class="w"> </span><span class="s">"gene_id"</span><span class="p">)]</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="nf">names</span><span class="p">(</span><span class="n">g</span><span class="p">)[</span><span class="m">2</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="s">"chr"</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="nf">write.table</span><span class="p">(</span><span class="n">g</span><span class="p">,</span><span class="w"> </span><span class="s">"drug_genes.tsv"</span><span class="p">,</span><span class="w"> </span><span class="n">sep</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"\t"</span><span class="p">,</span><span class="w"> </span><span class="n">quote</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">FALSE</span><span class="p">,</span><span class="w"> </span><span class="n">row.names</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">FALSE</span><span class="p">)</span>
+</code></pre></div>
+<p>...then list the sharing pairs for all eight at once:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>plasgenomicsutils<span class="w"> </span>ibd_gene_pairs<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span>--blocks<span class="w"> </span>final_set_filtered/10_maf_filter_hmm.hmm.txt<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span>--genes<span class="w"> </span>drug_genes.tsv<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span>--output<span class="w"> </span>drug_gene_pairs.tsv.gz
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="c1"># only the pairs sharing a whole gene</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>plasgenomicsutils<span class="w"> </span>ibd_gene_pairs<span class="w"> </span>--blocks<span class="w"> </span>final_set_filtered/10_maf_filter_hmm.hmm.txt<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">  </span>--genes<span class="w"> </span>drug_genes.tsv<span class="w"> </span>--complete-only<span class="w"> </span>--output<span class="w"> </span>drug_gene_pairs.complete.tsv.gz
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="c1"># one gene, and only substantial sharing</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>plasgenomicsutils<span class="w"> </span>ibd_gene_pairs<span class="w"> </span>--blocks<span class="w"> </span>final_set_filtered/10_maf_filter_hmm.hmm.txt<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="w">  </span>--genes<span class="w"> </span>drug_genes.tsv<span class="w"> </span>--gene<span class="w"> </span>pfcrt<span class="w"> </span>--min-percent-covered<span class="w"> </span><span class="m">50</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a><span class="w">  </span>--output<span class="w"> </span>pfcrt_pairs.tsv.gz
+</code></pre></div>
+<p>Output columns: <code>sample1</code>, <code>sample2</code> (order-normalised), <code>chr</code>, <code>block_start</code>/<code>block_end</code>
+(the IBD segment), <code>gene</code>, <code>gene_id</code>, <code>gene_start</code>/<code>gene_end</code>, <code>coverage</code>
+(<code>complete</code>/<code>partial</code>), <code>covered_start</code>/<code>covered_end</code> (the gene's own bounds when
+complete), <code>covered_bp</code>, <code>percent_covered</code>, and <code>gene_cluster_id</code>/<code>gene_cluster_size</code>.
+All coordinates are 0-based half-open.</p>
+<p><code>gene_cluster_id</code> is the single-linkage cluster of samples sharing at that gene: a sample
+joins a cluster if it shares with <strong>any</strong> member, so a chain of pairs forms one cluster even
+where its ends never share directly. That is the same grouping R's <code>plot_ibd_network()</code>
+draws as a connected component, so the column is how you name the blobs on that plot. Ids
+run largest cluster first and are assigned per gene — cluster 1 at <code>pfcrt</code> and cluster 1 at
+<code>pfdhps</code> are unrelated groups.</p>
+<p>The R equivalent returns a tibble instead of writing a file, and the two agree row for row:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">ibd</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nf">ibd_results</span><span class="p">(</span><span class="n">blocks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"final_set_filtered/10_maf_filter_hmm.hmm.txt"</span><span class="p">,</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">                   </span><span class="n">genes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PF_EXAMPLE_DRUG_GENES</span><span class="p">)</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">pairs</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="n">ibd</span><span class="o">$</span><span class="nf">gene_ibd_pairs</span><span class="p">()</span><span class="w">                       </span><span class="c1"># all eight genes in one tibble</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="nf">subset</span><span class="p">(</span><span class="n">pairs</span><span class="p">,</span><span class="w"> </span><span class="n">gene</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">"pfcrt"</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">coverage</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">"complete"</span><span class="p">)</span>
+</code></pre></div>
+<p>(The SNP panel can be a VCF/BCF as above, or the <code>.snps.bed</code> that <code>filter_pipeline</code> writes —
+use <code>--snp-format bed</code>.)</p>
+<p>Block-size thresholds, the grouping column (<code>--group-col</code>), and per-analysis parameters are flags rather
+than hard-coded, so a single tool serves different cohorts. The SNP panel and BED
+derivation use <code>bcftools query</code> throughout.</p>
+<p>Run <code>plasgenomicsutils &lt;command&gt; -h</code> for the full option list of any step.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "content.code.copy", "search.suggest", "search.highlight"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
