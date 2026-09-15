@@ -70,11 +70,26 @@ def _sor_from_ad_expr(threshold: float) -> str:
     ``(a+b-|a-b|)`` and ``(a+b+|a-b|)``; their halves cancel between the two sides.
 
     ``INFO/`` is spelled out on every tag: a bare ``ADF`` is ambiguous where FORMAT/ADF also
-    exists, and bcftools refuses the expression rather than guessing. Only the first ALT is
-    tested, which is what the biallelic callsets this chain produces contain.
+    exists, and bcftools refuses the expression rather than guessing.
+
+    The alternate side of the table is the **pooled** non-reference depth,
+    ``SUM(ADF) - ADF[0]``, not ``ADF[1]``. A record is kept or dropped as a unit -- VCF has no
+    per-allele FILTER -- so the question the record can actually answer is whether its
+    non-reference support is strand-skewed, and reading only the first ALT left a badly
+    skewed second alternate untested behind a clean first one. Pooling is exact at a
+    biallelic site, so no existing verdict moves.
+
+    What pooling cannot do is isolate *which* alternate is skewed: a clean ALT1 dilutes a
+    skewed ALT2 in proportion to their depths. Split the record first if that is the
+    question -- ``strand_bias_scan`` refuses unsplit input for exactly this reason.
     """
     ref_f, ref_r = "(INFO/ADF[0]+1)", "(INFO/ADR[0]+1)"
-    alt_f, alt_r = "(INFO/ADF[1]+1)", "(INFO/ADR[1]+1)"
+    # Bracketed the way it is because bcftools mis-parses a chain of subtractions following
+    # a function call: `SUM(A)+SUM(B)-A[0]-B[0]` does not evaluate to what it reads as, while
+    # `(SUM(A)+SUM(B)) - (A[0]+B[0])` does. Verified against bcftools 1.24, which
+    # environment.yml pins.
+    alt_f = "((SUM(INFO/ADF)-INFO/ADF[0])+1)"
+    alt_r = "((SUM(INFO/ADR)-INFO/ADR[0])+1)"
     a, b = f"({ref_f}*{alt_r})", f"({ref_r}*{alt_f})"
     lo = lambda x, y: f"({x}+{y}-abs({x}-{y}))"       # noqa: E731 - 2x min(x, y)
     hi = lambda x, y: f"({x}+{y}+abs({x}-{y}))"       # noqa: E731 - 2x max(x, y)
@@ -82,13 +97,23 @@ def _sor_from_ad_expr(threshold: float) -> str:
             f"{math.exp(threshold):.10g}*{a}*{b}*{hi(ref_f, ref_r)}*{lo(alt_f, alt_r)})")
 
 
-#: Allele counts behind the ref-vs-alt z-scores (RPBZ, SCBZ, MQBZ, BQBZ): first ALT only,
-#: as for SOR. INFO/AD is these two sums, but ADF/ADR are what SOR already requires.
+#: Allele counts behind the ref-vs-alt z-scores (RPBZ, SCBZ, MQBZ, BQBZ). The alternate side
+#: pools **every** ALT, as for SOR: the ``*BZ`` tags themselves are computed over all
+#: non-reference reads, so counting only the first ALT made the effect size disagree with the
+#: z it is derived from. Since ``eff = z*sqrt((n1+n2+1)/(12*n1*n2))`` grows as ``n2`` shrinks,
+#: undercounting it inflated the effect and fired the ``-e`` expression -- so the bias ran in
+#: the direction that **deletes** multiallelic records. Two records with identical reference
+#: depth and identical total non-reference depth were judged differently purely because one
+#: split its alternates. Exact at a biallelic site, so no existing verdict moves.
+#: INFO/AD is these two sums, but ADF/ADR are what SOR already requires.
 _N_REF = "(INFO/ADF[0]+INFO/ADR[0])"
-_N_ALT = "(INFO/ADF[1]+INFO/ADR[1])"
-#: Strand counts behind MQSBZ, which compares mapping quality between strands, not alleles.
-_N_FWD = "(INFO/ADF[0]+INFO/ADF[1])"
-_N_REV = "(INFO/ADR[0]+INFO/ADR[1])"
+#: Bracketed as it is because bcftools mis-parses a chain of subtractions after a function
+#: call -- see :func:`_sor_from_ad_expr`.
+_N_ALT = "((SUM(INFO/ADF)+SUM(INFO/ADR)) - (INFO/ADF[0]+INFO/ADR[0]))"
+#: Strand counts behind MQSBZ, which compares mapping quality between strands, not alleles --
+#: so its two groups are every forward read and every reverse read, whatever allele they carry.
+_N_FWD = "SUM(INFO/ADF)"
+_N_REV = "SUM(INFO/ADR)"
 
 
 def _mwu_bias_expr(tag: str, z: float, eff: float | None, n1: str, n2: str) -> str:
@@ -221,6 +246,7 @@ def _check_qc_tags(inp: str, wanted: dict, needs: dict, label: str, advice: str)
             if t not in have:
                 missing[t].add("--" + k.replace("_", "-"))
     if not missing:
+        _check_qc_tags_populated(inp, wanted, needs, label)
         return
     # naming the threshold beside the tag, since which flag to reach for is the next
     # question and the mapping from tag to flag is not obvious from either end
@@ -231,6 +257,51 @@ def _check_qc_tags(inp: str, wanted: dict, needs: dict, label: str, advice: str)
         "  A comparison against a tag that is not there is simply false, so the filter "
         "would keep\n  everything and say nothing. " + advice
     )
+
+
+def _check_qc_tags_populated(inp: str, wanted: dict, needs: dict, label: str) -> None:
+    """A tag the header declares but no record carries is the header check's trap again.
+
+    The same falsehood -- a comparison against a missing value is simply false -- applies
+    per record: a record without ``MQ`` passes ``MQ < 55`` untested. That is acceptable on
+    a record, since a caller can have its reasons for leaving one value blank, and it is
+    said out loud as a count so it is not invisible (GATK's ``MQ=NaN`` counts as missing:
+    a comparison against NaN is false too). It is not acceptable across the whole
+    file: a tag present in the header and absent from every record means the threshold
+    reading it does nothing at all, and that is an error naming the tag, as the header
+    check would have been.
+    """
+    tags = sorted({t for k, v in wanted.items() if v is not None for t in needs[k]})
+    if not tags:
+        return
+    fmt = "\t".join(f"%INFO/{t}" for t in tags) + "\n"
+    proc = subprocess.run(["bcftools", "query", "-f", fmt, str(inp)], stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, text=True)
+    total = 0
+    present = dict.fromkeys(tags, 0)
+    for line in proc.stdout.splitlines():
+        total += 1
+        for t, v in zip(tags, line.split("\t")):
+            # GATK writes a mapping quality it could not compute as NaN rather than
+            # missing, and a comparison against NaN is false exactly as one against `.`
+            if v not in (".", "nan", "-nan", "NaN"):
+                present[t] += 1
+    if not total:
+        return
+    empty = [t for t in tags if present[t] == 0]
+    if empty:
+        flags = {t: ", ".join(sorted("--" + k.replace("_", "-") for k, v in wanted.items()
+                                     if v is not None and t in needs[k])) for t in empty}
+        named = ", ".join(f"INFO/{t} (read by {flags[t]})" for t in empty)
+        raise SystemExit(
+            f"{label}: the header declares " + named + f", but none of the {total:,} "
+            "record(s) carries a value.\n  A comparison against a missing value is simply "
+            "false, so that threshold would test nothing and keep everything.\n  Fill the "
+            "tag in, or set the threshold that reads it to none.")
+    partial = {t: total - present[t] for t in tags if present[t] < total}
+    if partial:
+        shown = ", ".join(f"INFO/{t} {n:,}" for t, n in sorted(partial.items(), key=lambda kv: -kv[1]))
+        say(f"NOTE: record(s) without a value pass that test untested -- {shown} of {total:,}")
 
 
 def _check_bcftools_qc_tags(inp: str, wanted: dict) -> None:
@@ -253,8 +324,12 @@ def _check_gatk_qc_tags(inp: str, wanted: dict) -> None:
         "off.")
 
 
-def _trim_alt_alleles(inp: str, out: str) -> int:
+def _trim_alt_alleles(inp: str, out: str, *, out_fmt: str | None = None) -> int:
     """Drop ALT alleles no genotype carries; return how many records lost one.
+
+    ``out_fmt`` overrides the output type; the default ``b`` (BCF) is what the filter chain
+    wants for an intermediate, but a caller writing a final file should pass
+    ``out_flag(out)`` so the extension and the contents agree.
 
     A joint callset subset to fewer samples keeps every ALT the full cohort had, now
     carried by nobody: `bcftools view -S` removes samples, not alleles. Those alleles are
@@ -271,7 +346,8 @@ def _trim_alt_alleles(inp: str, out: str) -> int:
             tmp = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
             strip_stale_format(inp, tmp, fields=GENOTYPE_LINKED_FORMAT, mode="mismatch")
             src = tmp
-        sh(f"bcftools view --trim-alt-alleles {q(src)} -Ob -o {q(out)}", tools=("bcftools",))
+        sh(f"bcftools view --trim-alt-alleles {q(src)} -O{out_fmt or 'b'} -o {q(out)}",
+           tools=("bcftools",))
     finally:
         if tmp:
             for suffix in ("", ".csi"):
@@ -365,6 +441,30 @@ def _no_alt_filter(inp: str, out: str, fmt: str, *, keep: bool, keep_bed: str | 
             os.unlink(prep)
 
 
+def resolve_qc_auto(caller: str, *, qd, strand_bias_p) -> tuple:
+    """What ``"auto"`` means for the two caller-dependent thresholds.
+
+    ``qd="auto"`` is 10 for GATK and **off** for bcftools. 10 for GATK: on this package's
+    own sWGA and Pf7 callsets it sits in the valley between what VQSR passes and fails on
+    clean biallelic sites, and drops almost nothing at adequate depth -- the earlier 20 was
+    mostly removing thinly covered sWGA sites by proxy, which the missingness and coverage
+    filters do directly (``investigations/qd_threshold`` in the project home). Off for
+    bcftools because QUAL/DP on its output is not the same quantity.
+
+    ``strand_bias_p="auto"`` is off in both modes, for the reason given in
+    :func:`_sor_from_ad_expr`: FS is a p-value, so a fixed cutoff tightens as a cohort
+    grows, and ``sor`` asks the same question of the skew itself.
+
+    One function so that the filter and ``config_used.json`` cannot disagree about what
+    ran: the recorded config carries the resolved numbers, not the word.
+    """
+    if qd == "auto":
+        qd = 10.0 if caller == "gatk" else None
+    if strand_bias_p == "auto":
+        strand_bias_p = None
+    return qd, strand_bias_p
+
+
 def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None | str = "auto",
                    mq: float | None = 55, sor: float | None = 3, mqranksum: float = -5.0,
                    readposranksum: float = -5.0, fs: float | None = None,
@@ -379,7 +479,7 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
     `bcftools mpileup` writes -- see :func:`_bcftools_qc_expr` for what maps to what, and
     where the mapping is not a straight rename.
 
-    ``qd="auto"`` resolves per caller: 20 for GATK, and **off** for bcftools, whose QUAL is
+    ``qd="auto"`` resolves per caller: 10 for GATK, and **off** for bcftools, whose QUAL is
     not on the same scale -- a 40x site called at QUAL 222 has QUAL/DP of 5.6, so carrying
     GATK's 20 across would discard a perfectly good callset. Pass a number to set it
     anyway, or ``None`` to switch it off.
@@ -405,18 +505,14 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
 
     ``keep_bed`` whitelists regions from this rule; a rescued record keeps its ``FAIL``
     FILTER, so a variant kept despite failing QC still says that it failed.
+
+    Only this step's own verdict is acted on. A FILTER the caller set (a VQSR tranche, a
+    region class, ``MissingVQSLOD``) stays on the record and is reported, not enforced;
+    :func:`caller_pass_filter` is the step that enforces those.
     """
     if caller not in ("gatk", "bcftools"):
         raise SystemExit(f"hard_qc_filter: caller must be gatk or bcftools, not {caller!r}")
-    # "auto" means "whatever suits this caller": QD 20 is GATK's, and QUAL/DP on bcftools
-    # output is not the same quantity, so it is left off there rather than reused.
-    if qd == "auto":
-        qd = 20.0 if caller == "gatk" else None
-    # FS is off by default for the reason given in _sor_from_ad_expr: it is a p-value, so
-    # a fixed cutoff tightens as a cohort grows, and `sor` asks the same question of the
-    # skew itself. Pass a number to switch it back on.
-    if strand_bias_p == "auto":
-        strand_bias_p = None
+    qd, strand_bias_p = resolve_qc_auto(caller, qd=qd, strand_bias_p=strand_bias_p)
 
     if caller == "bcftools":
         # the effect size only reads ADF/ADR on behalf of a z test, so with every z test
@@ -447,24 +543,140 @@ def hard_qc_filter(inp: str, out: str, *, caller: str = "gatk", qd: float | None
                 "copy its input; drop it from the chain instead")
         expr = " || ".join(parts)
     fmt = out_flag(out)
+    # The verdict is FAIL appended to the FILTER column, and the selection is "no FAIL" --
+    # not "PASS". A caller's own flags (Pf7's Low_VQSLOD, MissingVQSLOD;Mitochondrion, the
+    # VQSR tranches) stay on the record and are not acted on: selecting PASS would enforce
+    # them here, silently, as if they were this step's metrics -- and a contig VQSR never
+    # scored would lose every record however clean. `caller_pass_filter` is the step that
+    # acts on those, and says which.
     if not keep_bed:
         sh(f"bcftools filter -m + -s FAIL -e {q(expr)} {q(inp)} -Ou "
-           f"| bcftools view -f PASS -O{fmt} -o {q(out)}", tools=("bcftools",))
+           f"| bcftools view -e 'FILTER~\"FAIL\"' -O{fmt} -o {q(out)}", tools=("bcftools",))
+        _note_caller_filters(out, "hard_qc_filter")
         return 0
     # flagged first, selected second, so the whitelist has a header-compatible source
     prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
     try:
         sh(f"bcftools filter -m + -s FAIL -e {q(expr)} {q(inp)} -Ob -o {q(prep)}",
            tools=("bcftools",))
-        sh(f"bcftools view -f PASS {q(prep)} -O{fmt} -o {q(out)}", tools=("bcftools",))
-        return _rescue_whitelisted(prep, out, keep_bed, "hard_qc_filter")
+        sh(f"bcftools view -e 'FILTER~\"FAIL\"' {q(prep)} -O{fmt} -o {q(out)}",
+           tools=("bcftools",))
+        n = _rescue_whitelisted(prep, out, keep_bed, "hard_qc_filter")
+        _note_caller_filters(out, "hard_qc_filter")
+        return n
     finally:
         if os.path.exists(prep):
             os.unlink(prep)
 
 
+def _filter_ids(path: str) -> list[str]:
+    """The FILTER ids the header declares, PASS excluded."""
+    hdr = subprocess.run(["bcftools", "view", "-h", str(path)], stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True).stdout
+    ids = []
+    for line in hdr.splitlines():
+        if line.startswith("##FILTER=<ID="):
+            fid = line[len("##FILTER=<ID="):].split(",", 1)[0].split(">", 1)[0]
+            if fid != "PASS":
+                ids.append(fid)
+    return ids
+
+
+def _filter_value_counts(path: str, include: str) -> dict[str, int]:
+    """How many records carry each FILTER string, over the records matching ``include``."""
+    out = subprocess.run(["bcftools", "query", "-i", include, "-f", "%FILTER\n", str(path)],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
+    counts: dict[str, int] = defaultdict(int)
+    for line in out.splitlines():
+        if line and line != "." and line != "PASS":
+            counts[line] += 1
+    return dict(counts)
+
+
+def _note_caller_filters(path: str, label: str) -> None:
+    """Say how many kept records still carry a FILTER the caller set, and which.
+
+    Silence here is the trap this exists to avoid: a callset whose every record the caller
+    had flagged used to come out of ``hard_qc_filter`` empty with no word as to why.
+    """
+    # FAIL is this package's own verdict; a rescued record keeps it, and that is not the
+    # caller's doing
+    counts = {k: v for k, v in _filter_value_counts(path, 'FILTER!="PASS" && FILTER!="."').items()
+              if k != "FAIL"}
+    if not counts:
+        return
+    n = sum(counts.values())
+    top = sorted(counts.items(), key=lambda kv: -kv[1])
+    shown = ", ".join(f"{k}: {v:,}" for k, v in top[:4]) + (", ..." if len(top) > 4 else "")
+    say(f"NOTE: {n:,} kept record(s) carry a FILTER set by the caller ({shown}); {label} "
+        f"judges on its own metrics and does not act on those -- caller_pass_filter does")
+
+
+def reset_filter(inp: str, out: str) -> dict[str, int]:
+    """Clear the FILTER column -- every record to ``.`` -- saying what was there, by flag.
+
+    For a callset whose caller-side verdicts are not wanted at all: a VQSR model trained on
+    the wrong data, region classes the chain re-derives from its own BEDs, a contig the
+    caller never scored. Everything downstream then judges on its own terms alone, and
+    ``caller_pass_filter`` has nothing to act on. What was cleared is reported so the
+    decision leaves a trace in the log; the FILTER header lines go with the values.
+
+    Returns the per-flag counts that were cleared.
+    """
+    require("bcftools")
+    fmt = out_flag(out)
+    counts = _filter_value_counts(inp, 'FILTER!="PASS" && FILTER!="."')
+    sh(f"bcftools annotate -x FILTER {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+    n = sum(counts.values())
+    if n:
+        top = sorted(counts.items(), key=lambda kv: -kv[1])
+        shown = ", ".join(f"{k}: {v:,}" for k, v in top[:6]) + (", ..." if len(top) > 6 else "")
+        say(f"NOTE: FILTER cleared on every record; {n:,} carried a caller flag ({shown})")
+    else:
+        say("NOTE: FILTER cleared on every record; none carried a caller flag")
+    return counts
+
+
+def caller_pass_filter(inp: str, out: str, *, allow: tuple[str, ...] | list[str] = (),
+                       keep_bed: str | None = None) -> int:
+    """Keep the records the caller itself passed: FILTER is PASS or ``.``, or only ``allow``.
+
+    A joint callset arrives with the caller's own verdicts in the FILTER column -- Pf7's
+    VQSR tranches and ``Low_VQSLOD``, its region classes (``SubtelomericHypervariable``,
+    ``Mitochondrion``, ...), ``MissingVQSLOD`` on the contigs VQSR never scored. Those are a
+    different question from the metric thresholds ``hard_qc_filter`` applies, and this
+    step asks it on its own, counting what it removes by flag so "the caller had already
+    flagged all of it" is something the log says rather than something to discover.
+
+    ``allow`` names flags to tolerate: a record whose flags are all in ``allow`` is kept.
+    ``("MissingVQSLOD", "Mitochondrion")`` keeps the organelle records a nuclear VQSR model
+    could not score, for instance. Any flag not allowed removes the record.
+
+    ``keep_bed`` whitelists regions from this rule; a rescued record keeps its flags.
+    """
+    require("bcftools")
+    fmt = out_flag(out)
+    allowed = set(allow or ())
+    acting = [f for f in _filter_ids(inp) if f not in allowed]
+    if not acting:
+        sh(f"bcftools view {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        say("NOTE: the header declares no FILTER this step acts on; nothing removed")
+        return 0
+    expr = " || ".join(f'FILTER~"{f}"' for f in acting)
+    dropped = _filter_value_counts(inp, expr)
+    sh(f"bcftools view -e {q(expr)} {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+    n = sum(dropped.values())
+    if n:
+        top = sorted(dropped.items(), key=lambda kv: -kv[1])
+        shown = ", ".join(f"{k}: {v:,}" for k, v in top[:6]) + (", ..." if len(top) > 6 else "")
+        say(f"NOTE: {n:,} record(s) removed on the caller's own FILTER ({shown})")
+    else:
+        say("NOTE: no record carried a FILTER this step acts on")
+    return _rescue_whitelisted(inp, out, keep_bed, "caller_pass_filter")
+
+
 def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
-                     keep_bed: str | None = None) -> int:
+                     keep_bed: str | None = None, per_allele: bool = False) -> int:
     """Drop variants seen as ALT in <= min_samples samples; add FORMAT/ADS.
 
     ADS (summed allelic depth, the reads actually used to genotype) is a more
@@ -472,28 +684,69 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
     ``smpl_sum``, so it stays correct on multiallelic sites — the older
     ``AD[*:0]+AD[*:1]`` form counted only ref + first ALT and silently
     undercounted anything with a second ALT allele.
+
+    The test is **per ALT**: a record survives when some single alternate is carried by more
+    than ``min_samples`` samples. Counting samples that are merely not homozygous reference
+    gives the same answer at a biallelic site, and the wrong one as soon as there are two
+    alternates -- a record where each ALT is private to a different sample has two singletons
+    and no well-supported allele, but between them the alternates have two carriers, so it
+    used to survive a singleton filter. The counts come from
+    :func:`~plasgenomicsutils.lib.allele_counts.add_alt_sample_counts`, which also leaves
+    them in ``INFO/AC_SAMP`` so the decision is inspectable afterwards.
+
+    ``per_allele`` decides what happens to a record that carries a singleton alternate
+    **and** a well-supported one. By default the whole record is kept, singleton allele and
+    all -- the well-supported allele is what a record-level test is for. With
+    ``per_allele=True`` the singleton alternate's calls are recoded to missing and the allele
+    is trimmed off (:func:`~plasgenomicsutils.lib.singletons.singleton_to_missing` then
+    ``--trim-alt-alleles``), so only the supported alternates remain.
+
+    ``*`` is never recoded here -- a spanning deletion is not a variant allele, and a
+    singleton one is ``spanning_del_filter``'s business. This has a consequence worth naming:
+    a record whose only real alternate was a singleton is trimmed to whatever ``*`` it also
+    carried. If that ``*`` is common the record survives as a spanning-deletion-only record
+    -- the deletion is real, and per-allele mode preserves it where the record-level default
+    *drops the site entirely* for want of a supported real allele. So per-allele mode can
+    keep **more** records than the default, not fewer: it is trading a leaked singleton SNP
+    for a preserved deletion, and the deletion is then ``spanning_del_filter``'s call. A
+    record left with no allele at all (no supported real alternate, no ``*``) is ref-only and
+    dropped by the same record-level keep.
     """
+    from .allele_counts import ALT_SAMPLE_MAX_TAG, add_alt_sample_counts
+
     fmt = out_flag(out)
-    # Single '&' is required inside COUNT(): it combines the conditions per
-    # sample, so COUNT() tallies samples meeting both. '&&' would collapse them
-    # across the whole record and match every site.
-    keep = f'COUNT(GT!="RR" & GT!="mis") > {min_samples}'
+    keep = f"INFO/{ALT_SAMPLE_MAX_TAG} > {min_samples}"
     ads = "FORMAT/ADS=int(smpl_sum(FORMAT/AD))"
-    if not keep_bed:
-        sh(f"bcftools view -i {q(keep)} {q(inp)} -Ou "
-           f"| bcftools +fill-tags -O{fmt} -o {q(out)} -- -t {q(ads)}", tools=("bcftools",))
-        return 0
-    # ADS is per-sample and does not depend on which records survive, so tagging everything
-    # first and selecting second gives the same output and leaves a source to rescue from
+    # ADS and AC_SAMP are both properties of the record rather than of which records
+    # survive, so tagging everything first and selecting second gives the same output --
+    # and leaves a tagged source for the whitelist to rescue from.
     prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    tagged = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    recoded = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    trimmed = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
     try:
-        sh(f"bcftools +fill-tags {q(inp)} -Ob -o {q(prep)} -- -t {q(ads)}",
+        # Per allele: blank the singleton alternates' calls and trim them off first, so what
+        # AC_SAMP is then computed on -- and what the record-level keep sees -- is the
+        # record reduced to its supported alternates. A record left with no real allele is
+        # ref-only after the trim and falls to `AC_SAMP_MAX > min_samples` like any other.
+        if per_allele:
+            from .singletons import singleton_to_missing
+            singleton_to_missing(inp, recoded, min_samples=min_samples)
+            _trim_alt_alleles(recoded, trimmed)
+            source = trimmed
+        else:
+            source = inp
+        add_alt_sample_counts(source, tagged)
+        sh(f"bcftools +fill-tags {q(tagged)} -Ob -o {q(prep)} -- -t {q(ads)}",
            tools=("bcftools",))
         sh(f"bcftools view -i {q(keep)} {q(prep)} -O{fmt} -o {q(out)}", tools=("bcftools",))
+        if not keep_bed:
+            return 0
         return _rescue_whitelisted(prep, out, keep_bed, "singleton_filter_add_ads")
     finally:
-        if os.path.exists(prep):
-            os.unlink(prep)
+        for t in (prep, tagged, recoded, trimmed):
+            if os.path.exists(t):
+                os.unlink(t)
 
 
 #: Every variant type that is not a SNP. Selecting SNPs by exclusion rather than with
@@ -524,14 +777,63 @@ def _snp_select_args(snps_only: bool, biallelic: bool, mnp_handling: str = "remo
     # answers the same way. `ref` stays in the exclusion list as the statement of intent.
     if snps_only or biallelic:
         parts.append("-m2")
-        # A record whose only ALT is `*` states that an upstream deletion covers this
-        # position and nothing else -- two alleles by count, no variant to call. It passes
-        # every test above, so it needs naming. The N_ALT test is what keeps `A > *,T`, a
-        # real SNP that merely sits under a deletion in some samples.
-        parts.append("""-e 'N_ALT=1 && ALT="*"'""")
+        # A `*` says some samples have a deletion covering this position. `--snps-only` is a
+        # request for sites where every sample has a base to compare, and `A > *,T` is not
+        # one however well T behaves -- part of the cohort has no sequence there at all.
+        # So any `*` disqualifies the record, not only a record that is nothing but `*`.
+        #
+        # `spanning_del_filter` is the way to keep such a site: it recodes the deleted calls
+        # as missing and drops the allele, after which the record really is a clean SNP. Run
+        # it before this step, and the site comes through.
+        #
+        # Without `snps_only` the test is narrower, since "biallelic" is a claim about the
+        # allele count rather than about having a base: only a record with no real allele at
+        # all is dropped.
+        parts.append("""-e 'ALT="*"'""" if snps_only else """-e 'N_ALT=1 && ALT="*"'""")
     if biallelic:
         parts.append("-M2")
     return " ".join(parts)
+
+
+def spanning_del_filter(inp: str, out: str, *, trim: bool = True) -> dict:
+    """Recode the calls that name a ``*`` allele as missing, then drop the allele.
+
+    ``*`` is a missingness annotation, not an allele -- see
+    :mod:`~plasgenomicsutils.lib.spanning_del` for why, and for what the recode costs. This
+    composes the two halves: rewrite the genotypes, then let
+    ``bcftools view --trim-alt-alleles`` remove the ``*`` (which no genotype names any more)
+    and re-lay the ``Number=R``/``A``/``G`` fields to match.
+
+    Run it **before** ``biallelic_snp_filter``. On the shipped Pf7 fixture that turns 312
+    records from multiallelic into ordinary biallelic SNPs, so they survive a ``-M2`` test
+    they would otherwise fail; run afterwards, they are already gone.
+
+    ``trim=False`` does the recode only, leaving the ``*`` in ALT. Useful for checking what
+    the recode alone did, and for a chain that trims later anyway -- but note the record
+    still *looks* multiallelic until something trims it.
+
+    The trim removes every ALT no genotype carries, not only ``*``; that is the same trim
+    :func:`biallelic_snp_filter` does by default, and it is how a joint callset subset to
+    fewer samples sheds the alleles none of them has.
+
+    Returns the tally from :func:`~plasgenomicsutils.lib.spanning_del.spanning_del_to_missing`.
+    """
+    from .spanning_del import spanning_del_to_missing
+
+    if not trim:
+        return spanning_del_to_missing(inp, out)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    try:
+        st = spanning_del_to_missing(inp, tmp)
+        _trim_alt_alleles(tmp, out, out_fmt=out_flag(out))
+        return st
+    finally:
+        for suffix in ("", ".csi"):
+            try:
+                os.unlink(tmp + suffix)
+            except OSError:
+                pass
 
 
 def biallelic_snp_filter(inp: str, out: str, *, trim: bool = True,
@@ -673,6 +975,65 @@ def _note_whitelist(label: str, keep_bed: str, n: int, dropped_by: str) -> None:
         say(f"     {label}: WARNING the whitelist {keep_bed} rescued nothing -- no variant "
               f"it covers would have been dropped here. Check the contig names, and that its "
               f"positions are 0-based half-open like any BED.")
+
+
+def report_whitelisted_drops(before: str, after: str, keep_bed: str | None,
+                             label: str) -> list[str]:
+    """Name the whitelisted records a step removed, without putting them back.
+
+    The counterpart to :func:`_rescue_whitelisted`, for a step where rescuing is the wrong
+    answer. ``biallelic_snp_filter`` is the case that matters: someone downstream is relying
+    on the file being biallelic, and slipping one multiallelic record past ``-M2`` because it
+    sits under a whitelist would break them silently and far from here.
+
+    So the whitelist stops being a no-op and becomes a **diagnostic** instead. You find out
+    that the resistance codon you asked to protect was multiallelic at the moment it is
+    removed, rather than weeks later when it is missing from a table. Turning the biallelic
+    test off, or running ``spanning_del_filter`` first if a `*` is what made it multiallelic,
+    are then both informed choices rather than guesses.
+
+    Returns the ``chrom:pos`` labels that were dropped, most alleles first.
+    """
+    if not keep_bed:
+        return []
+    tmp = tempfile.mkdtemp()
+    wl = os.path.join(tmp, "wl.bcf")
+    kept = os.path.join(tmp, "kept.bcf")
+    gone = os.path.join(tmp, "gone.bcf")
+    try:
+        sh(f"bcftools view {q(before)} "
+           f"| bedtools intersect -header -a stdin -b {q(keep_bed)} "
+           f"| bcftools view -Ob -o {q(wl)}", tools=("bcftools", "bedtools"))
+        sh(f"bcftools view {q(after)} -Ob -o {q(kept)}", tools=("bcftools",))
+        index_vcf(wl)
+        index_vcf(kept)
+        sh(f"bcftools isec -C {q(wl)} {q(kept)} -w1 -Ob -o {q(gone)}", tools=("bcftools",))
+        rows = subprocess.run(
+            f"bcftools query -f '%CHROM\t%POS0\t%REF\t%ALT\n' {q(gone)}",
+            shell=True, executable="/bin/bash", stdout=subprocess.PIPE, text=True).stdout
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    dropped = []
+    for line in rows.splitlines():
+        chrom, pos0, ref, alt = line.split("\t")
+        n_alt = len([a for a in alt.split(",") if a and a != "."])
+        dropped.append((n_alt, f"{chrom}:{pos0} {ref}>{alt}"))
+    if not dropped:
+        return []
+    dropped.sort(key=lambda x: -x[0])
+    labels = [d for _n, d in dropped]
+    # Named at the normal level, not behind --verbosity very-verbose: a whitelist entry
+    # being ignored is exactly the thing nobody should have to opt in to hearing about.
+    say(f"     WARNING: {len(labels):,} whitelisted record(s) were removed by {label}, "
+        f"which does not honour the whitelist.")
+    for d in labels[:5]:
+        say(f"       {d}")
+    if len(labels) > 5:
+        say(f"       ... and {len(labels) - 5:,} more (--verbosity very-verbose lists them)")
+        for d in labels[5:]:
+            detail(f"       {d}")
+    return labels
 
 
 def _rescue_whitelisted(prepared: str, out: str, keep_bed: str | None, label: str) -> int:
@@ -848,6 +1209,13 @@ def sample_coverage_filter(inp: str, out: str, *, ads_min: int = 10,
     """
     require("bcftools")
     rows = sample_coverage_table(inp, ads_min=ads_min, frac_min=frac_min)
+    # An empty callset covers nobody at any locus; that is not a verdict on the samples.
+    # Without this every sample scores 0/0 and the whole cohort goes, and a callset with no
+    # samples loses its FORMAT header, so the next step fails on a tag that "is not defined".
+    if not any(r["n_loci"] for r in rows):
+        say("NOTE: no variants to measure coverage on; no sample dropped")
+        for r in rows:
+            r["dropped"] = False
     dropped = sorted(r["sample"] for r in rows if r["dropped"])
 
     if cov_table_path:
@@ -868,24 +1236,56 @@ def sample_coverage_filter(inp: str, out: str, *, ads_min: int = 10,
     fmt = out_flag(out)
     # The singleton re-filter always runs: re-genotyping upstream can leave sites
     # supported by a single sample even when no samples are dropped here.
-    keep = 'COUNT(GT!="RR" & GT!="mis") > 1'
+    #
+    # Per ALT, and recomputed here rather than carried over from
+    # `singleton_filter_add_ads`: dropping samples changes who carries what, which is the
+    # whole reason this second pass exists. Counting samples that are merely not homozygous
+    # reference would keep a record whose every alternate is private to a different sample.
+    from .allele_counts import ALT_SAMPLE_MAX_TAG, add_alt_sample_counts
+
+    keep = f"INFO/{ALT_SAMPLE_MAX_TAG} > 1"
     drop_arg = (dropped_samples_path or _write_tmp_list(dropped)) if dropped else None
-    view_in = (f"bcftools view -S ^{q(drop_arg)} {q(inp)} -Ou"
-               if drop_arg else f"bcftools view {q(inp)} -Ou")
-    sh(f"{view_in} "
-       f"| bcftools view -i {q(keep)} -Ou "
-       f"| bcftools +fill-tags -O{fmt} -o {q(out)} -- -t AC,AN,AF", tools=("bcftools",))
+    kept_samples = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    counted = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    try:
+        view_in = (f"bcftools view -S ^{q(drop_arg)} {q(inp)} -Ob -o {q(kept_samples)}"
+                   if drop_arg else
+                   f"bcftools view {q(inp)} -Ob -o {q(kept_samples)}")
+        sh(view_in, tools=("bcftools",))
+        add_alt_sample_counts(kept_samples, counted)
+        sh(f"bcftools view -i {q(keep)} {q(counted)} -Ou "
+           f"| bcftools +fill-tags -O{fmt} -o {q(out)} -- -t AC,AN,AF", tools=("bcftools",))
+    finally:
+        for t in (kept_samples, counted):
+            if os.path.exists(t):
+                os.unlink(t)
     return dropped
 
 
 def locus_missingness_filter(inp: str, out: str, *, f_missing_max: float = 0.05,
-                             ads_min: int = 10, sample_frac_min: float = 0.95,
+                             ads_min: int = 5, sample_frac_min: float = 0.80,
                              keep_bed: str | None = None) -> int:
     """Keep loci with < f_missing_max missing AND >= sample_frac_min at ADS >= ads_min.
+
+    The coverage clause is a floor against sites only a few samples can speak for, not a
+    uniformity requirement. It was 95% of samples at 10 reads until v0.3.2, and on a
+    cohort of mixed depth that failed half the sites the caller itself passed: on a
+    351-sample Pf7 chromosome 1 subset, where 237 samples had under 90% of loci at 10x, it
+    removed 625 of the 1,324 Pf7-PASS SNPs reaching it, none of them on missingness, and
+    the panel came out at a third of Pf7's own density. 80% at 5 reads keeps sites the
+    thin samples happen to cluster at, which by this step have already been genotyped on
+    their own AD (``filter_ad_regenotype``) and whose thin *samples* are
+    ``sample_coverage_filter``'s job.
 
     ``keep_bed`` whitelists regions from this rule, for a locus worth keeping even where it
     is thinly covered.
     """
+    if not _has_format_tag(inp, "ADS"):
+        raise SystemExit(
+            f"ERROR: {inp} has no FORMAT/ADS, which is what per-sample coverage is measured "
+            "on. Run singleton_filter_add_ads first (it adds ADS as "
+            "int(smpl_sum(FORMAT/AD))), or add the tag with: bcftools +fill-tags -- -t "
+            "'FORMAT/ADS=int(smpl_sum(FORMAT/AD))'.")
     fmt = out_flag(out)
     expr = (f"F_MISSING < {f_missing_max} & "
             f"COUNT(FMT/ADS>={ads_min})/N_SAMPLES >= {sample_frac_min}")
@@ -1015,6 +1415,16 @@ def _maf_filter_grouped(inp: str, out: str, *, meta: str, group_col: str,
                 groups[g].append(s)
     if not groups:
         raise SystemExit(f"ERROR: no samples in {meta} overlap the VCF")
+    # Said out loud, because a grouped floor is only as good as the grouping: a sample the
+    # metadata does not name, or names with an empty group, is in no group's frequency and
+    # its alleles count for nothing here -- and nothing else in the run would mention it.
+    grouped = {s for ss in groups.values() for s in ss}
+    ungrouped = sorted(present - grouped)
+    sizes = ", ".join(f"{g} {len(ss)}" for g, ss in sorted(groups.items(), key=lambda kv: -len(kv[1])))
+    say(f"NOTE: MAF >= {maf_min:g} judged per '{g_col}' in any group ({len(groups)}): {sizes}"
+        + (f"; {len(ungrouped)} VCF sample(s) in no group, counted in none of the "
+           f"frequencies: {', '.join(ungrouped[:5])}{', ...' if len(ungrouped) > 5 else ''}"
+           if ungrouped else "; every VCF sample is in a group"))
 
     tmp = tempfile.mkdtemp(prefix="maf_grouped_")
     try:
@@ -1070,14 +1480,177 @@ def vcf_to_bed(inp: str, out: str | None = None, *, snps_only: bool = False,
     for an indel or MNP — so a record's extent is what a region file needs it to be rather
     than just its start.
 
-    ``snps_only`` keeps single-base substitutions and drops indels and everything else.
+    ``snps_only`` keeps records whose **every** allele is a single-base substitution and
+    drops indels and everything else. It selects with the same :func:`_snp_select_args`
+    the callset filter uses rather than ``bcftools view -v snps``, which keeps a record if
+    *any* allele is a substitution and so lets a mixed ``A>T,ATT`` site through -- see
+    :data:`NON_SNP_TYPES`. That matters because :func:`snp_bed` runs at the end of every
+    pipeline: a panel built on the looser reading would name positions the filtered
+    callset had already removed.
     """
     require("bcftools")
     fields = "%CHROM\\t%POS0\\t%END" + ("\\t%CHROM:%POS0" if name_column else "") + "\\n"
-    pipe = f"bcftools view -v snps {q(inp)} -Ou | " if snps_only else ""
+    select = _snp_select_args(snps_only=True, biallelic=False, mnp_handling="remove")
+    # A substitution written with padding -- REF=ATTTA ALT=ATTCA differs at one base -- is a
+    # SNP to the type test and to `classify_record`, and used to reach the BED as a
+    # five-base interval named for its FIRST base, three bases from the one that varies. The
+    # SNP filter atomises such a record into its minimal form (`biallelic_snp_filter`,
+    # mnp_handling="split"), and the panel has to describe the callset that filter leaves,
+    # so it is atomised the same way here: split multiallelics apart, atomise, rejoin.
+    atomize = ("bcftools norm -m -any - -Ou | bcftools norm -a - -Ou | "
+               "bcftools norm -m +any - -Ou | ")
+    pipe = f"bcftools view {select} {q(inp)} -Ou | {atomize}" if snps_only else ""
     src = "-" if snps_only else q(inp)
     redirect = f" > {q(out)}" if out else ""
     sh(f"{pipe}bcftools query -f '{fields}' {src}{redirect}", tools=("bcftools",))
+
+
+def _read_group_map(meta: str, present: set[str], *, group_col: str,
+                    sample_col: str) -> tuple[dict[str, str], list[str]]:
+    """``{sample: group}`` for the VCF's samples, plus the VCF samples in no group.
+
+    The metadata columns are resolved case-insensitively (:meth:`Utils.resolve_column`),
+    exactly as :func:`_maf_filter_grouped` does, so ``Sample`` / ``sample`` and
+    ``Country`` / ``country`` all land. A sample the metadata does not name, or names with
+    an empty group cell, is returned in the ``ungrouped`` list: it belongs to no output and
+    would otherwise vanish silently.
+    """
+    sample_group: dict[str, str] = {}
+    with open(meta) as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        fields = reader.fieldnames or []
+        s_col = Utils.resolve_column(fields, sample_col, source=f"metadata ({meta})")
+        g_col = Utils.resolve_column(fields, group_col, source=f"metadata ({meta})")
+        for got, want in ((s_col, sample_col), (g_col, group_col)):
+            if got != want:
+                print(f"  note: metadata column '{got}' read as '{want}'")
+        for row in reader:
+            s, g = row[s_col], (row[g_col] or "").strip()
+            if s in present and g:
+                sample_group[s] = g
+    ungrouped = sorted(present - set(sample_group))
+    return sample_group, ungrouped
+
+
+def split_by_meta(inp: str, outdir: str, *, meta: str, group_col: str,
+                  sample_col: str = "sample", maf_min: float | None = None,
+                  refill: bool = True, trim_alts: bool = False,
+                  output_type: str = "b") -> dict[str, str]:
+    """Split a callset into one VCF per metadata group (e.g. per country).
+
+    ``bcftools +split`` already partitions samples by a groups file; this wraps it so the
+    grouping is read straight from a per-sample metadata table with the same
+    ``--meta`` / ``--group-col`` / ``--sample-col`` arguments as :func:`maf_filter`, and so
+    the per-group outputs come out with their allele-count tags made right rather than
+    inherited stale from the parent. For each group the pipeline is, in order:
+
+    1. **subset** the samples of that group (``bcftools +split -G``);
+    2. **trim** ALT alleles no genotype in the group uses (``--trim-alt-alleles``), only if
+       ``trim_alts`` — off by default, because keeping the full ALT set lets the pieces be
+       ``bcftools merge``-d back losslessly;
+    3. **refill** ``AC,AN,AF,MAF`` on the subset (``+fill-tags``), if ``refill`` (default on
+       — after subsetting, the parent's counts are wrong);
+    4. **MAF floor**: keep sites whose per-group minor-allele frequency is ``>= maf_min``,
+       if given. Because each output is already one group, this *is* a per-group MAF filter,
+       judged on the group's own frequencies (contrast :func:`maf_filter`, which keeps a
+       site passing in *any* group on the combined VCF). ``maf_min`` implies ``refill``: a
+       frequency has to be computed to filter on it, and leaving stale tags beside a
+       freshly-computed one would contradict.
+
+    Trim precedes refill so the refilled counts describe the alleles that remain. Samples
+    the metadata does not place in a group are reported and written to no output.
+
+    ``output_type`` is a bcftools ``-O`` letter (``b`` BCF default, ``z`` bgzipped VCF,
+    ``v`` VCF). Returns ``{group: output_path}``.
+    """
+    require("bcftools")
+    if maf_min is not None and not refill:
+        say("NOTE: --maf-min needs allele frequencies; refilling tags despite --no-refill")
+        refill = True
+    ext = {"b": ".bcf", "z": ".vcf.gz", "v": ".vcf"}.get(output_type, ".bcf")
+
+    present = _vcf_samples(inp)
+    sample_group, ungrouped = _read_group_map(meta, present,
+                                              group_col=group_col, sample_col=sample_col)
+    if not sample_group:
+        raise SystemExit(f"ERROR: no samples in {meta} overlap the VCF")
+    groups = sorted(set(sample_group.values()))
+    sizes = ", ".join(f"{g} {sum(v == g for v in sample_group.values())}" for g in groups)
+    say(f"NOTE: splitting {len(present)} sample(s) by '{group_col}' into {len(groups)} "
+        f"group(s): {sizes}"
+        + (f"; {len(ungrouped)} in no group, written nowhere: "
+           f"{', '.join(ungrouped[:5])}{', ...' if len(ungrouped) > 5 else ''}"
+           if ungrouped else "; every sample is placed"))
+
+    os.makedirs(outdir, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="split_by_meta_")
+    out_paths: dict[str, str] = {}
+    try:
+        # bcftools +split -G: one row per sample -> `sample <tab> - <tab> group`; the group
+        # name (third column) becomes the output basename. `-` keeps sample names unchanged.
+        gfile = os.path.join(tmp, "groups.tsv")
+        with open(gfile, "w") as gf:
+            for s, g in sample_group.items():
+                gf.write(f"{s}\t-\t{g}\n")
+        raw = os.path.join(tmp, "raw")
+        os.makedirs(raw, exist_ok=True)
+        sh(f"bcftools +split {q(inp)} -G {q(gfile)} -Ob -o {q(raw)}", tools=("bcftools",))
+
+        for g in groups:
+            src = os.path.join(raw, g + ".bcf")
+            if not os.path.exists(src):  # +split sanitizes [ \t:/\\] in names to '_'
+                san = "".join("_" if c in " \t:/\\" else c for c in g)
+                src = os.path.join(raw, san + ".bcf")
+            out = os.path.join(outdir, g + ext)
+            _finish_group_split(src, out, maf_min=maf_min, refill=refill,
+                                 trim_alts=trim_alts, output_type=output_type)
+            index_vcf(out)
+            out_paths[g] = out
+            say(f"  [{g}] {count_variants(out):,} variant(s), "
+                f"{sum(v == g for v in sample_group.values())} sample(s) -> {out}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return out_paths
+
+
+def _finish_group_split(src: str, out: str, *, maf_min: float | None,
+                        refill: bool, trim_alts: bool, output_type: str) -> None:
+    """Trim -> refill -> MAF-floor one group's raw split file into its final output."""
+    fmt = output_type
+    cur = src
+    tmps: list[str] = []
+    try:
+        if trim_alts:
+            # A genotype-linked Number=G field (e.g. PL) whose length disagrees with the
+            # genotypes makes --trim-alt-alleles abort; null just those records first, the
+            # same guard biallelic_snp_filter/no_alt_filter use.
+            if any(t in format_tags(cur) for t in GENOTYPE_LINKED_FORMAT):
+                stripped = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+                tmps.append(stripped)
+                strip_stale_format(cur, stripped, fields=GENOTYPE_LINKED_FORMAT,
+                                   mode="mismatch")
+                cur = stripped
+            trimmed = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+            tmps.append(trimmed)
+            sh(f"bcftools view --trim-alt-alleles {q(cur)} -Ob -o {q(trimmed)}",
+               tools=("bcftools",))
+            cur = trimmed
+        # Refill and the MAF floor share one pipeline: fill first so MAF is the group's own.
+        parts = [f"bcftools view {q(cur)} -Ou"]
+        if refill:
+            parts.append("bcftools +fill-tags -Ou -- -t AC,AN,AF,MAF")
+        if maf_min is not None:
+            parts.append(f"bcftools view -i 'MAF>={maf_min}' -Ou")
+        # last stage writes the real output in the requested format
+        parts[-1] = parts[-1].rsplit(" -Ou", 1)[0] + f" -O{fmt} -o {q(out)}"
+        sh(" | ".join(parts), tools=("bcftools",))
+    finally:
+        for t in tmps:
+            for suffix in ("", ".csi"):
+                try:
+                    os.remove(t + suffix)
+                except OSError:
+                    pass
 
 
 def snp_bed(inp: str, bed: str) -> None:

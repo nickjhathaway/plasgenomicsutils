@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from ...lib import filter_pipeline as P
-from ...lib.bcftools import VARIANT_TYPES
+from ...lib.bcftools import EXTRA_COUNTS, VARIANT_TYPES
 from ...lib.reporting import LEVELS, say, set_verbosity
 
 
@@ -28,6 +28,14 @@ def get_parser_filter_pipeline() -> argparse.ArgumentParser:
                         "rather than all of them. The input is never touched, the final "
                         "output stays, and the side tables are kept. Overrides "
                         "\"remove_intermediates\" in the config.")
+    p.add_argument("--reset-filter", action="store_true",
+                   help="Clear the caller's FILTER column on every record before the chain "
+                        "runs, as a step 00 that reports what it cleared by flag. For when "
+                        "the caller-side verdicts (VQSR tranches, region classes, "
+                        "MissingVQSLOD) are not wanted at all; caller_pass_filter then has "
+                        "nothing to act on. To tolerate some flags and remove the rest, use "
+                        "that step's \"allow\" instead. Same as \"reset_filter\": true in "
+                        "the config.")
     p.add_argument("--verbosity", choices=list(LEVELS), default="verbose",
                    help="How much the run narrates. `verbose` (default) gives one line per "
                         "step plus each report's summary; `very-verbose` adds the "
@@ -71,12 +79,14 @@ def filter_pipeline():
     config = P.load_config(args.config)
     if args.remove_intermediates:
         config["remove_intermediates"] = True
+    if args.reset_filter:
+        config["reset_filter"] = True
     tally = P.run_pipeline(args.input, args.outdir, config, emit_snp_bed=not args.no_snp_bed)
 
     say("\n=== variant counts per step ===")
     for row in tally:
         kind, count, _ = _tally_fields(row)
-        shown = "skipped" if kind == "skipped" else f"{count:,}"
+        shown = ("not run" if row.get("reason") else "skipped") if kind == "skipped" else f"{count:,}"
         note = " rows" if kind == "report" else ""
         if row.get("rescued"):
             note += f"   (+{row['rescued']:,} whitelisted)"
@@ -90,13 +100,15 @@ def filter_pipeline():
     # `rescued` records how many of a step's kept variants only survived because the
     # whitelist covered them -- a run artifact rather than something to re-derive from the
     # console, since it is the number that says whether the whitelist did anything
-    cols = ["step", "kind", "count", *VARIANT_TYPES, "rescued", "removed", "path"]
+    cols = ["step", "kind", "count", *VARIANT_TYPES, *EXTRA_COUNTS,
+            "rescued", "removed", "path"]
     lines = ["\t".join(cols) + "\n"]
     for row in tally:
         kind, count, path = _tally_fields(row)
         types = row.get("types") or {}
         cells = [row["step"], kind, str(count),
                  *(str(types[t]) if types else "" for t in VARIANT_TYPES),
+                 *(str(types.get(t, "")) if types else "" for t in EXTRA_COUNTS),
                  str(row.get("rescued", "")),
                  "True" if row.get("removed") else "",
                  path]

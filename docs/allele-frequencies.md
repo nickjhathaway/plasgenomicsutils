@@ -31,6 +31,26 @@ In a polyclonal infection they differ, so all three are reported side by side.
 | `af_weighted`, `n_samples_ad` | the mean of each sample's *within-sample* frequency |
 | `prevalence`, `n_samples_alt`, `n_samples` | samples whose **genotype** carries it |
 | `prevalence_ad`, `n_samples_alt_ad` | samples whose **reads** support it |
+| `he`, `n_alleles_obs` | the site's diversity, over **every** allele including the reference |
+
+**`he`** is expected heterozygosity, `1 - sum(p_i^2)`, and it is a property of the *site*, so
+it carries the same value on every row of a site including each `--per-alt` row. It is here
+because the collapsed `af` cannot tell two very different sites apart:
+
+| site | `af` | `he` |
+|---|---|---|
+| 4 REF / 2 C / 2 G | 0.5 | **0.625** |
+| 4 REF / 4 C | 0.5 | **0.5** |
+| 4 C / 4 G — reference absent | **1.0** | **0.5** |
+
+The first is more informative than any biallelic site can be. The third is perfectly
+polymorphic yet collapses to `af = 1.0`, so an `0 < af < 1` gate deletes it silently. `he` is
+well defined in all three, and at a biallelic site it is exactly `2p(1-p)`, so it moves no
+existing number.
+
+**`n_alleles_obs`** counts the alleles actually carried, which is not `n_alts + 1`: a joint
+callset lists every ALT the full cohort had, and this subset of samples may carry none of
+them.
 
 **`af`** is the classical estimate. A genotype is a hard call, so a sample carrying an
 allele at 5% within-host counts exactly like one carrying it at 95%.

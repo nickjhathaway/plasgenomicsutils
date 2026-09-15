@@ -57,6 +57,39 @@ def _within_sample_fractions(v):
     return (out, ad), not ok.any()
 
 
+def _site_diversity(alleles, called, mask):
+    """Expected heterozygosity and observed allele count for the samples in `mask`.
+
+    ``he = 1 - sum(p_i^2)`` over **every** allele at the site, reference included. This is
+    the general k-allele form, and it is a strict generalisation rather than an alternative:
+    at a biallelic site it is exactly ``2p(1-p)``.
+
+    It is here because the collapsed ``af`` cannot tell two very different sites apart. A
+    site with 4 REF / 2 C / 2 G and one with 4 REF / 4 C both give ``af = 0.5``, but their
+    diversity is 0.625 and 0.5 -- and the first is more informative than any biallelic site
+    can be. Worse, a site where the reference is absent altogether (4 C / 4 G) collapses to
+    ``af = 1.0`` and is silently deleted by an ``0 < af < 1`` gate, though it is perfectly
+    polymorphic. ``he`` is well defined in all three cases.
+
+    ``n_alleles_obs`` counts the alleles actually carried, which is not ``n_alts + 1``: a
+    joint callset lists every ALT the full cohort had, and a subset of samples may carry
+    none of them.
+    """
+    a = alleles[mask]
+    c = called[mask]
+    an = int(c.sum())
+    if not an:
+        return float("nan"), 0, float("nan")
+    counts = np.bincount(a[c].ravel(), minlength=1)
+    p = counts / an
+    # `maf_k` is the frequency of everything that is not the commonest allele. At two alleles
+    # it is the minor-allele frequency; at k it reaches 1 - 1/k. It is the binning key the
+    # selection statistic wants, and `he` is not -- heterozygosity is flat near p = 0.5, so
+    # binning on it merges frequency classes and shuffles biallelic SNPs between bins.
+    return (float(1.0 - (p * p).sum()), int((counts > 0).sum()),
+            float(1.0 - p.max()) if an else float("nan"))
+
+
 def _freq_row(hit, called, sample_called, frac, k, mask, ad_min_reads=2,
               ad_min_freq=0.01):
     """One frequency row for the samples in `mask`.
@@ -209,9 +242,12 @@ def compute_allele_freqs(
             extra = {"n_alts": n_alts}
             if k is not None:
                 extra.update(alt=alt, alt_index=k)
+            all_mask = np.ones(len(samples), bool)
+            he, n_obs, mk = _site_diversity(alleles, called, all_mask)
             grow = _freq_row(hit, called, sample_called, frac, k,
-                             np.ones(len(samples), bool), ad_min_reads, ad_min_freq)
-            grow = {"snp_id": snp_id, **extra, **grow}
+                             all_mask, ad_min_reads, ad_min_freq)
+            grow = {"snp_id": snp_id, **extra,
+                    "he": he, "n_alleles_obs": n_obs, "maf_k": mk, **grow}
             if with_pos_vcf:
                 grow["pos_vcf"] = v.POS
             global_rows.append(grow)
@@ -219,7 +255,10 @@ def compute_allele_freqs(
                 m = group_masks[r]
                 row = _freq_row(hit, called, sample_called, frac, k, m,
                                 ad_min_reads, ad_min_freq)
-                group_rows[r].append({"group": r, "snp_id": snp_id, **extra, **row})
+                ghe, gn_obs, gmk = _site_diversity(alleles, called, m)
+                group_rows[r].append({"group": r, "snp_id": snp_id, **extra,
+                                      "he": ghe, "n_alleles_obs": gn_obs,
+                                      "maf_k": gmk, **row})
 
     vcf.close()
 
@@ -228,6 +267,7 @@ def compute_allele_freqs(
         group_df = pd.concat([pd.DataFrame(group_rows[r]) for r in groups], ignore_index=True)
     else:
         cols = ["group", "snp_id", "n_alts"] + (["alt", "alt_index"] if per_alt else []) + [
+            "he", "n_alleles_obs", "maf_k",
             "af", "maf", "ac", "an", "af_weighted", "n_samples_ad",
             "prevalence", "n_samples_alt", "n_samples",
             "prevalence_ad", "n_samples_alt_ad"]

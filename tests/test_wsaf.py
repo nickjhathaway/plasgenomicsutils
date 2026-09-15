@@ -219,7 +219,10 @@ def test_sites_out_agrees_with_the_summary(tmp_path):
 
     import pandas as pd
     long = pd.read_csv(sites, sep="\t")
-    assert set(long.columns) == {"sample", "snp_id", "minor_frac", "alt_frac", "plaf", "wsmaf"}
+    # `wsmaf_allele` names which allele `wsmaf` is the frequency of -- the population's
+    # second most common by pooled depth, which is only "the alternate" when there is one
+    assert set(long.columns) == {"sample", "snp_id", "minor_frac", "alt_frac", "plaf",
+                                 "wsmaf", "wsmaf_allele"}
     for s in samples:
         m = long.loc[long["sample"] == s, "minor_frac"]
         assert len(m) == df.loc[s, "n_het"]

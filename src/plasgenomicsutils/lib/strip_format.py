@@ -93,7 +93,14 @@ def strip_stale_format(inp: str, out: str, *, fields=("PL",),
                     exp = {}
                     mismatch = False
                     for name, s in rec.samples.items():
-                        gt = [a for a in (s.get("GT") or ()) if a is not None]
+                        # The *length* of the GT tuple is the ploidy; a missing allele is
+                        # still an allele slot. Counting only the non-missing ones read a
+                        # half-called `./1` as haploid, so its perfectly good diploid PL was
+                        # judged the wrong length -- and pysam then refused to write the
+                        # haploid-length replacement over it. `./1` is what setting a
+                        # spanning deletion's slot to missing produces, and it is also what
+                        # `bcftools norm -m-` makes of a `1/2` het, so it is not rare.
+                        gt = s.get("GT") or ()
                         exp[name] = _expected_len(number, n_alleles, len(gt) or 2)
                         val = s.get(f)
                         if val is not None and exp[name] is not None and len(val) != exp[name]:

@@ -21,8 +21,13 @@ from plasgenomicsutils.utils.small_utils import Utils
 _STAMP = f"snp_coord_system={SNP_COORD_SYSTEM}"
 
 
-def _callset(tmp_path, n_samples=8):
-    """A small callset with AD, so every column the tables can hold is populated."""
+def _callset(tmp_path, n_samples=8, multiallelic=False):
+    """A small callset with AD, so every column the tables can hold is populated.
+
+    ``multiallelic`` appends one ``A > C,G`` record modelled on *pfpx1* codon 384, where
+    two alternates of independent origin sit at one position. Off by default so the
+    biallelic tests keep the record count they assert on.
+    """
     samples = [f"s{i}" for i in range(1, n_samples + 1)]
     hdr = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100000>",
            '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
@@ -39,6 +44,12 @@ def _callset(tmp_path, n_samples=8):
             a = depth if alt else 0
             cells.append(f"{'1/1' if alt else '0/0'}:{depth - a},{a}")
         rows.append(f"chr1\t{1000 * (j + 1)}\t.\tA\tT\t.\t.\t.\tGT:AD\t" + "\t".join(cells))
+    if multiallelic:
+        cells = []
+        for i in range(n_samples):
+            gt, ad = [("0/0", "40,0,0"), ("1/1", "0,35,0"), ("2/2", "0,0,30")][i % 3]
+            cells.append(f"{gt}:{ad}")
+        rows.append("chr1\t99000\t.\tA\tC,G\t.\t.\t.\tGT:AD\t" + "\t".join(cells))
     vcf = tmp_path / "cohort.vcf"
     vcf.write_text("\n".join(hdr + rows) + "\n")
     return str(vcf), samples
@@ -111,15 +122,41 @@ def test_the_group_table_still_joins_per_group(tmp_path):
         assert not np.isnan(a).any()
 
 
-def test_per_alt_tables_are_rejected_rather_than_silently_joined(tmp_path):
-    """--per-alt gives several rows per snp_id; the statistic joins one row per SNP."""
+def test_a_biallelic_per_alt_table_is_still_one_row_per_snp_and_joins(tmp_path):
+    """--per-alt on a biallelic callset gives one row per SNP, so it must keep working."""
     vcf, _ = _callset(tmp_path)
     per, _ = compute_allele_freqs(vcf, per_alt=True)
-    # this fixture is biallelic, so per-alt is still one row per SNP and must still work
     labels = per["snp_id"].tolist()
     assert len(set(labels)) == len(labels)
     af = load_global_af(_write(per, tmp_path / "p.tsv.gz"), labels)
     assert not np.isnan(af).any()
+
+
+def test_per_alt_tables_are_rejected_rather_than_silently_joined(tmp_path):
+    """A --per-alt table has k rows per snp_id; a dict join would keep only the last.
+
+    The two modes write the same filename, so passing the wrong one is easy and, before
+    this check, undetectable -- the statistic would run to completion on one arbitrary
+    alternate's frequency.
+    """
+    vcf, _ = _callset(tmp_path, multiallelic=True)
+    per, _ = compute_allele_freqs(vcf, per_alt=True)
+    focal = per[per["snp_id"] == "chr1:98999"]
+    assert len(focal) == 2, "the triallelic record must give one row per ALT"
+    assert focal["af"].nunique() >= 1
+
+    labels = sorted(set(per["snp_id"]))
+    with pytest.raises(SystemExit, match="per-alt"):
+        load_global_af(_write(per, tmp_path / "p.tsv.gz"), labels)
+
+
+def test_a_per_alt_group_table_is_rejected_too(tmp_path):
+    """Same trap, one level down: duplicates are per (group, snp_id) there."""
+    vcf, samples = _callset(tmp_path, multiallelic=True)
+    s2g = {s: ("A" if i < 4 else "B") for i, s in enumerate(samples)}
+    _, grp = compute_allele_freqs(vcf, s2g, per_alt=True)
+    with pytest.raises(SystemExit, match="per-alt"):
+        load_group_af_table(_write(grp, tmp_path / "g.tsv.gz"))
 
 
 def test_a_table_without_the_coordinate_stamp_is_refused(tmp_path):
@@ -166,7 +203,10 @@ def test_the_group_table_can_be_scored_on_a_different_column(tmp_path):
 
     # whichever column is chosen, it arrives as `af` so the joins downstream are unchanged
     w = load_group_af_table(path, af_col="af_weighted")
-    assert list(w.columns) == ["group", "snp_id", "af"]
+    # `he` rides along when the table has it; whichever frequency column was chosen still
+    # arrives as `af`, so the joins downstream are unchanged
+    assert list(w.columns)[:3] == ["group", "snp_id", "af"]
+    assert set(w.columns) <= {"group", "snp_id", "af", "he"}
     assert set(w["group"]) == {"A", "B"}
     # the chosen column really is the one that arrives, renamed rather than recomputed
     key = ["group", "snp_id"]

@@ -126,8 +126,8 @@ def test_mapping_quality_bias_and_the_optional_extras(tmp_path):
 
 # ---- QD does not carry across ----------------------------------------------------
 
-def test_qd_is_off_by_default_for_bcftools_but_20_for_gatk(tmp_path):
-    # QUAL 222 over DP 40 is 5.6: GATK's QD >= 20 would discard a good bcftools callset,
+def test_qd_is_off_by_default_for_bcftools_but_10_for_gatk(tmp_path):
+    # QUAL 222 over DP 40 is 5.6: GATK-mode's QD >= 10 would discard a good bcftools callset,
     # so "auto" leaves it off there
     vcf = _vcf(tmp_path, [(1000, CLEAN)])
     out = str(tmp_path / "auto.vcf")
@@ -135,7 +135,7 @@ def test_qd_is_off_by_default_for_bcftools_but_20_for_gatk(tmp_path):
     assert _kept(out) == [1000]
     # asking for it explicitly still works, and does drop the record
     out2 = str(tmp_path / "qd.vcf")
-    F.hard_qc_filter(vcf, out2, caller="bcftools", qd=20)
+    F.hard_qc_filter(vcf, out2, caller="bcftools", qd=10)
     assert _kept(out2) == []
     # and a modest threshold on the right scale keeps it
     out3 = str(tmp_path / "qd2.vcf")
@@ -469,3 +469,152 @@ def test_the_effect_gate_names_the_strand_tags_it_reads(tmp_path):
     with pytest.raises(SystemExit) as e:
         F.hard_qc_filter(bare, str(tmp_path / "o.bcf"), caller="bcftools", sor=None)
     assert "--bias-eff" in str(e.value)
+
+
+# --- multiallelic records: the counts behind SOR and the *BZ effect sizes ------------
+
+def _multi_vcf(tmp_path, records, name="multi.vcf"):
+    """Like `_vcf`, but each record carries its own ALT column so it can be multiallelic."""
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100000>"]
+    for t in BCF_INFO:
+        n, ty = BCF_INFO[t]
+        hdr.append(f'##INFO=<ID={t},Number={n},Type={ty},Description="{t}">')
+    hdr.append('##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">')
+    hdr.append("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1")
+    for pos, alt, info in records:
+        kv = ";".join(f"{k}={v}" for k, v in info.items())
+        hdr.append(f"chr1\t{pos}\t.\tA\t{alt}\t222\t.\t{kv}\tGT\t0/1")
+    p = tmp_path / name
+    p.write_text("\n".join(hdr) + "\n")
+    return str(p)
+
+
+def test_the_bz_effect_size_counts_every_alt_not_just_the_first(tmp_path):
+    """Two records with the same ref depth and the same *total* non-reference depth.
+
+    The only difference is that one splits its non-reference reads across two alternates.
+    Counting `n2` as ALT1 alone made that record's effect size look larger than it is --
+    `eff = z*sqrt((n1+n2+1)/(12*n1*n2))` grows as n2 shrinks -- so the `-e` expression fired
+    on it and not on its biallelic twin. The bias runs in the direction that **deletes**
+    multiallelic sites, which is the opposite of what this work is for.
+    """
+    src = _multi_vcf(tmp_path, [
+        # ref 50/50, ALT1 10/10, ALT2 90/90 -> non-ref depth 200
+        (100, "C,G", {"ADF": "50,10,90", "ADR": "50,10,90", "RPBZ": "4.0",
+                      "DP": "400", "MQ": "60", "FS": "0.5", "SCBZ": "0", "MQBZ": "0",
+                      "MQSBZ": "0", "BQBZ": "0", "MQ0F": "0"}),
+        # ref 50/50, ALT 100/100 -> the same non-ref depth 200, in one allele
+        (200, "C", {"ADF": "50,100", "ADR": "50,100", "RPBZ": "4.0",
+                    "DP": "400", "MQ": "60", "FS": "0.5", "SCBZ": "0", "MQBZ": "0",
+                    "MQSBZ": "0", "BQBZ": "0", "MQ0F": "0"}),
+    ])
+    out = str(tmp_path / "out.vcf")
+    F.hard_qc_filter(src, out, caller="bcftools", read_pos_z=3.0, bias_eff=0.15)
+    assert _kept(out) == [100, 200], \
+        "the multiallelic record must not be judged on one allele's reads"
+
+
+def test_the_strand_counts_behind_mqsbz_cover_every_allele(tmp_path):
+    """MQSBZ compares strands, so its two groups are all-forward and all-reverse reads."""
+    src = _multi_vcf(tmp_path, [
+        (100, "C,G", {"ADF": "50,10,90", "ADR": "50,10,90", "MQSBZ": "4.0",
+                      "DP": "400", "MQ": "60", "FS": "0.5", "RPBZ": "0", "SCBZ": "0",
+                      "MQBZ": "0", "BQBZ": "0", "MQ0F": "0"}),
+        (200, "C", {"ADF": "50,100", "ADR": "50,100", "MQSBZ": "4.0",
+                    "DP": "400", "MQ": "60", "FS": "0.5", "RPBZ": "0", "SCBZ": "0",
+                    "MQBZ": "0", "BQBZ": "0", "MQ0F": "0"}),
+    ])
+    out = str(tmp_path / "out.vcf")
+    F.hard_qc_filter(src, out, caller="bcftools", max_bias_z=3.0, bias_eff=0.15)
+    assert _kept(out) == [100, 200]
+
+
+def test_sor_reads_the_pooled_non_reference_strand_counts(tmp_path):
+    """A record whose *second* alternate is the strand-biased one must still be caught.
+
+    Before this, SOR was computed from ALT1's ADF/ADR alone, so a clean first alternate
+    beside a badly strand-skewed second one passed untested.
+    """
+    src = _multi_vcf(tmp_path, [
+        # ALT1 balanced; ALT2 is 200 forward / 0 reverse -- pooled, that is a hard skew
+        (100, "C,G", {"ADF": "100,20,200", "ADR": "100,20,0", "DP": "440", "MQ": "60",
+                      "FS": "0.5", "RPBZ": "0", "SCBZ": "0", "MQBZ": "0", "MQSBZ": "0",
+                      "BQBZ": "0", "MQ0F": "0"}),
+        # a clean control with the same totals but no skew
+        (200, "C,G", {"ADF": "100,20,100", "ADR": "100,20,100", "DP": "440", "MQ": "60",
+                      "FS": "0.5", "RPBZ": "0", "SCBZ": "0", "MQBZ": "0", "MQSBZ": "0",
+                      "BQBZ": "0", "MQ0F": "0"}),
+    ])
+    out = str(tmp_path / "out.vcf")
+    F.hard_qc_filter(src, out, caller="bcftools", sor=3.0)
+    assert _kept(out) == [200], "the skew in the second alternate must be seen"
+
+
+def test_a_biallelic_record_is_judged_exactly_as_before(tmp_path):
+    """The pooled counts must reduce to the old ones at a biallelic site, or every
+    existing verdict moves."""
+    from plasgenomicsutils.lib.vcf_filters import _N_ALT, _N_FWD, _N_REF, _N_REV
+
+    src = _vcf(tmp_path, [(100, {"ADF": "10,90", "ADR": "10,90", "DP": "200", "MQ": "60",
+                                 "FS": "0.5", "RPBZ": "0", "SCBZ": "0", "MQBZ": "0",
+                                 "MQSBZ": "0", "BQBZ": "0", "MQ0F": "0"})])
+    for expr, want in ((_N_REF, 20), (_N_ALT, 180), (_N_FWD, 100), (_N_REV, 100)):
+        got = subprocess.run(["bcftools", "query", "-f", "%POS\n", "-i", f"{expr} == {want}",
+                              src], stdout=subprocess.PIPE, text=True,
+                             stderr=subprocess.PIPE)
+        assert got.stdout.split() == ["100"], f"{expr} should be {want}: {got.stderr[:120]}"
+
+
+# ---- a declared tag nobody carries ------------------------------------------------------
+
+def test_a_tag_declared_but_missing_on_every_record_is_an_error_naming_it(tmp_path):
+    """The header check's trap in another form: `MQ < 55` against a file where every MQ is
+    `.` tests nothing and keeps everything."""
+    rows = [(1000, {k: v for k, v in CLEAN.items() if k != "MQ"}),
+            (2000, {k: v for k, v in CLEAN.items() if k != "MQ"})]
+    vcf = _vcf(tmp_path, rows)
+    with pytest.raises(SystemExit) as e:
+        F.hard_qc_filter(vcf, str(tmp_path / "o.bcf"), caller="bcftools")
+    assert "INFO/MQ (read by --mq)" in str(e.value) and "none of the 2 record(s)" in str(e.value)
+    # switching that threshold off is enough to proceed
+    out = str(tmp_path / "ok.bcf")
+    F.hard_qc_filter(vcf, out, caller="bcftools", mq=None)
+    assert _kept(out) == [1000, 2000]
+
+
+def test_a_tag_missing_on_some_records_passes_them_untested_and_is_counted(tmp_path, capsys):
+    rows = [(1000, CLEAN), (2000, {k: v for k, v in CLEAN.items() if k != "MQ"}),
+            (3000, _with(MQ=30))]
+    out = str(tmp_path / "o.bcf")
+    F.hard_qc_filter(_vcf(tmp_path, rows), out, caller="bcftools")
+    assert _kept(out) == [1000, 2000]                        # 2000 untested on MQ, 3000 failed it
+    cap = capsys.readouterr()
+    assert "record(s) without a value pass that test untested -- INFO/MQ 1 of 3" in cap.out + cap.err
+
+
+def test_a_nan_value_counts_as_missing(tmp_path, capsys):
+    """GATK writes MQ=NaN where it could not compute one; `MQ < 55` is false against NaN
+    exactly as against `.`, so it is counted the same way."""
+    rows = [(1000, CLEAN), (2000, _with(MQ="nan"))]
+    out = str(tmp_path / "o.bcf")
+    F.hard_qc_filter(_vcf(tmp_path, rows), out, caller="bcftools")
+    assert _kept(out) == [1000, 2000]
+    cap = capsys.readouterr()
+    assert "INFO/MQ 1 of 2" in cap.out + cap.err
+
+
+def test_gatk_mode_qd_default_is_10(tmp_path):
+    """QD 20 was mostly a depth filter by proxy on sWGA data; 10 sits in the valley between
+    what VQSR passes and fails on clean biallelic sites (docs/qd_threshold.md)."""
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100000>"]
+    for t in ("QD", "MQ", "SOR", "MQRankSum", "ReadPosRankSum"):
+        hdr.append(f'##INFO=<ID={t},Number=1,Type=Float,Description="{t}">')
+    hdr.append('##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">')
+    hdr.append("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1")
+    for pos, qd in ((1000, 9.9), (2000, 10.0), (3000, 15.0), (4000, 30.0)):
+        hdr.append(f"chr1\t{pos}\t.\tA\tT\t222\t.\tQD={qd};MQ=60;SOR=1;MQRankSum=0;ReadPosRankSum=0\tGT\t0/1")
+    v = tmp_path / "g.vcf"
+    v.write_text("\n".join(hdr) + "\n")
+    out = str(tmp_path / "o.vcf")
+    F.hard_qc_filter(str(v), out)
+    assert _kept(out) == [2000, 3000, 4000]
