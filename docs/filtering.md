@@ -129,6 +129,47 @@ In the default chain the end result is the same, since `biallelic_snp_filter` dr
 non-variant records later regardless — what changes is where they go and what the counts
 tell you.
 
+## Substitutions GATK wrote as indels
+
+HaplotypeCaller assembles a haplotype and aligns it to the reference with Smith-Waterman
+scored at match 200, mismatch -150, gap open -260, gap extend -11. Under those weights an
+insertion plus a deletion often scores above the mismatches they stand for, so a multi-base
+substitution arrives as two indel records. The *pfcrt* CVIET haplotype — `ATG AAT AAA` to
+`ATT GAA ACA` across codons 74-76 — comes out as `403618 A>AT`, `403622 AT>A` and
+`403625 A>C`, where three mismatches score 150 and the two gaps score 458. Nothing in GATK
+then asks whether the gaps cancel, so an SNP-only chain keeps K76T and drops codons 74 and
+75.
+
+GATK does record that they belong together: every carrier has the same `PID` on all three,
+the physical phasing from the assembled haplotype. `resolve_shifted_indels` groups records
+by `PID`, rebuilds each sample's haplotypes over the cluster, and where every haplotype is
+reference-length replaces the cluster with one SNP record per changed base. A cluster with
+a net length change is a real indel and is left alone, as is one wider than `--max-span`
+(50 bp). Derived records carry `AD`/`DP` and INFO from the nearest source record and
+`INFO/SHIFTED` naming the sources; `PL`, `GQ`, `PGT`, `PID`, `PS` and `SB` are dropped.
+A sample heterozygous at two or more of a cluster's records with no `PGT` to phase them
+cannot be laid out, and writing it missing would take a genotype from a sample that has
+reads there. `max_unresolved` is how many such samples a rewrite may cost; a cluster that
+would cost more is left exactly as it was. The trade is very uneven, which is what sets
+the default at 1: on the same cohort 195 of 491 clusters cost nothing and give 1,495 SNPs,
+the next 60 cost one sample each and give 458 more, and the 87 worst cost over 25 samples
+each for 332 SNPs between them. Set 0 to never write a missing genotype at all.
+
+**It runs first, right after `no_alt_filter`, and the position is the point.** A cluster
+only balances while all of its records are present, and every later step removes some of
+them. On a 249-sample sWGA cohort, run first it found 491 resolvable clusters worth 3,032
+SNPs; run after the QC and repeat steps, 47 worth 251. At the default `max_unresolved` of 1 it
+rewrites 255 of those clusters, for 1,953 SNPs, at a cost of 60 genotypes out of ~122,000.
+
+This is not a corner case. In that cohort, before any filtering, 6,947 phase groups are
+balanced, 2,784 rebuild into equal-length substitution blocks, and 920 are tight
+one-insertion-one-deletion blocks in the core outside tandem repeats, together hiding 2,492
+SNPs.
+
+A callset without `FORMAT/PID` — not GATK's, or phasing stripped — is passed through with a
+note. The step needs the reference FASTA for the bases between a cluster's records and
+takes it from the header's `##reference` line unless `--reference` is given.
+
 ## The caller's own FILTER column is its own step
 
 A joint callset arrives with the caller's verdicts already in `FILTER`: Pf7's VQSR tranches
@@ -205,6 +246,86 @@ They exist because the filters that would say these things are the ones most oft
 off, and they only speak for the samples they drop. `FORMAT/ADS` is added on a temporary
 copy when the input lacks it. Both are also commands (`sample_summary`, `variant_summary`)
 for any callset.
+
+## The frequency floor, and where the variation actually is
+
+The default floor is **1%**, not 2%. The floor a callset is *stored* at should be the most
+permissive one any downstream analysis wants, because a stricter filter is one command away
+on a 1% callset and impossible on a 2% one once the sub-floor records are gone.
+
+`maf_spectrum` runs just before the filter and says what each choice would cost:
+
+```
+ALL (n=249, 96,677 records): 1% 59,736 (62%), 2% 37,598 (39%), 5% 19,567 (20%), 10% 12,829 (13%)
+```
+
+The *P. falciparum* site frequency spectrum is steep enough that round numbers move more of
+the panel than they look like they should: 2% keeps 39% of the records and 1% keeps 62%. The
+extra band sits at roughly three carriers of 249. With `--meta` and `--group-col` the
+spectrum is also computed per group, because a grouped floor keeps a record when **any one**
+group clears the bar, and an allele at 10% in one country and absent in another is 5%
+pooled.
+
+**What the two floors do downstream**, measured on a 249-sample cohort with the same
+upstream chain:
+
+| | 1% panel | 2% panel |
+|---|---|---|
+| SNPs | 59,736 | 37,598 |
+| informative sites per IBD pair | 7,212 | 6,745 |
+| background IBD (unrelated pairs) | 0.0142 | 0.0175 |
+| SNPs per IBD segment | 50 | 38 |
+| SNPs after LD pruning (PCA) | 22,556 | 17,218 |
+| correlation of PC1-5 between panels | 0.95 – 0.99 | |
+
+Pairwise IBD agrees closely between the two (Pearson 0.986), and the highly related pairs are
+identical. What changes is the **background**: at 1% the IBD fraction between unrelated pairs
+falls by about a fifth, and it falls for 90% of those pairs, because rare alleles discriminate
+true IBD from identity by chance. Segments are also better supported, 50 SNPs each against
+38. For PCA the two panels give the same top five components; LD pruning removes a larger
+share of the 1% panel (62% against 52%), which is the extra rare variants being the
+correlated lineage markers they were expected to be. So the 1% floor helps IBD, is neutral
+for PCA, and the analyses that want a stricter floor should apply their own.
+
+## Filtering a superset callset as though it were the cohort
+
+An allele frequency, a missingness rate and a carrier count are properties of *who is in
+the file*. Call 249 samples and a locus clears a 2% floor; call the same 249 inside a
+cohort of 374 and the extra samples dilute it below the floor, so the locus is gone —
+even though nothing about those 249 changed. Running the chain twice and whitelisting the
+smaller run's loci works, and is a lot of redundant computation.
+
+`stat_samples` names the analysis cohort inside the larger callset. The steps whose verdict
+is a cohort statistic then judge each locus on that cohort while **keeping every sample's
+genotypes**:
+
+```bash
+plasgenomicsutils filter_pipeline --input all.bcf --config config.json \
+  --outdir out --stat-samples cohort.txt
+```
+
+```json
+{"stat_samples": "cohort.txt", "steps": [...]}
+```
+
+It applies to `singleton_filter_add_ads`, `locus_missingness_filter` and `maf_filter`, and
+each takes `--stat-samples` on its own too. `sample_coverage_filter` and `fws_filter` are
+deliberately excluded: they judge *samples* rather than loci, so "whose statistic decides"
+does not arise — restrict those by giving them fewer samples.
+
+Under the hood the callset is subset with `bcftools view -S`, which removes samples and
+never records, the statistics are computed there, and they are carried back onto the full
+callset by `bcftools annotate` matching on `CHROM,POS,REF,ALT` into `_SUB`-suffixed INFO
+tags. So a record is judged by its own subset statistic and no neighbour's, and the suffix
+means a subset-computed number can never be mistaken for the cohort's own.
+
+**What it recovers, and what it cannot.** On a 374-sample callset containing a randomly
+chosen 249, the 249-only run ended with 37,598 loci and the plain 374 run with 34,407,
+5,446 of the smaller run's loci being absent from the larger. Judging the last steps on the
+249 recovers 4,566 of them. The rest are not a statistics problem: at those positions the
+374 callset carries extra ALT alleles the 249 never had, so the record is genuinely a
+different record (`C>T` against `C>T,G`), and no choice of whose frequency decides will
+make the two agree.
 
 ## Hard QC on a bcftools callset
 
@@ -591,7 +712,8 @@ whose file is gone, so the run is as auditable as it was; only the bytes are mis
 flowchart TD
     IN(["input callset — VCF / BCF"])
     S01["01 · no_alt_filter *"]
-    S01b["02 · caller_pass_filter *"]
+    S01a["02 · resolve_shifted_indels"]
+    S01b["03 · caller_pass_filter *"]
     S02["03 · hard_qc_filter *"]
     S03["03 · singleton_counts"]
     S04["04 · singleton_filter_add_ads *"]
@@ -606,7 +728,7 @@ flowchart TD
     S13["13 · fws_filter"]
     OUT(["filtered callset + SNP panel BED"])
 
-    IN --> S01 --> S01b --> S02 --> S03 --> S04 --> S05 --> S06 --> S07 --> S08
+    IN --> S01 --> S01a --> S01b --> S02 --> S03 --> S04 --> S05 --> S06 --> S07 --> S08
     S08 --> S09 --> S10 --> S11 --> S12 --> S13 --> OUT
 
     classDef variant stroke:#0f766e,stroke-width:2px

@@ -253,3 +253,14 @@ def test_the_cli_flag_sets_it(tmp_path, monkeypatch):
     assert (tmp_path / "run" / "00_reset_filter.bcf").exists()
     counts = (tmp_path / "run" / "variant_counts.tsv").read_text()
     assert "reset_filter" in counts
+
+
+def test_allowing_pass_or_an_undeclared_flag_is_a_no_op_that_says_so(tmp_path, capsys):
+    """`allow` tolerates non-PASS flags; PASS is always kept, and a name the header does not
+    declare is most likely a typo."""
+    out = str(tmp_path / "o.bcf")
+    F.caller_pass_filter(_vcf(tmp_path, ROWS), out, allow=["PASS", "Low_VQSLDO"])
+    assert sorted(_kept(out)) == [1000, 2000, 5000]          # same as the default
+    cap = capsys.readouterr(); text = cap.out + cap.err
+    assert "allow lists PASS, which is always kept" in text
+    assert "allow lists Low_VQSLDO, which this header does not declare" in text

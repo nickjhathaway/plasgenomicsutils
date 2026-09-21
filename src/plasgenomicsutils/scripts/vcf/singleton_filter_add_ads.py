@@ -19,6 +19,11 @@ def get_parser_singleton_filter_add_ads() -> argparse.ArgumentParser:
     p.add_argument("--min-samples", type=int, default=1,
                    help="Keep variants with more than this many non-ref, non-missing "
                         "genotype calls (default: 1, i.e. drop singletons)")
+    p.add_argument("--stat-samples", default=None, metavar="FILE|NAMES",
+                   help="Compute this step's cohort statistic over these samples "
+                        "only (a file, one name per line, or comma-separated), "
+                        "keeping every sample's genotypes. For a callset that is a "
+                        "superset of the analysis cohort.")
     p.add_argument("--keep-bed", default=None,
                    help="Whitelist BED of regions to keep whatever this filter says "
                         "(0-based half-open, like any BED). Whitelisted variants still "
@@ -40,7 +45,8 @@ def parse_args_singleton_filter_add_ads():
 def singleton_filter_add_ads():
     args = parse_args_singleton_filter_add_ads()
     F.singleton_add_ads(args.input, args.output, min_samples=args.min_samples,
-                 keep_bed=args.keep_bed, per_allele=args.per_allele)
+                 stat_samples=args.stat_samples, keep_bed=args.keep_bed,
+                 per_allele=args.per_allele)
     report_counts(args.input, args.output, "singleton_filter_add_ads")
 
 

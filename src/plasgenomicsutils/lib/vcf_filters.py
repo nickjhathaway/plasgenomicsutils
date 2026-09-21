@@ -657,7 +657,17 @@ def caller_pass_filter(inp: str, out: str, *, allow: tuple[str, ...] | list[str]
     require("bcftools")
     fmt = out_flag(out)
     allowed = set(allow or ())
-    acting = [f for f in _filter_ids(inp) if f not in allowed]
+    declared = _filter_ids(inp)
+    # `allow` tolerates flags; PASS and "." are kept regardless, and a name the header does
+    # not declare tolerates nothing -- most likely a typo, and worth a line either way
+    if "PASS" in allowed:
+        say("NOTE: allow lists PASS, which is always kept; the default (no allow) already "
+            "keeps only PASS and unflagged records")
+    unknown = sorted(allowed - set(declared) - {"PASS", "."})
+    if unknown:
+        say(f"NOTE: allow lists {', '.join(unknown)}, which this header does not declare "
+            f"(declared: {', '.join(declared) or 'none'}); nothing to tolerate there")
+    acting = [f for f in declared if f not in allowed]
     if not acting:
         sh(f"bcftools view {q(inp)} -O{fmt} -o {q(out)}", tools=("bcftools",))
         say("NOTE: the header declares no FILTER this step acts on; nothing removed")
@@ -676,6 +686,7 @@ def caller_pass_filter(inp: str, out: str, *, allow: tuple[str, ...] | list[str]
 
 
 def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
+                     stat_samples: str | None = None,
                      keep_bed: str | None = None, per_allele: bool = False) -> int:
     """Drop variants seen as ALT in <= min_samples samples; add FORMAT/ADS.
 
@@ -701,6 +712,10 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
     is trimmed off (:func:`~plasgenomicsutils.lib.singletons.singleton_to_missing` then
     ``--trim-alt-alleles``), so only the supported alternates remain.
 
+    ``stat_samples`` counts carriers within a named subset while keeping every sample's
+    genotypes -- see :func:`subset_stats`. A variant private to a sample outside the
+    analysis cohort is a singleton *for this study*, which is what the count should say.
+
     ``*`` is never recoded here -- a spanning deletion is not a variant allele, and a
     singleton one is ``spanning_del_filter``'s business. This has a consequence worth naming:
     a record whose only real alternate was a singleton is trimmed to whatever ``*`` it also
@@ -715,7 +730,8 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
     from .allele_counts import ALT_SAMPLE_MAX_TAG, add_alt_sample_counts
 
     fmt = out_flag(out)
-    keep = f"INFO/{ALT_SAMPLE_MAX_TAG} > {min_samples}"
+    tag = ALT_SAMPLE_MAX_TAG + (SUBSET_SUFFIX if stat_samples else "")
+    keep = f"INFO/{tag} > {min_samples}"
     ads = "FORMAT/ADS=int(smpl_sum(FORMAT/AD))"
     # ADS and AC_SAMP are both properties of the record rather than of which records
     # survive, so tagging everything first and selecting second gives the same output --
@@ -737,6 +753,30 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
         else:
             source = inp
         add_alt_sample_counts(source, tagged)
+        if stat_samples:
+            # "carried by more than one sample" is a question about the analysis cohort, so
+            # the counts come from the subset -- recomputed there rather than inherited,
+            # since a variant private to a sample outside it is a singleton for this study.
+            names = read_sample_list(stat_samples)
+            counted = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+            sub = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+            try:
+                sh(f"bcftools view -S {q(_write_tmp_list(names))} --force-samples "
+                   f"{q(source)} -Ob -o {q(sub)}", tools=("bcftools",))
+                add_alt_sample_counts(sub, counted)
+                index_vcf(counted)
+                index_vcf(tagged)
+                sh(f"bcftools annotate -a {q(counted)} "
+                   f"-c {q(f'INFO/{tag}:=INFO/{ALT_SAMPLE_MAX_TAG}')} {q(tagged)} "
+                   f"-Ob -o {q(sub)}", tools=("bcftools",))
+                shutil.copyfile(sub, tagged)
+                _subset_note("singleton_filter_add_ads", len(names),
+                             len(_vcf_samples(inp)))
+            finally:
+                for t in (counted, sub):
+                    for suffix in ("", ".csi"):
+                        if os.path.exists(t + suffix):
+                            os.remove(t + suffix)
         sh(f"bcftools +fill-tags {q(tagged)} -Ob -o {q(prep)} -- -t {q(ads)}",
            tools=("bcftools",))
         sh(f"bcftools view -i {q(keep)} {q(prep)} -O{fmt} -o {q(out)}", tools=("bcftools",))
@@ -1264,6 +1304,7 @@ def sample_coverage_filter(inp: str, out: str, *, ads_min: int = 10,
 
 def locus_missingness_filter(inp: str, out: str, *, f_missing_max: float = 0.05,
                              ads_min: int = 5, sample_frac_min: float = 0.80,
+                             stat_samples: str | None = None,
                              keep_bed: str | None = None) -> int:
     """Keep loci with < f_missing_max missing AND >= sample_frac_min at ADS >= ads_min.
 
@@ -1277,6 +1318,11 @@ def locus_missingness_filter(inp: str, out: str, *, f_missing_max: float = 0.05,
     their own AD (``filter_ad_regenotype``) and whose thin *samples* are
     ``sample_coverage_filter``'s job.
 
+    ``stat_samples`` measures missingness and coverage over a named subset while keeping
+    every sample's genotypes -- see :func:`subset_stats`. Both clauses are fractions of the
+    samples in the file, so a superset callset judges a locus by samples the analysis will
+    never use.
+
     ``keep_bed`` whitelists regions from this rule, for a locus worth keeping even where it
     is thinly covered.
     """
@@ -1287,6 +1333,23 @@ def locus_missingness_filter(inp: str, out: str, *, f_missing_max: float = 0.05,
             "int(smpl_sum(FORMAT/AD))), or add the tag with: bcftools +fill-tags -- -t "
             "'FORMAT/ADS=int(smpl_sum(FORMAT/AD))'.")
     fmt = out_flag(out)
+    if stat_samples:
+        names = read_sample_list(stat_samples)
+        prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+        try:
+            n = subset_stats(inp, prep, names,
+                             {"F_MISSING": "F_MISSING", "NCOV": f"COUNT(FMT/ADS>={ads_min})"},
+                             label="locus_missingness_filter")
+            _subset_note("locus_missingness_filter", n, len(_vcf_samples(inp)))
+            expr = (f"F_MISSING{SUBSET_SUFFIX} < {f_missing_max} & "
+                    f"NCOV{SUBSET_SUFFIX}/{n} >= {sample_frac_min}")
+            sh(f"bcftools view -i {q(expr)} {q(prep)} -O{fmt} -o {q(out)}",
+               tools=("bcftools",))
+            return _rescue_whitelisted(prep, out, keep_bed, "locus_missingness_filter")
+        finally:
+            for suffix in ("", ".csi"):
+                if os.path.exists(prep + suffix):
+                    os.remove(prep + suffix)
     expr = (f"F_MISSING < {f_missing_max} & "
             f"COUNT(FMT/ADS>={ads_min})/N_SAMPLES >= {sample_frac_min}")
     tags = f"bcftools annotate -x INFO/F_MISSING {q(inp)} -Ou | bcftools +fill-tags"
@@ -1342,9 +1405,92 @@ def _maf_expr(maf_min: float, maf_max: float | None) -> str:
     return f"MAX(AF) >= {maf_min} && MAX(AF) <= {maf_max}"
 
 
+#: Suffix on the INFO tags :func:`subset_stats` writes, so a subset-computed statistic can
+#: never be mistaken for the cohort's own.
+SUBSET_SUFFIX = "_SUB"
+
+
+def read_sample_list(spec: str) -> list[str]:
+    """Sample names from a file (one per line) or a comma-separated string."""
+    if os.path.exists(spec):
+        names = [l.strip() for l in open(spec) if l.strip() and not l.startswith("#")]
+    else:
+        names = [x.strip() for x in spec.split(",") if x.strip()]
+    if not names:
+        raise SystemExit(f"no sample names in {spec!r}")
+    return names
+
+
+def subset_stats(inp: str, out: str, samples: list[str], tags: dict[str, str],
+                 *, label: str = "") -> int:
+    """Copy ``inp`` to ``out`` with cohort statistics computed over ``samples`` only.
+
+    Each entry of ``tags`` maps a destination INFO tag (which gets :data:`SUBSET_SUFFIX`) to
+    what ``bcftools +fill-tags`` should compute: a plain tag name (``"MAF"``) or a custom
+    expression (``"COUNT(FMT/ADS>=5)"``). Returns how many of ``samples`` were found.
+
+    Why this exists. A cohort statistic -- allele frequency, missingness, how many samples
+    are covered -- is a property of *who is in the file*, so the same locus passes a
+    frequency floor in one cohort and fails it in a larger one that merely dilutes it. Where
+    a callset is a superset of an analysis cohort (a randomly chosen subset, or a set of
+    trios inside a larger collection), the statistic that should decide is the subset's,
+    while the genotypes that should be kept are everyone's.
+
+    The subset file and the full file stay in lockstep -- ``bcftools view -S`` removes
+    samples, never records -- and the tags are carried back by ``bcftools annotate`` matching
+    on ``CHROM,POS,REF,ALT``, so a record is annotated with its own subset statistic and no
+    neighbour's. Every sample's genotypes survive untouched.
+    """
+    require("bcftools")
+    present = _vcf_samples(inp)
+    found = [s for s in samples if s in present]
+    missing = [s for s in samples if s not in present]
+    if not found:
+        raise SystemExit(
+            f"subset statistics{' for ' + label if label else ''}: none of the "
+            f"{len(samples)} named sample(s) are in the callset")
+    if missing:
+        say(f"NOTE: {len(missing)} named sample(s) are not in the callset and are ignored: "
+            + ", ".join(missing[:5]) + (", ..." if len(missing) > 5 else ""))
+    tmp = tempfile.mkdtemp(prefix="subset_stats_")
+    try:
+        sfile = os.path.join(tmp, "samples.txt")
+        with open(sfile, "w") as fh:
+            fh.write("\n".join(found) + "\n")
+        tagged = os.path.join(tmp, "subset.bcf")
+        spec = ",".join(v if v == k else f"INFO/{k}={v}" for k, v in tags.items())
+        sh(f"bcftools view -S {q(sfile)} --force-samples {q(inp)} -Ou "
+           f"| bcftools +fill-tags -Ob -o {q(tagged)} -- -t {q(spec)}", tools=("bcftools",))
+        index_vcf(tagged)
+        # `annotate -a` indexes both sides: the annotation file to seek in, and the target
+        # so it can be read in regions. A step's input is indexed inside a pipeline run and
+        # is not when the command is run by hand on another tool's output, so make a local
+        # indexed copy when there is no index beside it rather than writing one into
+        # somebody else's directory.
+        target = inp
+        if not any(os.path.exists(str(inp) + x) for x in (".csi", ".tbi")):
+            target = os.path.join(tmp, "target" + (".vcf.gz" if str(inp).endswith(
+                (".vcf", ".vcf.gz")) else ".bcf"))
+            sh(f"bcftools view {q(inp)} -O{out_flag(target)} -o {q(target)}",
+               tools=("bcftools",))
+            index_vcf(target)
+        cols = ",".join(f"INFO/{k}{SUBSET_SUFFIX}:=INFO/{k}" for k in tags)
+        sh(f"bcftools annotate -a {q(tagged)} -c {q(cols)} {q(target)} "
+           f"-O{out_flag(out)} -o {q(out)}", tools=("bcftools",))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return len(found)
+
+
+def _subset_note(step: str, n: int, total: int) -> None:
+    say(f"NOTE: {step} judged on {n:,} of {total:,} sample(s); every sample's genotypes are "
+        f"kept, only the statistic is the subset's")
+
+
 def maf_filter(inp: str, out: str, *, maf_min: float = 0.01, maf_max: float | None = None,
                meta: str | None = None, group_col: str | None = None,
-               sample_col: str = "sample", keep_bed: str | None = None) -> int:
+               sample_col: str = "sample", stat_samples: str | None = None,
+               keep_bed: str | None = None) -> int:
     """Drop rare and near-fixed alleles by an allele-frequency window ``[maf_min, maf_max]``.
 
     The two bounds are usually symmetric (a 0.02 floor pairs with a 0.98 ceiling), so
@@ -1362,10 +1508,22 @@ def maf_filter(inp: str, out: str, *, maf_min: float = 0.01, maf_max: float | No
     is monomorphic in its own group but polymorphic elsewhere. ``maf_max`` is not used in
     grouped mode (the criterion is a per-group minor-allele-frequency floor).
 
+    ``stat_samples`` computes the frequency over a named subset of the callset while keeping
+    every sample's genotypes -- see :func:`subset_stats`. A frequency floor is the step most
+    sensitive to who is in the file, so a callset that is a superset of the analysis cohort
+    loses exactly the alleles that are common in the cohort and rare in the superset.
+
     ``keep_bed`` whitelists regions from the frequency window. This is the one most worth
     reaching for: a resistance allele can sit at a few percent in one cohort and still be the
     thing being looked for, and a MAF floor is exactly what removes it.
     """
+    if stat_samples and meta and group_col:
+        raise SystemExit("maf_filter: stat_samples and per-group frequencies (meta + "
+                         "group_col) are two different ways to choose whose frequency "
+                         "decides; pass one or the other")
+    if stat_samples:
+        return _maf_filter_subset(inp, out, stat_samples=stat_samples, maf_min=maf_min,
+                                  maf_max=maf_max, keep_bed=keep_bed)
     if meta and group_col:
         return _maf_filter_grouped(inp, out, meta=meta, group_col=group_col,
                                    sample_col=sample_col, maf_min=maf_min, keep_bed=keep_bed)
@@ -1386,6 +1544,27 @@ def maf_filter(inp: str, out: str, *, maf_min: float = 0.01, maf_max: float | No
     finally:
         if os.path.exists(prep):
             os.unlink(prep)
+
+
+def _maf_filter_subset(inp: str, out: str, *, stat_samples: str, maf_min: float,
+                       maf_max: float | None, keep_bed: str | None) -> int:
+    """``maf_filter`` with the frequency taken over ``stat_samples`` only."""
+    names = read_sample_list(stat_samples)
+    tags = {"MAF": "MAF"} if maf_max is None else {"AF": "AF"}
+    prep = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
+    try:
+        n = subset_stats(inp, prep, names, tags, label="maf_filter")
+        _subset_note("maf_filter", n, len(_vcf_samples(inp)))
+        expr = (_maf_expr(maf_min, maf_max)
+                .replace("MAF ", f"MAF{SUBSET_SUFFIX} ")
+                .replace("MAX(AF)", f"MAX(AF{SUBSET_SUFFIX})"))
+        sh(f"bcftools view -i {q(expr)} {q(prep)} -O{out_flag(out)} -o {q(out)}",
+           tools=("bcftools",))
+        return _rescue_whitelisted(prep, out, keep_bed, "maf_filter")
+    finally:
+        for suffix in ("", ".csi"):
+            if os.path.exists(prep + suffix):
+                os.remove(prep + suffix)
 
 
 def _vcf_samples(path: str) -> set[str]:
