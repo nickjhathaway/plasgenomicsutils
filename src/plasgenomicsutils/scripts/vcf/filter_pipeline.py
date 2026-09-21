@@ -28,6 +28,13 @@ def get_parser_filter_pipeline() -> argparse.ArgumentParser:
                         "rather than all of them. The input is never touched, the final "
                         "output stays, and the side tables are kept. Overrides "
                         "\"remove_intermediates\" in the config.")
+    p.add_argument("--stat-samples", default=None, metavar="FILE|NAMES",
+                   help="Sample list (a file, one name per line, or comma-separated) naming "
+                        "the analysis cohort inside a larger callset. The frequency, "
+                        "missingness and carrier-count steps then judge a locus on that "
+                        "cohort while keeping every sample's genotypes, so calling a "
+                        "superset once gives the same loci as calling the cohort alone. "
+                        "Same as \"stat_samples\" in the config.")
     p.add_argument("--reset-filter", action="store_true",
                    help="Clear the caller's FILTER column on every record before the chain "
                         "runs, as a step 00 that reports what it cleared by flag. For when "
@@ -81,6 +88,8 @@ def filter_pipeline():
         config["remove_intermediates"] = True
     if args.reset_filter:
         config["reset_filter"] = True
+    if args.stat_samples:
+        config["stat_samples"] = args.stat_samples
     tally = P.run_pipeline(args.input, args.outdir, config, emit_snp_bed=not args.no_snp_bed)
 
     say("\n=== variant counts per step ===")

@@ -90,3 +90,65 @@ def test_a_report_param_is_validated_against_the_table_builder(tmp_path):
     with pytest.raises(SystemExit, match="sample_summary"):
         P.validate_config({"steps": [{"name": "sample_summary", "report": True,
                                       "params": {"frac_mn": 0.5}}]})
+
+
+# ---- where the variation sits on the frequency spectrum -------------------------------
+
+def _freq_vcf(tmp_path, specs, n=100):
+    """`specs` are (pos, n_carriers_groupA, n_carriers_groupB) with 50 samples per group."""
+    half = n // 2
+    a = [f"a{i:02d}" for i in range(half)]
+    b = [f"b{i:02d}" for i in range(half)]
+    hdr = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100000>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(a + b)]
+    for pos, na, nb in specs:
+        cols = ["1/1" if i < na else "0/0" for i in range(half)]
+        cols += ["1/1" if i < nb else "0/0" for i in range(half)]
+        hdr.append(f"chr1\t{pos}\t.\tA\tT\t500\t.\t.\tGT\t" + "\t".join(cols))
+    p = tmp_path / "freq.vcf"
+    p.write_text("\n".join(hdr) + "\n")
+    return str(p), a, b
+
+
+def test_the_spectrum_counts_records_at_each_mark(tmp_path):
+    # 50 samples per group, 100 total: one carrier is 1% of the 200 alleles
+    v, _, _ = _freq_vcf(tmp_path, [(1000, 1, 0), (2000, 2, 0), (3000, 5, 0), (4000, 20, 0)])
+    rows = CS.maf_spectrum_table(v)
+    at = {r["maf_min"]: r["at_or_above"] for r in rows}
+    assert at[0.01] == 4 and at[0.02] == 3 and at[0.05] == 2 and at[0.10] == 1
+    band = {r["maf_min"]: r["in_band_below_next"] for r in rows}
+    assert band[0.01] == 1 and band[0.02] == 1 and band[0.05] == 1 and band[0.10] == 1
+    assert all(r["group"] == "ALL" and r["n_samples"] == 100 for r in rows)
+
+
+def test_the_spectrum_is_computed_per_group_when_asked(tmp_path):
+    """A grouped floor keeps a record when any one group clears it, so the per-group
+    spectrum is the one that predicts what a grouped filter does."""
+    # hom-alt carriers contribute two alleles: 5 carriers of 50 group-A samples is 10 of
+    # that group's 100 alleles (10%), and 10 of the cohort's 200 (5%)
+    v, a, b = _freq_vcf(tmp_path, [(1000, 5, 0)])
+    meta = tmp_path / "meta.tsv"
+    meta.write_text("sample\tcountry\n" + "".join(f"{s}\tA\n" for s in a)
+                    + "".join(f"{s}\tB\n" for s in b))
+    rows = CS.maf_spectrum_table(v, meta=str(meta), group_col="country")
+    by = {(r["group"], r["maf_min"]): r["at_or_above"] for r in rows}
+    assert by[("ALL", 0.05)] == 1 and by[("ALL", 0.10)] == 0     # 5% pooled
+    assert by[("A", 0.10)] == 1                                  # 10% within its own group
+    assert by[("B", 0.01)] == 0                                  # absent from the other
+    assert {r["group"] for r in rows} == {"ALL", "A", "B"}
+    note = CS.maf_spectrum_note(rows)
+    assert note.startswith("ALL (n=100") and "A (n=50" in note
+
+
+def test_the_spectrum_runs_before_the_frequency_filter_in_the_default_chain():
+    names = [s["name"] for s in P.DEFAULT_CONFIG["steps"]]
+    assert names.index("maf_spectrum") < names.index("maf_filter")
+    assert P.DEFAULT_CONFIG["steps"][names.index("maf_spectrum")].get("report") is True
+
+
+def test_the_default_frequency_floor_is_one_percent():
+    """The stored callset uses the most permissive floor any downstream analysis wants: a
+    stricter filter is one command away on a 1% callset and impossible on a 2% one."""
+    step = next(s for s in P.DEFAULT_CONFIG["steps"] if s["name"] == "maf_filter")
+    assert step["params"]["maf_min"] == 0.01

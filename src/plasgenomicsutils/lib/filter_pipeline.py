@@ -9,7 +9,7 @@ A pipeline config is JSON::
         {"name": "filter_ad_regenotype",   "params": {"min_reads": 2, "min_freq": 0.01}},
         {"name": "sample_coverage_filter"},
         {"name": "locus_missingness_filter"},
-        {"name": "maf_filter",             "params": {"maf_min": 0.02, "maf_max": 0.98}}
+        {"name": "maf_filter",             "params": {"maf_min": 0.01, "maf_max": 0.99}}
     ]}
 
 Each step writes ``<outdir>/NN_<name>.<ext>`` (ext defaults to ``bcf``) and its
@@ -115,6 +115,14 @@ def _spanning_del(inp, out, **kw):
     return st
 
 
+def _resolve_shifted(inp, out, **kw):
+    """GATK's balanced indel pairs rewritten as SNPs, before the SNP-only step sees them."""
+    from .shifted_indels import resolve_shifted_indels
+
+    return resolve_shifted_indels(inp, out, **kw)
+
+
+_resolve_shifted.target_ref = (".shifted_indels", "resolve_shifted_indels")
 _spanning_del.target = F.spanning_del_filter
 _sample_coverage.target = F.sample_coverage_filter
 _fws.target_ref = (".fws", "fws_filter")
@@ -130,6 +138,7 @@ STEPS = {
     "core_region_filter": _region(F.core_region_filter),
     "paralog_mask": _region(F.paralog_mask),
     "filter_ad_regenotype": filter_ad_regenotype,
+    "resolve_shifted_indels": _resolve_shifted,
     "strip_stale_format": strip_stale_format,
     "spanning_del_filter": _spanning_del,
     "biallelic_snp_filter": F.biallelic_snp_filter,
@@ -171,6 +180,16 @@ WHITELISTABLE = {
     "core_region_filter", "paralog_mask", "locus_missingness_filter", "maf_filter",
 }
 
+#: Steps whose verdict is a cohort statistic -- an allele frequency, a missingness rate, a
+#: carrier count -- and which therefore take ``stat_samples``: compute the statistic over a
+#: named subset of the callset, keep every sample's genotypes. ``sample_coverage_filter``
+#: and ``fws_filter`` are deliberately absent: they judge *samples*, so the question "whose
+#: statistic decides" does not arise -- restrict those by giving them fewer samples, or by
+#: reading their tables and acting on the subset yourself.
+STAT_SUBSETTABLE = {
+    "singleton_filter_add_ads", "locus_missingness_filter", "maf_filter",
+}
+
 #: Steps that do **not** honour the whitelist but say what it would have saved. A whitelist
 #: that silently does nothing is worse than no whitelist: it reads as a guarantee. So for
 #: these the whitelist becomes a diagnostic instead -- you learn that the resistance codon you
@@ -201,6 +220,16 @@ def _sample_summary(inp, out, **kw):
     return len(rows)
 
 
+def _maf_spectrum(inp, out, **kw):
+    """Where the variation sits on the frequency spectrum, before the frequency filter."""
+    from .callset_summary import maf_spectrum_note, maf_spectrum_table, write_maf_spectrum
+
+    rows = maf_spectrum_table(inp, **kw)
+    write_maf_spectrum(rows, out)
+    say("     " + maf_spectrum_note(rows))
+    return len(rows)
+
+
 def _variant_summary(inp, out, **kw):
     """Records by class and ALT-allele count, as counts and fractions."""
     from .callset_summary import (variant_summary_note, variant_summary_table,
@@ -212,6 +241,7 @@ def _variant_summary(inp, out, **kw):
     return len(rows)
 
 
+_maf_spectrum.target_ref = (".callset_summary", "maf_spectrum_table")
 _sample_summary.target_ref = (".callset_summary", "sample_summary_table")
 _variant_summary.target_ref = (".callset_summary", "variant_summary_table")
 
@@ -219,6 +249,7 @@ REPORTS = {
     "singleton_counts": _singleton_report,
     "sample_summary": _sample_summary,
     "variant_summary": _variant_summary,
+    "maf_spectrum": _maf_spectrum,
 }
 
 DEFAULT_CONFIG = {
@@ -227,6 +258,12 @@ DEFAULT_CONFIG = {
     # comments, and a resistance locus that a MAF floor or a coverage rule would otherwise
     # remove is exactly the thing worth keeping. A step's own params.keep_bed overrides it.
     "keep_bed": None,
+    # A sample list (a file, or comma-separated names) naming the analysis cohort inside a
+    # larger callset. The steps in STAT_SUBSETTABLE then judge a locus on that cohort's
+    # allele frequency, missingness and carrier counts while keeping every sample's
+    # genotypes -- so calling a superset once gives the same loci as calling the cohort
+    # alone, without a second run and a whitelist. Null means the whole callset decides.
+    "stat_samples": None,
     # Clear the caller's FILTER column before anything runs, as a step 00 that reports what
     # it cleared by flag. For when the caller-side verdicts are not wanted at all -- a VQSR
     # model trained on the wrong data, region classes this chain re-derives from its own
@@ -241,6 +278,28 @@ DEFAULT_CONFIG = {
         # trim first, so every count below describes the alleles this cohort actually
         # carries rather than the ones the callset it was subset from did
         {"name": "no_alt_filter", "params": {"keep": False, "trim": True}},
+        # GATK writes some multi-base substitutions as an insertion and a deletion a few
+        # bases apart -- its haplotype-to-reference alignment scores two gaps above three
+        # mismatches -- so a coding change arrives as indel records that the SNP-only step
+        # later drops. The records share a PID; this rebuilds them into the SNPs they are.
+        #
+        # It runs HERE, first, and the position is the point: a cluster only balances while
+        # all of its records are present, and every later step removes some of them. On a
+        # 249-sample sWGA cohort, run here it resolved 491 clusters into 3,032 SNPs; run
+        # after the QC and repeat steps, 47 into 251. pfcrt codons 74-75 are in the
+        # difference. A no-op with a note on a callset without FORMAT/PID.
+        #
+        # `reference` is the FASTA the callset was called against, for the bases between a
+        # cluster's records; null reads the header's ##reference line, which GATK writes
+        # and a bcftools reheader can lose -- set it when the step asks for it.
+        # `max_unresolved` is how many samples the rewrite may cost: a sample heterozygous
+        # at two or more of a cluster's records with no PGT to phase them cannot be laid
+        # out, and a cluster costing more than this many is left as it was. The trade is
+        # very uneven -- on that cohort 195 of 491 clusters cost nothing (1,495 SNPs), the
+        # next 60 cost one sample each (458 more), and the 87 worst cost over 25 samples
+        # each for 332 SNPs between them -- so 1 takes the cheap half of what is left and
+        # stops. Set 0 to never write a missing genotype.
+        {"name": "resolve_shifted_indels", "params": {"reference": None, "max_unresolved": 1}},
         # The caller's own FILTER column -- VQSR tranches, Low_VQSLOD, the region classes,
         # MissingVQSLOD on contigs VQSR never scored -- acted on in its own step, so what it
         # removes is counted by flag rather than folded into "failed QC". hard_qc_filter
@@ -299,7 +358,16 @@ DEFAULT_CONFIG = {
          "params": {"snps_only": True, "biallelic": False, "mnp_handling": "split"}},
         {"name": "sample_coverage_filter"},
         {"name": "locus_missingness_filter"},
-        {"name": "maf_filter", "params": {"maf_min": 0.02}},  # maf_max defaults to 1 - maf_min
+        # Before the frequency filter, not after: the question it answers is what each
+        # possible floor would cost, and after the filter the sub-floor records are gone.
+        {"name": "maf_spectrum", "report": True, "ext": "tsv"},
+        # 1%, not 2%: the floor a callset is *stored* at should be the most permissive one
+        # any downstream analysis wants, because a stricter filter is one command away on a
+        # 1% callset and impossible on a 2% one. On a 249-sample cohort 2% keeps 37,598 SNPs
+        # and 1% keeps 59,736, and the extra band sits at ~3 carriers of 249 -- worth having
+        # for IBD, which gains information and breakpoint resolution from rare alleles, and
+        # not for PCA/admixture, which should apply their own floor (and LD pruning) on top.
+        {"name": "maf_filter", "params": {"maf_min": 0.01}},  # maf_max defaults to 1 - maf_min
         # Keeping only monoclonal infections is an analysis choice, not a QC rule -- it
         # changes which infections the callset describes -- so it is written out switched
         # off rather than left undiscoverable. It drops samples and no variants; a site the
@@ -326,7 +394,8 @@ def load_config(path: str) -> dict:
 STEP_KEYS = ("name", "params", "ext", "enabled", "report")
 
 #: Keys a config may carry at the top level.
-CONFIG_KEYS = ("steps", "keep_bed", "remove_intermediates", "reset_filter", "_meta")
+CONFIG_KEYS = ("steps", "keep_bed", "stat_samples", "remove_intermediates",
+               "reset_filter", "_meta")
 
 
 def _accepted_params(step) -> set[str] | None:
@@ -508,9 +577,10 @@ def effective_config(config: dict, **meta) -> dict:
     Steps switched off keep their entry and their defaults: what did **not** run is part of
     the record too. The result is a valid config -- run it again and you get this run.
     """
-    out = {k: config[k] for k in ("keep_bed", "remove_intermediates", "reset_filter")
-           if k in config}
+    out = {k: config[k] for k in ("keep_bed", "stat_samples", "remove_intermediates",
+                                  "reset_filter") if k in config}
     out.setdefault("keep_bed", None)
+    out.setdefault("stat_samples", None)
     out.setdefault("remove_intermediates", False)
     out.setdefault("reset_filter", False)
     if meta:
@@ -523,6 +593,8 @@ def effective_config(config: dict, **meta) -> dict:
         params.pop("keep_bed", None)
         if name in WHITELISTABLE:
             params["keep_bed"] = config.get("keep_bed")
+        if name in STAT_SUBSETTABLE:
+            params["stat_samples"] = config.get("stat_samples")
         params.update(step.get("params") or {})
         # "auto" is a rule, not a value, and the point of this file is the values that ran
         if name == "hard_qc_filter":
@@ -577,6 +649,10 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
     When ``emit_snp_bed`` (default), a BED of the final callset's SNPs is written next to
     the last step's output — the SNP panel the IBD tools read
     (``build_ibd_matrix --snp-format bed``).
+
+    A top-level ``"stat_samples"`` names the analysis cohort inside a larger callset: every
+    step in :data:`STAT_SUBSETTABLE` then judges a locus on that cohort's statistics while
+    keeping every sample's genotypes. A step's own ``params.stat_samples`` overrides it.
 
     A top-level ``"keep_bed"`` in the config is a whitelist for the whole chain: every step
     in :data:`WHITELISTABLE` keeps the variants it covers, so a resistance locus survives the

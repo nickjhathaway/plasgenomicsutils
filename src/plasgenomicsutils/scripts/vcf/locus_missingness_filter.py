@@ -26,6 +26,11 @@ def get_parser_locus_missingness_filter() -> argparse.ArgumentParser:
                         "0.95 before v0.3.2, which on a mixed-depth cohort failed half the "
                         "sites the caller passed). A floor, not a uniformity requirement: "
                         "thin samples are sample_coverage_filter's job.")
+    p.add_argument("--stat-samples", default=None, metavar="FILE|NAMES",
+                   help="Compute this step's cohort statistic over these samples "
+                        "only (a file, one name per line, or comma-separated), "
+                        "keeping every sample's genotypes. For a callset that is a "
+                        "superset of the analysis cohort.")
     p.add_argument("--keep-bed", default=None,
                    help="Whitelist BED of regions to keep whatever this filter says "
                         "(0-based half-open, like any BED). Whitelisted variants still "
@@ -42,7 +47,7 @@ def locus_missingness_filter():
     args = parse_args_locus_missingness_filter()
     F.locus_missingness_filter(args.input, args.output, f_missing_max=args.f_missing_max,
                                ads_min=args.ads_min, sample_frac_min=args.sample_frac_min,
-                 keep_bed=args.keep_bed)
+                 stat_samples=args.stat_samples, keep_bed=args.keep_bed)
     report_counts(args.input, args.output, "locus_missingness_filter")
 
 

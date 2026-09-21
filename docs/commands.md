@@ -58,6 +58,7 @@ Making a callset, merging one, converting one.
 |---|---|
 | `filter_pipeline` | Run an ordered, config-driven chain of filtering steps, tallying counts |
 | `no_alt_filter` | Drop records with no ALT allele (non-variant positions), counted separately |
+| `resolve_shifted_indels` | Rewrite GATK's balanced indel pairs (a substitution written as two gaps) as SNPs |
 | `caller_pass_filter` | Keep records the caller itself passed (FILTER `PASS` or `.`), counting removals by flag |
 | `hard_qc_filter` | Hard filter on the caller's INFO metrics (QD/MQ/SOR/RankSums, or bcftools' *BZ) |
 | `singleton_filter_add_ads` | Drop near-private variants and add the `FORMAT/ADS` summed-depth tag |
@@ -69,7 +70,7 @@ Making a callset, merging one, converting one.
 | `biallelic_snp_filter` | Keep biallelic SNPs, trimming ALT alleles unused after re-genotyping |
 | `sample_coverage_filter` | Drop low-coverage samples; refresh AC/AN/AF |
 | `locus_missingness_filter` | Keep loci with low missingness and enough samples covered (80% at ADS 5) |
-| `maf_filter` | Keep variants within a minor-allele-frequency window |
+| `maf_filter` | Keep variants within a minor-allele-frequency window (per group, or judged on a sample subset) |
 | `fws_filter` | Keep only monoclonal samples (Fws >= a threshold); refresh AC/AN/AF |
 | `strip_stale_format` | Strip stale genotype-linked FORMAT fields (e.g. `PL`) that no longer match the genotypes |
 
@@ -82,6 +83,7 @@ Reads a callset and writes a table; never changes the data.
 | `singleton_counts` | Per-sample count of variants where it is the only non-reference carrier |
 | `sample_summary` | Per-sample coverage and Fws for a callset as it stands (a table, nothing dropped) |
 | `variant_summary` | Records by class and ALT-allele count, as counts and fractions |
+| `maf_spectrum` | How many records clear each MAF mark (1/2/5/10%), overall and per group |
 | `strand_bias_scan` | Flag strand-bias (SSE) fake-het artifacts from `FORMAT/ADF+ADR`; emit a blacklist BED |
 | `strand_read_check` | Read-level strand-bias diagnostic at one site (+ optional ALT-read extraction) |
 | `variant_spacing` | Per-chromosome gaps between consecutive variants, and density per cM |
