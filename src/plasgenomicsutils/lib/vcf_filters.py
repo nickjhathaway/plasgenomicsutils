@@ -716,16 +716,29 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
     genotypes -- see :func:`subset_stats`. A variant private to a sample outside the
     analysis cohort is a singleton *for this study*, which is what the count should say.
 
-    ``*`` is never recoded here -- a spanning deletion is not a variant allele, and a
-    singleton one is ``spanning_del_filter``'s business. This has a consequence worth naming:
-    a record whose only real alternate was a singleton is trimmed to whatever ``*`` it also
-    carried. If that ``*`` is common the record survives as a spanning-deletion-only record
-    -- the deletion is real, and per-allele mode preserves it where the record-level default
-    *drops the site entirely* for want of a supported real allele. So per-allele mode can
-    keep **more** records than the default, not fewer: it is trading a leaked singleton SNP
-    for a preserved deletion, and the deletion is then ``spanning_del_filter``'s call. A
-    record left with no allele at all (no supported real alternate, no ``*``) is ref-only and
+    A **singleton ``*``** is recoded in both modes. A spanning deletion is not a variant
+    allele and is never counted as support, but one carried by ``<= min_samples`` samples is
+    a private observation like any other, and left on the record it costs more than it is
+    worth: ``biallelic_snp_filter --snps-only`` rejects every record carrying a ``*``, so a
+    SNP carried by thirty samples would leave the panel because one sample has a deletion
+    over it. So the ``*`` calls of those few samples are blanked and the allele trimmed off,
+    after which the record is the plain SNP it was for everyone else. A ``*`` with more
+    carriers than that is left exactly as it was: a common deletion is a result, and whether
+    to recode it is ``spanning_del_filter``'s call, not this step's.
+
+    That leaves one consequence worth naming for per-allele mode: a record whose only real
+    alternate was a singleton is trimmed to whatever well-supported ``*`` it also carried,
+    and survives as a spanning-deletion-only record -- the deletion is real, and per-allele
+    mode preserves it where the record-level default *drops the site entirely* for want of
+    a supported real allele. So per-allele mode can keep **more** records than the default,
+    not fewer: it is trading a leaked singleton SNP for a preserved deletion. A record left
+    with no allele at all (no supported real alternate, no surviving ``*``) is ref-only and
     dropped by the same record-level keep.
+
+    The recode is followed by the same ``--trim-alt-alleles`` ``biallelic_snp_filter`` runs,
+    which removes every ALT no genotype carries, not only the blanked ones. When nothing was
+    recoded the input is used as it is, so a file with no singleton ``*`` (and, in the
+    default mode, no ``*`` at all) is not rewritten.
     """
     from .allele_counts import ALT_SAMPLE_MAX_TAG, add_alt_sample_counts
 
@@ -741,13 +754,15 @@ def singleton_add_ads(inp: str, out: str, *, min_samples: int = 1,
     recoded = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
     trimmed = tempfile.NamedTemporaryFile(suffix=".bcf", delete=False).name
     try:
-        # Per allele: blank the singleton alternates' calls and trim them off first, so what
-        # AC_SAMP is then computed on -- and what the record-level keep sees -- is the
-        # record reduced to its supported alternates. A record left with no real allele is
-        # ref-only after the trim and falls to `AC_SAMP_MAX > min_samples` like any other.
-        if per_allele:
-            from .singletons import singleton_to_missing
-            singleton_to_missing(inp, recoded, min_samples=min_samples)
+        # Blank the singleton alternates' calls and trim them off first, so what AC_SAMP is
+        # then computed on -- and what the record-level keep sees -- is the record reduced
+        # to its supported alternates. A singleton `*` goes in either mode; a singleton real
+        # allele only per allele. A record left with no real allele is ref-only after the
+        # trim and falls to `AC_SAMP_MAX > min_samples` like any other.
+        from .singletons import singleton_to_missing
+        st = singleton_to_missing(inp, recoded, min_samples=min_samples,
+                                  alleles="all" if per_allele else "star")
+        if st["alts_recoded"] or st["stars_recoded"]:
             _trim_alt_alleles(recoded, trimmed)
             source = trimmed
         else:

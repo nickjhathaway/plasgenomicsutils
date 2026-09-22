@@ -72,6 +72,13 @@ trimming alleles no genotype carries:
 So the step adds 178 records — **31% more SNPs** — because a `*` sitting beside a real SNP is
 common in a joint callset and would otherwise take the whole record with it.
 
+**A singleton `*` is handled earlier, by `singleton_filter_add_ads`.** That step blanks the
+calls naming a `*` carried by `<= --min-samples` samples and trims the allele off, in both
+its record-level and its per-allele mode. The reasoning is the singleton filter's, not this
+one's: a deletion in one sample out of hundreds is a private observation like any other
+singleton, and leaving it on the record costs a SNP that everyone else carries. A `*` with
+more carriers than that is untouched and is this step's call.
+
 **It is still off by default**, because the recode discards a real observation. A `*` is a
 confident statement that the sequence is absent, not a failure to call: a site with 20 deleted
 samples and 5 carrying a variant comes out reading as though 20 samples could not be

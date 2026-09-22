@@ -216,12 +216,17 @@ def flag_outliers(df, mad_cutoff=DEFAULT_MAD_CUTOFF, column="singleton_rate",
 #: Counts returned by :func:`singleton_to_missing`.
 SINGLETON_RECODE_COUNTS = (
     "records", "records_with_singleton_alt", "records_all_alts_singleton",
-    "alts_recoded", "calls_recoded", "calls_fully_missing",
+    "alts_recoded", "records_with_singleton_star", "stars_recoded",
+    "calls_recoded", "calls_fully_missing",
 )
 
+#: What :func:`singleton_to_missing` is allowed to recode.
+SINGLETON_RECODE_MODES = ("real", "star", "all")
 
-def singleton_to_missing(inp: str, out: str, *, min_samples: int = 1) -> dict[str, int]:
-    """Null every genotype slot naming a **real** ALT carried by ``<= min_samples`` samples.
+
+def singleton_to_missing(inp: str, out: str, *, min_samples: int = 1,
+                         alleles: str = "real") -> dict[str, int]:
+    """Null every genotype slot naming an ALT carried by ``<= min_samples`` samples.
 
     The per-allele counterpart of the record-level singleton drop, and the singleton
     analogue of :func:`~plasgenomicsutils.lib.spanning_del.spanning_del_to_missing`. A
@@ -234,19 +239,48 @@ def singleton_to_missing(inp: str, out: str, *, min_samples: int = 1) -> dict[st
     The ALT column is left exactly as it was, so this is separable from the trim and can be
     checked on its own -- same contract as ``spanning_del_to_missing``.
 
-    ``*`` is not eligible. A spanning deletion is not a variant allele (it is why
-    ``spanning_del_filter`` exists and is default-off), so it is neither counted as support
-    nor recoded here; a singleton ``*`` is that filter's business, not this one's. A carrier
-    count is per sample: a sample carries allele *k* if its genotype names *k* anywhere, so a
-    ``1/2`` het is one carrier of each -- the same rule :func:`count_singletons` and
+    ``alleles`` says which alternates are eligible: ``"real"`` (the default) the bases and
+    indels only, ``"star"`` the spanning deletion ``*`` only, ``"all"`` both.
+
+    ``*`` is kept apart because it is not a variant allele: it says a deletion called
+    elsewhere covers the position (which is why ``spanning_del_filter`` exists and is
+    default-off), so it is never counted as *support* for a record. But a ``*`` carried by one
+    sample is still a private observation, and left on a record it takes the site out of any
+    SNP panel built with ``--snps-only`` -- a common SNP lost for one sample's deletion. The
+    ``"star"`` mode is the singleton-only counterpart of ``spanning_del_to_missing``: it
+    blanks the ``*`` calls of that one sample and nothing else, so the deletion is never
+    treated as support and a *common* deletion is left exactly as it was, for
+    ``spanning_del_filter`` to judge.
+
+    A ``*`` is recoded **only where a real alternate survives to be saved** -- one that is
+    not itself being recoded and that some sample carries. Blanking a ``*`` is worth doing
+    because it rescues a SNP from ``--snps-only``; where there is no such SNP there is nothing
+    to rescue, and the deletion is simply what the record holds. That covers the record whose
+    sole ALT is ``*`` (the same carve-out
+    :data:`~plasgenomicsutils.lib.allele_counts.ALT_SAMPLE_MAX_TAG` makes for the carrier
+    count: there the deletion is the variant and its own count decides it) and the record
+    whose real alternates are left uncarried. Either way the record is written through with
+    its ``*`` intact, so the recode can never be the thing that empties an ALT column --
+    which matters where something puts a dropped record back, since a whitelist rescue would
+    otherwise restore an allele-less record rather than the deletion it was asked to keep.
+
+    A carrier count is per sample: a sample carries allele
+    *k* if its genotype names *k* anywhere, so a ``1/2`` het is one carrier of each -- the
+    same rule :func:`count_singletons` and
     :func:`~plasgenomicsutils.lib.allele_counts.add_alt_sample_counts` use.
 
     Counts returned: ``records`` seen; ``records_with_singleton_alt`` (at least one real ALT
     recoded); ``records_all_alts_singleton`` (every real ALT was a singleton, so the record
-    becomes ref-only once trimmed); ``alts_recoded`` (real ALT alleles nulled across all
-    records); ``calls_recoded`` (sample-calls that lost at least one slot); and
+    becomes ref-only once trimmed -- judged over the real alternates whatever ``alleles``
+    says, since a surviving ``*`` is not a variant); ``alts_recoded`` (real ALT alleles nulled
+    across all records); ``records_with_singleton_star`` and ``stars_recoded`` (the same for
+    ``*``); ``calls_recoded`` (sample-calls that lost at least one slot); and
     ``calls_fully_missing`` (calls left with nothing).
     """
+    if alleles not in SINGLETON_RECODE_MODES:
+        raise ValueError(f"alleles must be one of {SINGLETON_RECODE_MODES}, got {alleles!r}")
+    do_real = alleles in ("real", "all")
+    do_star = alleles in ("star", "all")
     from cyvcf2 import VCF, Writer
 
     vcf = VCF(inp)
@@ -257,21 +291,35 @@ def singleton_to_missing(inp: str, out: str, *, min_samples: int = 1) -> dict[st
             st["records"] += 1
             alts = list(v.ALT)
             real = [i + 1 for i, a in enumerate(alts) if a != "*"]
-            if not real:
-                writer.write_record(v)          # star-only or no ALT: nothing to do here
+            star = [i + 1 for i, a in enumerate(alts) if a == "*"]
+            if not (real if do_real else []) and not (star if do_star else []):
+                writer.write_record(v)          # nothing this mode may touch
                 continue
 
             arr = v.genotype.array()[:, :-1]     # (samples, ploidy) allele indices
-            singleton = [k for k in real
-                         if int(np.isin(arr, k).any(axis=1).sum()) <= min_samples]
+            carriers = {k: int(np.isin(arr, k).any(axis=1).sum()) for k in real + star}
+            singleton = ([k for k in real if carriers[k] <= min_samples]
+                         if do_real else [])
+            # The `*` goes only if a real alternate survives to be saved by its going: one
+            # nobody is recoding and somebody carries. Otherwise there is no SNP being held
+            # out of `--snps-only` here, the deletion is simply what the record holds, and
+            # recoding it would empty the ALT column for nothing.
+            if do_star and any(k not in singleton and carriers[k] > 0 for k in real):
+                singleton += [k for k in star if carriers[k] <= min_samples]
             if not singleton:
                 writer.write_record(v)
                 continue
 
-            st["records_with_singleton_alt"] += 1
-            st["alts_recoded"] += len(singleton)
-            if len(singleton) == len(real):
-                st["records_all_alts_singleton"] += 1
+            real_hit = [k for k in singleton if k in real]
+            star_hit = [k for k in singleton if k in star]
+            if real_hit:
+                st["records_with_singleton_alt"] += 1
+                st["alts_recoded"] += len(real_hit)
+                if len(real_hit) == len(real):
+                    st["records_all_alts_singleton"] += 1
+            if star_hit:
+                st["records_with_singleton_star"] += 1
+                st["stars_recoded"] += len(star_hit)
 
             drop = set(singleton)
             gts = v.genotypes                    # [[a1, a2, ..., phased], ...]

@@ -33,8 +33,9 @@ def get_parser_singleton_filter_add_ads() -> argparse.ArgumentParser:
                    help="At a record with a singleton alternate beside a well-supported "
                         "one, blank the singleton alternate's calls and trim it off rather "
                         "than keeping the whole record. A record whose every real alternate "
-                        "is a singleton becomes ref-only and is dropped. `*` is never "
-                        "recoded here.")
+                        "is a singleton becomes ref-only and is dropped. A singleton `*` is "
+                        "recoded and trimmed in either mode; a `*` with more carriers is "
+                        "left for spanning_del_filter.")
     return p
 
 
