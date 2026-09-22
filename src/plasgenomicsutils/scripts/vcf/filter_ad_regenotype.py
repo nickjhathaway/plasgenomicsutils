@@ -38,6 +38,19 @@ def get_parser_filter_ad_regenotype() -> argparse.ArgumentParser:
                         "looks exactly like a filter that had nothing to do -- so by "
                         "default it is derived (the sum of AD, as singleton_filter_add_ads "
                         "computes it).")
+    p.add_argument("--singletons", choices=("none", "real", "star", "all"), default="star",
+                   help="After re-genotyping, blank the calls naming an allele carried by "
+                        "<= --singleton-min-samples samples and trim the allele off: "
+                        "`star` (the default) the spanning deletion `*` only, `real` the "
+                        "bases and indels only, `all` both, `none` to skip it. "
+                        "Re-genotyping moves the carrier counts the earlier singleton step "
+                        "judged, so an allele it saw with two carriers can have one here -- "
+                        "and a surviving singleton `*` costs the whole record at "
+                        "biallelic_snp_filter --snps-only. A `*` with more carriers is left "
+                        "for spanning_del_filter.")
+    p.add_argument("--singleton-min-samples", type=int, default=1,
+                   help="Carrier count at or below which --singletons blanks an allele "
+                        "(default: 1, i.e. private to one sample)")
     return p
 
 
@@ -50,7 +63,8 @@ def filter_ad_regenotype():
     _run(args.input_vcf, args.output_vcf,
          min_reads=args.min_reads, min_freq=args.min_freq, het_min_af=args.het_min_af,
          restrict_to_called=args.restrict_to_called_alleles, ploidy=args.ploidy,
-         add_ads=not args.no_add_ads)
+         add_ads=not args.no_add_ads, singletons=args.singletons,
+         singleton_min_samples=args.singleton_min_samples)
     print("Done.")
 
 

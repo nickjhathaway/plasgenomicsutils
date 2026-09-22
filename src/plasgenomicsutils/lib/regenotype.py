@@ -14,13 +14,17 @@ per-sample access on large cohorts. The re-genotyping matches
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import sys
+import tempfile
 from math import comb
 
 import numpy as np
 
 from .ad_genotype import clean_ad_matrix, regenotype_from_ad, regenotype_matrix
+from .singletons import SINGLETON_RECODE_MODES, singleton_allele_indices
 
 _MISS = np.iinfo(np.int32).min  # cyvcf2 sentinel for a missing integer FORMAT value
 
@@ -53,7 +57,9 @@ def filter_ad_regenotype(input_vcf: str, output_vcf: str, *, min_reads: int = 2,
                          restrict_to_called: bool = False,
                          drop_stale_likelihoods: bool = True,
                          ploidy: int | None = None,
-                         add_ads: bool = True) -> None:
+                         add_ads: bool = True,
+                         singletons: str | None = "star",
+                         singleton_min_samples: int = 1) -> None:
     """Clean AD and re-genotype every record; records lacking AD pass through.
 
     The frequency denominator is the ``ADS`` FORMAT field (summed genotyping
@@ -76,6 +82,24 @@ def filter_ad_regenotype(input_vcf: str, output_vcf: str, *, min_reads: int = 2,
     makes a caller's original-ploidy likelihoods inconsistent, which would break
     ``bcftools view --trim-alt-alleles`` later. They are unused downstream.
 
+    ``singletons`` blanks the calls naming a near-private allele **after** the re-genotyping,
+    and trims the allele off. ``"star"`` (the default) takes the spanning deletion ``*``
+    only, ``"real"`` the bases and indels only, ``"all"`` both, and ``None`` (or ``"none"``)
+    does nothing, on the same rule and the same threshold (``singleton_min_samples``) as
+    :func:`~plasgenomicsutils.lib.vcf_filters.singleton_add_ads` -- one shared
+    :func:`~plasgenomicsutils.lib.singletons.singleton_allele_indices` decides it, so the two
+    cannot drift apart.
+
+    ``"star"`` is the default because re-genotyping **moves the carrier counts the earlier
+    singleton step judged**. Calls that step saw are dropped here for thin depth and new ones are called
+    from the cleaned AD, so an allele carried by two samples at the singleton filter can be
+    carried by one afterwards. For a ``*`` that is expensive: ``biallelic_snp_filter
+    --snps-only`` rejects any record carrying one, so a SNP the whole cohort carries leaves
+    the panel because a single sample's deletion survived the re-genotyping. Running the
+    same rule again here, on the genotypes that will actually be filtered, closes that gap
+    without adding a step to the chain. A ``*`` with more carriers than the threshold is
+    still left alone, for ``spanning_del_filter`` to judge.
+
     ``ploidy`` sets the output genotype ploidy. ``None`` (default) keeps the
     conventional diploid coding used for *Plasmodium* (``0/1`` = mixed infection).
     When given it is validated against the input ploidy per record: a request
@@ -89,6 +113,14 @@ def filter_ad_regenotype(input_vcf: str, output_vcf: str, *, min_reads: int = 2,
     out_ploidy = 2 if ploidy is None else int(ploidy)
     if out_ploidy not in (1, 2):
         raise SystemExit("ERROR: --ploidy must be 1 (haploid) or 2 (diploid)")
+    if singletons == "none":
+        singletons = None
+    if singletons is not None and singletons not in SINGLETON_RECODE_MODES:
+        raise SystemExit(f"ERROR: --singletons must be one of "
+                         f"{', '.join(SINGLETON_RECODE_MODES)} or none; got {singletons!r}")
+    do_real = singletons in ("real", "all")
+    do_star = singletons in ("star", "all")
+    n_recoded = 0            # records that lost at least one allele to the singleton rule
 
     vcf = VCF(input_vcf)
     n_samples = len(vcf.samples)
@@ -158,6 +190,19 @@ def filter_ad_regenotype(input_vcf: str, output_vcf: str, *, min_reads: int = 2,
             for i in range(len(gts)):
                 gts[i] = [int(gt_a[i]), int(gt_b[i]), gts[i][-1]]
 
+        if singletons is not None and v.ALT:
+            # on the genotypes just written, not the ones the caller or an earlier step saw
+            arr = np.array([[a for a in g[:-1]] for g in gts], dtype=np.int64)
+            drop = set(singleton_allele_indices(list(v.ALT), arr,
+                                                min_samples=singleton_min_samples,
+                                                real=do_real, star=do_star))
+            if drop:
+                n_recoded += 1
+                for g in gts:
+                    for k in range(len(g) - 1):
+                        if g[k] in drop:
+                            g[k] = -1
+
         v.set_format("AD", cleaned.astype(np.int32))
         v.set_format("ADS", new_ads)
         v.genotypes = gts
@@ -173,3 +218,21 @@ def filter_ad_regenotype(input_vcf: str, output_vcf: str, *, min_reads: int = 2,
 
     out.close()
     vcf.close()
+
+    if n_recoded:
+        # The blanked allele is still in the ALT column until something trims it -- the same
+        # split `singleton_to_missing` and `spanning_del_filter` keep, and the same trim.
+        # Imported here rather than at module scope: `vcf_filters` is the higher layer.
+        from .vcf_filters import _trim_alt_alleles, out_flag
+        sys.stderr.write(
+            f"NOTE: singleton alleles ({singletons}) blanked on {n_recoded} record(s) after "
+            "re-genotyping; trimming them from ALT\n")
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=os.path.splitext(output_vcf)[1] or ".bcf", delete=False).name
+        try:
+            shutil.copyfile(output_vcf, tmp)
+            _trim_alt_alleles(tmp, output_vcf, out_fmt=out_flag(output_vcf))
+        finally:
+            for suffix in ("", ".csi"):
+                if os.path.exists(tmp + suffix):
+                    os.remove(tmp + suffix)

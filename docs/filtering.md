@@ -79,6 +79,15 @@ one's: a deletion in one sample out of hundreds is a private observation like an
 singleton, and leaving it on the record costs a SNP that everyone else carries. A `*` with
 more carriers than that is untouched and is this step's call.
 
+**Re-genotyping can put a singleton `*` back, so it cleans up after itself.**
+`filter_ad_regenotype` re-derives genotypes from the cleaned allele depths, which moves the
+carrier counts the singleton step judged: an allele it saw with two carriers can have one
+afterwards. Its `singletons` param applies the same rule again to the genotypes that will
+actually be filtered, without adding a step to the chain, and defaults to `"star"` — the step
+that creates the problem is the one that fixes it. On a 249-sample *P. falciparum* callset
+this recovered a further 330 SNP records that a surviving lone `*` would have taken out of
+the panel. Set `"singletons": "none"` to skip it, `"real"` or `"all"` to widen it.
+
 **It is still off by default**, because the recode discards a real observation. A `*` is a
 confident statement that the sequence is absent, not a failure to call: a site with 20 deleted
 samples and 5 carrying a variant comes out reading as though 20 samples could not be

@@ -224,6 +224,37 @@ SINGLETON_RECODE_COUNTS = (
 SINGLETON_RECODE_MODES = ("real", "star", "all")
 
 
+def singleton_allele_indices(alts, allele_array, *, min_samples: int = 1,
+                             real: bool = True, star: bool = True) -> list[int]:
+    """Which ALT indices (1-based) are singletons that this mode may blank.
+
+    The one place the rule lives, so a caller re-genotyping in memory
+    (:func:`~plasgenomicsutils.lib.regenotype.filter_ad_regenotype`) and one rewriting a file
+    (:func:`singleton_to_missing`) cannot drift apart.
+
+    ``alts`` is the ALT list and ``allele_array`` the ``(samples, ploidy)`` array of allele
+    indices, missing slots negative. A sample carries allele *k* if its genotype names *k*
+    anywhere, so a ``1/2`` het is one carrier of each.
+
+    ``star`` is honoured only where a real alternate survives to be saved by the ``*``
+    going: one nobody is blanking and somebody carries. Blanking a ``*`` earns its keep by
+    rescuing a SNP from ``--snps-only``; with no such SNP there is nothing to rescue, the
+    deletion is simply what the record holds, and removing it would empty the ALT column for
+    nothing. See :data:`~plasgenomicsutils.lib.allele_counts.ALT_SAMPLE_MAX_TAG`, which makes
+    the same carve-out for the carrier count.
+    """
+    real_idx = [i + 1 for i, a in enumerate(alts) if a != "*"]
+    star_idx = [i + 1 for i, a in enumerate(alts) if a == "*"]
+    if not (real_idx if real else []) and not (star_idx if star else []):
+        return []
+    carriers = {k: int(np.isin(allele_array, k).any(axis=1).sum())
+                for k in real_idx + star_idx}
+    out = [k for k in real_idx if carriers[k] <= min_samples] if real else []
+    if star and any(k not in out and carriers[k] > 0 for k in real_idx):
+        out += [k for k in star_idx if carriers[k] <= min_samples]
+    return out
+
+
 def singleton_to_missing(inp: str, out: str, *, min_samples: int = 1,
                          alleles: str = "real") -> dict[str, int]:
     """Null every genotype slot naming an ALT carried by ``<= min_samples`` samples.
@@ -291,27 +322,15 @@ def singleton_to_missing(inp: str, out: str, *, min_samples: int = 1,
             st["records"] += 1
             alts = list(v.ALT)
             real = [i + 1 for i, a in enumerate(alts) if a != "*"]
-            star = [i + 1 for i, a in enumerate(alts) if a == "*"]
-            if not (real if do_real else []) and not (star if do_star else []):
-                writer.write_record(v)          # nothing this mode may touch
-                continue
-
             arr = v.genotype.array()[:, :-1]     # (samples, ploidy) allele indices
-            carriers = {k: int(np.isin(arr, k).any(axis=1).sum()) for k in real + star}
-            singleton = ([k for k in real if carriers[k] <= min_samples]
-                         if do_real else [])
-            # The `*` goes only if a real alternate survives to be saved by its going: one
-            # nobody is recoding and somebody carries. Otherwise there is no SNP being held
-            # out of `--snps-only` here, the deletion is simply what the record holds, and
-            # recoding it would empty the ALT column for nothing.
-            if do_star and any(k not in singleton and carriers[k] > 0 for k in real):
-                singleton += [k for k in star if carriers[k] <= min_samples]
+            singleton = singleton_allele_indices(alts, arr, min_samples=min_samples,
+                                                 real=do_real, star=do_star)
             if not singleton:
                 writer.write_record(v)
                 continue
 
             real_hit = [k for k in singleton if k in real]
-            star_hit = [k for k in singleton if k in star]
+            star_hit = [k for k in singleton if k not in real]
             if real_hit:
                 st["records_with_singleton_alt"] += 1
                 st["alts_recoded"] += len(real_hit)
