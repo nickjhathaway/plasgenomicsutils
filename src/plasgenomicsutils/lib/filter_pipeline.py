@@ -566,6 +566,34 @@ def _step_defaults(step) -> dict:
             if p.kind in kinds and p.default is not inspect.Parameter.empty}
 
 
+def preflight(input_path: str, config: dict) -> None:
+    """Checks that need the **input** as well as the config, run before anything is written.
+
+    :func:`validate_config` catches everything knowable from the config alone. Some things
+    are only knowable once the callset is in hand -- whether a step's required companion
+    file exists, whether the step has anything to do at all -- and finding out at step nine
+    costs eight steps of output and a wait. This is where those go.
+
+    A check belongs here only if it is cheap (a header read, a stat call): the point is to
+    fail in the first second of a run, not to pre-compute it.
+    """
+    from .shifted_indels import _header_reference, resolve_needs_reference
+
+    for step in config.get("steps", []):
+        if step.get("enabled", True) is False or step.get("report"):
+            continue
+        if step["name"] == "resolve_shifted_indels":
+            params = step.get("params") or {}
+            problem = resolve_needs_reference(input_path, params.get("reference"))
+            if problem:
+                raise SystemExit(
+                    f"ERROR: step 'resolve_shifted_indels' {problem}\n"
+                    "  It rebuilds a cluster's haplotypes from the reference bases between "
+                    "its records, so it\n  cannot run without one. Set \"reference\" in the "
+                    "step's params (or --reference when\n  running the step alone), or "
+                    "disable the step with \"enabled\": false.")
+
+
 def effective_config(config: dict, **meta) -> dict:
     """The config as it will actually run, with every unset parameter filled in.
 
@@ -662,6 +690,7 @@ def run_pipeline(input_path: str, outdir: str, config: dict,
     nothing to rescue is the normal case and most steps are that.
     """
     validate_config(config)
+    preflight(input_path, config)
     # Every path the run depends on, checked before a single output is written: the input
     # callset and every input file a step names. A wrong path to a late step should cost
     # nothing, not eight steps of output (the failure that prompted this).

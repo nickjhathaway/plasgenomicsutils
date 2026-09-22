@@ -220,3 +220,91 @@ def test_the_step_runs_first_in_the_default_chain():
         assert names.index("resolve_shifted_indels") < names.index(later)
     assert "resolve_shifted_indels" in P.STEPS
     P.validate_config(P.DEFAULT_CONFIG)
+
+
+# ---- failing in the first second, not at step nine -------------------------------------
+
+def _gatk_shaped(tmp_path, name="p.vcf", reference=None):
+    """A callset with FORMAT/PID, so the step has work to do."""
+    v = _vcf(tmp_path, CVIET, {"s1": [("0/1", "0|1")] * 3}, name=name)
+    if reference is not None:
+        txt = pathlib.Path(v).read_text().replace(
+            "##fileformat=VCFv4.2\n", f"##fileformat=VCFv4.2\n##reference={reference}\n", 1)
+        pathlib.Path(v).write_text(txt)
+    return v
+
+
+def test_the_pipeline_refuses_up_front_when_the_step_has_no_reference(tmp_path):
+    """The failure used to come at the step, after every earlier step had written output."""
+    v = _gatk_shaped(tmp_path)
+    cfg = {"steps": [{"name": "no_alt_filter"},
+                     {"name": "resolve_shifted_indels", "params": {"reference": None}}]}
+    with pytest.raises(SystemExit) as e:
+        P.run_pipeline(v, str(tmp_path / "run"), cfg, emit_snp_bed=False)
+    msg = str(e.value)
+    assert "resolve_shifted_indels" in msg and "has no reference" in msg
+    assert '"enabled": false' in msg                      # and how to proceed without it
+    assert not (tmp_path / "run" / "01_no_alt_filter.bcf").exists()   # nothing was written
+
+
+def test_a_reference_that_does_not_exist_is_named(tmp_path):
+    v = _gatk_shaped(tmp_path)
+    cfg = {"steps": [{"name": "resolve_shifted_indels",
+                      "params": {"reference": "/no/such/ref.fa"}}]}
+    with pytest.raises(SystemExit, match="does not exist: /no/such/ref.fa"):
+        P.run_pipeline(v, str(tmp_path / "run"), cfg, emit_snp_bed=False)
+
+
+def test_a_header_reference_that_is_not_on_this_machine_is_named(tmp_path):
+    """A callset called elsewhere carries its own ##reference path, which is the usual way
+    this bites: the config looks fine and the path is somebody else's."""
+    v = _gatk_shaped(tmp_path, reference="/elsewhere/Pf3D7.fasta")
+    cfg = {"steps": [{"name": "resolve_shifted_indels"}]}
+    with pytest.raises(SystemExit, match="not on this machine"):
+        P.run_pipeline(v, str(tmp_path / "run"), cfg, emit_snp_bed=False)
+
+
+def test_the_headers_reference_is_accepted_when_it_is_there(tmp_path, ref_fa):
+    v = _gatk_shaped(tmp_path, reference=ref_fa)
+    cfg = {"steps": [{"name": "resolve_shifted_indels"}]}
+    tally = P.run_pipeline(v, str(tmp_path / "run"), cfg, emit_snp_bed=False)
+    assert tally[-1]["variants"] == 4                     # the block was rebuilt
+
+
+def test_a_callset_with_no_phasing_needs_no_reference(tmp_path):
+    """No FORMAT/PID means no clusters to rebuild, so the step is a no-op -- refusing it
+    for want of a reference would turn a good bcftools run into an error."""
+    hdr = ["##fileformat=VCFv4.2", f"##contig=<ID=chr1,length={len(REF)}>",
+           '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1",
+           "chr1\t4\t.\tG\tT\t500\t.\t.\tGT\t0/1"]
+    v = tmp_path / "nophase.vcf"
+    v.write_text("\n".join(hdr) + "\n")
+    cfg = {"steps": [{"name": "resolve_shifted_indels"}]}
+    tally = P.run_pipeline(str(v), str(tmp_path / "run"), cfg, emit_snp_bed=False)
+    assert tally[-1]["variants"] == 1
+
+
+def test_a_disabled_step_is_not_preflighted(tmp_path):
+    v = _gatk_shaped(tmp_path)
+    cfg = {"steps": [{"name": "resolve_shifted_indels", "enabled": False},
+                     {"name": "no_alt_filter"}]}
+    tally = P.run_pipeline(v, str(tmp_path / "run"), cfg, emit_snp_bed=False)
+    assert any(t.get("skipped") for t in tally)
+
+
+def test_the_provenance_tag_is_declared_as_a_list(tmp_path, ref_fa):
+    """One position per source record, and a cluster has at least two, so `Number=1` makes
+    every derived record malformed. A strict reader refuses it: SeqArray stops the GDS
+    build with "INFO ID 'SHIFTED' should have 1 value(s) but receives 2"."""
+    out = str(tmp_path / "o.bcf")
+    SI.resolve_shifted_indels(_vcf(tmp_path, CVIET, {"s1": [("1/1", "1|1")] * 3}), out,
+                              reference=ref_fa)
+    hdr = subprocess.run(["bcftools", "view", "-h", out], stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True).stdout
+    line = next(l for l in hdr.splitlines() if "ID=SHIFTED" in l)
+    assert "Number=.," in line and "Number=1," not in line
+    # and the value really is several, so the declaration is the honest one
+    got = subprocess.run(["bcftools", "query", "-f", "%SHIFTED\n", out],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
+    assert all(v == "2,6,9" for v in got.split())

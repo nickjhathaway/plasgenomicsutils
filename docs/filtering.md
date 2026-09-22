@@ -168,7 +168,19 @@ SNPs.
 
 A callset without `FORMAT/PID` — not GATK's, or phasing stripped — is passed through with a
 note. The step needs the reference FASTA for the bases between a cluster's records and
-takes it from the header's `##reference` line unless `--reference` is given.
+takes it from the header's `##reference` line unless `--reference` is given. A pipeline run
+checks this **before any step writes**, so a missing reference fails in the first second
+rather than at step nine:
+
+```
+ERROR: step 'resolve_shifted_indels' has no reference: none was given and the callset's header names none
+  It rebuilds a cluster's haplotypes from the reference bases between its records, so it
+  cannot run without one. Set "reference" in the step's params (or --reference when
+  running the step alone), or disable the step with "enabled": false.
+```
+
+The check is skipped where the step has nothing to do (no `FORMAT/PID`) or is disabled, so
+a bcftools callset is never refused for want of a reference it would not read.
 
 ## The caller's own FILTER column is its own step
 

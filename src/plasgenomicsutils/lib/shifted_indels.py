@@ -138,6 +138,33 @@ def _header_reference(vcf) -> str | None:
     return None
 
 
+def resolve_needs_reference(inp: str, reference: str | None) -> str | None:
+    """Why this callset could not be resolved for want of a reference, or None if it can.
+
+    Used by the pipeline's preflight to fail in the first second rather than at the step.
+    A callset with no ``FORMAT/PID`` has no clusters to rebuild, so the step is a no-op and
+    needs no reference: saying otherwise would refuse a perfectly good bcftools run.
+    """
+    import pysam
+
+    try:
+        vcf = pysam.VariantFile(inp)
+    except (OSError, ValueError):            # unreadable input is somebody else's error
+        return None
+    if "PID" not in vcf.header.formats:
+        return None
+    if reference:
+        return (None if os.path.exists(reference)
+                else f"was given a reference that does not exist: {reference}")
+    header_ref = _header_reference(vcf)
+    if header_ref and os.path.exists(header_ref):
+        return None
+    if header_ref:
+        return (f"has no reference: the callset's header names {header_ref}, "
+                "which is not on this machine")
+    return "has no reference: none was given and the callset's header names none"
+
+
 def resolve_shifted_indels(inp: str, out: str, *, reference: str | None = None,
                            max_span: int = 50, max_unresolved: int = 1) -> dict:
     """Replace balanced indel clusters with the SNPs they encode. Returns counts.
@@ -190,7 +217,12 @@ def _resolve(vcf, inp, out, ref_path, max_span, max_unresolved, counts):
 
     fa = pysam.FastaFile(ref_path)
     hdr = vcf.header.copy()
-    hdr.add_line('##INFO=<ID=SHIFTED,Number=1,Type=String,Description="Derived from GATK '
+    # Number=. , not 1: the value is one position per source record and a cluster has at
+    # least two, so a comma-separated list under Number=1 is a malformed record. bcftools
+    # writes and reads it either way, but a strict reader is right to refuse it -- SeqArray
+    # stops with "INFO ID 'SHIFTED' should have 1 value(s) but receives 2", which is how
+    # this surfaced.
+    hdr.add_line('##INFO=<ID=SHIFTED,Number=.,Type=String,Description="Derived from GATK '
                  'balanced-indel records at these positions (resolve_shifted_indels)">')
     tmp = tempfile.NamedTemporaryFile(suffix=".vcf", delete=False).name
     writer = pysam.VariantFile(tmp, "w", header=hdr)
